@@ -58,6 +58,17 @@ class Deployment(Base):
     idempotency_key: Mapped[str | None] = mapped_column(
         String(200), unique=True, nullable=True, index=True
     )
+    # The resolved PolicyConfig (see app/policy/config.py) this deployment was created
+    # with - always a fully-resolved dict (defaults already applied), never partial,
+    # so a worker reading it back never needs to know about env-var defaults. Stored
+    # per-deployment (not a shared/global row) so each rollout's thresholds stay fixed
+    # even if the global defaults change later.
+    policy_config: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # How many consecutive automated evaluate cycles have come back INCONCLUSIVE.
+    # Reset implicitly by never being touched once a PASS/FAIL action fires (those
+    # move the deployment out of the loop that increments this). Persisted (not
+    # in-memory) so a worker restart doesn't forget how many retries have happened.
+    inconclusive_retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=_utcnow
     )
@@ -102,6 +113,77 @@ class DeploymentEvent(Base):
     )
 
     deployment: Mapped["Deployment"] = relationship(back_populates="events")
+
+
+class PolicyEvaluationResult(enum.StrEnum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    # No verdict is possible - e.g. not enough traffic yet, or (for recall) no
+    # actual_label has been backfilled. Deliberately distinct from FAIL: a policy
+    # engine or human must never treat "couldn't tell" as "looked fine".
+    INCONCLUSIVE = "INCONCLUSIVE"
+
+
+class PolicyEvaluation(Base):
+    """One row per individual policy check from a single POST .../evaluate call
+    (e.g. "minimum_requests", "latency_p95_increase", "max_error_rate",
+    "minimum_recall") - never an aggregate. The overall PASS/FAIL/INCONCLUSIVE verdict
+    is derived from these rows (see app/policy/engine.py's overall_result), not stored
+    separately.
+    """
+
+    __tablename__ = "policy_evaluations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
+    deployment_id: Mapped[str] = mapped_column(
+        ForeignKey("deployments.id"), nullable=False, index=True
+    )
+    policy_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    metric_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    observed_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    result: Mapped[PolicyEvaluationResult] = mapped_column(
+        Enum(PolicyEvaluationResult, native_enum=False, length=16), nullable=False
+    )
+    evaluated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), default=_utcnow, index=True
+    )
+
+
+class BenchmarkRunStatus(enum.StrEnum):
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class BenchmarkRun(Base):
+    """One row per dashboard-triggered `scripts.benchmarks.run_benchmark` subprocess
+    (see app/benchmarks/service.py). Deliberately independent of Deployment - a
+    benchmark run creates its own isolated Deployment internally (model_name=
+    "benchmark-<scenario>"), but this row is what the dashboard polls for
+    RUNNING/COMPLETED/FAILED status and, once finished, the parsed report.
+    """
+
+    __tablename__ = "benchmark_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
+    scenario: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    status: Mapped[BenchmarkRunStatus] = mapped_column(
+        Enum(BenchmarkRunStatus, native_enum=False, length=16),
+        nullable=False,
+        default=BenchmarkRunStatus.RUNNING,
+    )
+    # The full Sprint-9 BenchmarkResult JSON (see scripts/benchmarks/report.py),
+    # populated once the subprocess exits 0. None while RUNNING or if it FAILED
+    # before producing a report.
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # Subprocess stderr/stdout tail, populated only on FAILED, for debugging without
+    # needing to dig through container logs.
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), default=_utcnow
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class PredictionMetric(Base):

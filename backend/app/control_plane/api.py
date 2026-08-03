@@ -1,4 +1,4 @@
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from sqlalchemy.orm import Session
@@ -13,9 +13,15 @@ from app.control_plane.schemas import (
     MetricIn,
     MetricsOut,
 )
-from app.control_plane.service import DeploymentNotFoundError
+from app.control_plane.service import (
+    AlreadyAtFinalStageError,
+    DeploymentNotActiveError,
+    DeploymentNotFoundError,
+)
 from app.control_plane.state_machine import InvalidTransitionError
 from app.db import get_db
+
+TriggeredByDep = Literal["manual", "automatic"]
 
 router = APIRouter(prefix="/api/deployments", tags=["deployments"])
 router_config_router = APIRouter(prefix="/api/router-config", tags=["router-config"])
@@ -45,6 +51,7 @@ async def create_deployment(
         canary_version=payload.canary_version,
         canary_weight=payload.canary_weight,
         idempotency_key=idempotency_key,
+        policy_config=payload.policy_config,
     )
     response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
     return DeploymentOut.model_validate(deployment)
@@ -67,7 +74,10 @@ def get_deployment(deployment_id: str, db: DbDep) -> DeploymentOut:
 
 @router.post("/{deployment_id}/promote")
 async def promote_deployment(
-    deployment_id: str, db: DbDep, router_gateway: RouterGatewayDep
+    deployment_id: str,
+    db: DbDep,
+    router_gateway: RouterGatewayDep,
+    triggered_by: TriggeredByDep = "manual",
 ) -> DeploymentOut:
     try:
         deployment = service.get_deployment(db, deployment_id)
@@ -75,7 +85,9 @@ async def promote_deployment(
         raise _not_found(deployment_id) from exc
 
     try:
-        deployment = await service.promote_deployment(db, router_gateway, deployment)
+        deployment = await service.promote_deployment(
+            db, router_gateway, deployment, triggered_by=triggered_by
+        )
     except InvalidTransitionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -84,7 +96,10 @@ async def promote_deployment(
 
 @router.post("/{deployment_id}/rollback")
 async def rollback_deployment(
-    deployment_id: str, db: DbDep, router_gateway: RouterGatewayDep
+    deployment_id: str,
+    db: DbDep,
+    router_gateway: RouterGatewayDep,
+    triggered_by: TriggeredByDep = "manual",
 ) -> DeploymentOut:
     try:
         deployment = service.get_deployment(db, deployment_id)
@@ -92,8 +107,54 @@ async def rollback_deployment(
         raise _not_found(deployment_id) from exc
 
     try:
-        deployment = await service.rollback_deployment(db, router_gateway, deployment)
+        deployment = await service.rollback_deployment(
+            db, router_gateway, deployment, triggered_by=triggered_by
+        )
     except InvalidTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return DeploymentOut.model_validate(deployment)
+
+
+@router.post("/{deployment_id}/advance-traffic")
+async def advance_traffic(
+    deployment_id: str, db: DbDep, router_gateway: RouterGatewayDep
+) -> DeploymentOut:
+    """Used exclusively by the automated worker (app/worker/) to move the canary to
+    the next traffic stage after a PASS evaluation. Rejects (409) if the deployment
+    isn't CANARY_RUNNING/EVALUATING (e.g. a human already acted on it) or if the
+    canary is already at 100% (use /promote instead)."""
+    try:
+        deployment = service.get_deployment(db, deployment_id)
+    except DeploymentNotFoundError as exc:
+        raise _not_found(deployment_id) from exc
+
+    try:
+        deployment = await service.advance_traffic(db, router_gateway, deployment)
+    except DeploymentNotActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except AlreadyAtFinalStageError as exc:
+        raise HTTPException(
+            status_code=409, detail=f"{exc} - use /promote instead"
+        ) from exc
+
+    return DeploymentOut.model_validate(deployment)
+
+
+@router.post("/{deployment_id}/record-inconclusive")
+def record_inconclusive(deployment_id: str, db: DbDep) -> DeploymentOut:
+    """Used exclusively by the automated worker when an evaluation comes back
+    INCONCLUSIVE: bumps the retry counter and freezes the deployment into
+    INCONCLUSIVE status once policy_config.max_inconclusive_retries is exceeded."""
+    try:
+        deployment = service.get_deployment(db, deployment_id)
+    except DeploymentNotFoundError as exc:
+        raise _not_found(deployment_id) from exc
+
+    max_retries = service.get_policy_config(deployment).max_inconclusive_retries
+    try:
+        deployment = service.record_inconclusive(db, deployment, max_retries)
+    except DeploymentNotActiveError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     return DeploymentOut.model_validate(deployment)

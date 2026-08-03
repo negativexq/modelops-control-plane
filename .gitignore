@@ -12,6 +12,9 @@ backend/modelops.db
 backend/data/
 backend/artifacts/
 
+# Benchmark run output (reproducible via make benchmark-*)
+backend/benchmark-results/
+
 # Node / Next.js
 frontend/node_modules/
 frontend/.next/

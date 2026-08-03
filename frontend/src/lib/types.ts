@@ -100,3 +100,72 @@ export interface ModelVersionEvaluation {
   roc_auc?: number;
   [key: string]: unknown;
 }
+
+// --- Benchmarks --------------------------------------------------------------
+
+export type BenchmarkScenarioKey =
+  | "baseline"
+  | "latency-failure"
+  | "error-failure"
+  | "quality-failure"
+  | "success";
+
+export interface ScenarioInfo {
+  key: BenchmarkScenarioKey;
+  title: string;
+  description: string;
+  expected_outcome: string;
+  // Non-null only for quality-failure/success: those scenarios use deliberately
+  // loosened thresholds and (for success) synthetic ground-truth backfill, which is
+  // not real platform behavior - see backend/scripts/benchmarks/scenarios.py.
+  synthetic_disclaimer: string | null;
+}
+
+export type BenchmarkRunStatus = "RUNNING" | "COMPLETED" | "FAILED";
+
+// Mirrors backend/scripts/benchmarks/report.py's LoadTestResult dataclass.
+export interface LoadTestResult {
+  total_requests: number;
+  total_failures: number;
+  requests_per_second: number;
+  error_rate: number;
+  p50_ms: number;
+  p95_ms: number;
+  p99_ms: number;
+  duration_seconds: number;
+}
+
+// Mirrors backend/scripts/benchmarks/report.py's BenchmarkResult dataclass - this is
+// what BenchmarkRun.result holds once a run COMPLETEs (see save_json_report).
+export interface BenchmarkResult {
+  scenario: string;
+  description: string;
+  expected_outcome: string;
+  observed_outcome: string;
+  outcome_matches_expectation: boolean;
+  deployment_id: string;
+  model_name: string;
+  started_at: string | null;
+  final_status: string;
+  load: LoadTestResult | null;
+  time_to_detect_seconds: number | null;
+  time_to_action_seconds: number | null;
+  notes: string[];
+  run_at: string;
+}
+
+export interface BenchmarkRun {
+  id: string;
+  scenario: string;
+  status: BenchmarkRunStatus;
+  started_at: string;
+  completed_at: string | null;
+  result: BenchmarkResult | null;
+  error_message: string | null;
+}
+
+export interface RunBenchmarkRequest {
+  scenario: string;
+  duration_seconds?: number;
+  max_wait_seconds?: number;
+}

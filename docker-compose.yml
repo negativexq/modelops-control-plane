@@ -11,9 +11,20 @@ services:
       MODELOPS_ENVIRONMENT: development
       MODELOPS_DATABASE_URL: sqlite:///./modelops.db
       CONTROL_PLANE_ROUTER_BASE_URL: http://router:8000
+      # Dashboard-triggered benchmarks (app/benchmarks/): spawns
+      # scripts.benchmarks.run_benchmark as a subprocess of this same container, so
+      # its docker-internal service addresses need to be told explicitly - the
+      # script's own CLI defaults (localhost:8080 etc.) are for host/Makefile use.
+      BENCHMARK_ROUTER_URL: http://router:8000
+      BENCHMARK_CONTROL_PLANE_URL: http://localhost:8000
+      BENCHMARK_LATENCY_FAULT_URL: http://model-serving-v2-good-latency-fault:8000
+      BENCHMARK_ERROR_FAULT_URL: http://model-serving-v2-good-error-fault:8000
     command: >
       sh -c "alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    depends_on:
+      - model-serving-v2-good-latency-fault
+      - model-serving-v2-good-error-fault
 
   frontend:
     build:
@@ -73,6 +84,44 @@ services:
       ENVIRONMENT: development
     command: uvicorn app.serving.main:app --host 0.0.0.0 --port 8000 --reload
 
+  # Benchmark-only fault-injectable instances (Sprint 9, made runtime-toggleable in
+  # the dashboard-benchmarks follow-up sprint): same v2-good artifact as
+  # model-serving-v2-good, but exposed to the router under a distinct version label
+  # (see router's ROUTER_VERSION_HOSTS below) so benchmarks can point a canary at
+  # "broken" traffic without touching the real v2-good service used elsewhere.
+  # Fault injection is OFF by default (injected_latency_ms/injected_error_rate both
+  # 0) - these containers run continuously like any other; a benchmark run turns a
+  # fault on via PUT /fault-injection right before its load phase and always turns
+  # it back off in a finally block afterward (see scripts/benchmarks/run_benchmark.py).
+  # No docker CLI/socket access is needed anywhere to run a benchmark, on purpose.
+  model-serving-v2-good-latency-fault:
+    build:
+      context: ./backend
+    ports:
+      - "8004:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/artifacts:/app/artifacts:ro
+    environment:
+      MODEL_NAME: fraud-model
+      MODEL_VERSION: v2-good
+      ENVIRONMENT: development
+    command: uvicorn app.serving.main:app --host 0.0.0.0 --port 8000 --reload
+
+  model-serving-v2-good-error-fault:
+    build:
+      context: ./backend
+    ports:
+      - "8005:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/artifacts:/app/artifacts:ro
+    environment:
+      MODEL_NAME: fraud-model
+      MODEL_VERSION: v2-good
+      ENVIRONMENT: development
+    command: uvicorn app.serving.main:app --host 0.0.0.0 --port 8000 --reload
+
   # Weighted traffic router: splits /router/predict across a list of {version, weight}
   # targets. version_hosts (below) is the router's own deployment topology - the
   # control plane (the `backend` service) only ever pushes "version -> weight" via
@@ -88,7 +137,9 @@ services:
       ROUTER_MODEL_NAME: fraud-model
       ROUTER_VERSION_HOSTS: >-
         {"v1": "model-serving-v1:8000", "v2-good": "model-serving-v2-good:8000",
-        "v2-quality-bad": "model-serving-v2-quality-bad:8000"}
+        "v2-quality-bad": "model-serving-v2-quality-bad:8000",
+        "v2-good-latency-fault": "model-serving-v2-good-latency-fault:8000",
+        "v2-good-error-fault": "model-serving-v2-good-error-fault:8000"}
       ROUTER_INITIAL_TARGETS: >-
         [{"version": "v1", "weight": 0.9}, {"version": "v2-good", "weight": 0.1}]
       ROUTER_CONTROL_PLANE_URL: http://backend:8000
@@ -98,4 +149,19 @@ services:
       - model-serving-v2-good
       - backend
 
-  # Future sprints will add: automated canary metrics/evaluation, etc.
+  # Automated promotion/rollback worker (Sprint 8): a plain client of the control
+  # plane's own REST API (evaluate/advance-traffic/promote/rollback/
+  # record-inconclusive) - no direct DB access, no in-memory rollout state, so
+  # restarting it just resumes from whatever the control plane currently reports.
+  worker:
+    build:
+      context: ./backend
+    volumes:
+      - ./backend/app:/app/app
+    environment:
+      WORKER_CONTROL_PLANE_BASE_URL: http://backend:8000
+      WORKER_POLL_INTERVAL_SECONDS: "15"
+    command: python -m app.worker.main
+    depends_on:
+      - backend
+      - router

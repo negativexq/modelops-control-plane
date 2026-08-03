@@ -37,5 +37,20 @@ class ServingSettings(BaseSettings):
     def is_production(self) -> bool:
         return self.environment.lower() == PRODUCTION_ENVIRONMENT
 
+    def set_fault_injection(self, latency_ms: int, error_rate: float) -> None:
+        """Runtime mutation (see PUT /fault-injection in app/serving/main.py) - lets
+        a benchmark turn a fault on/off for the duration of one scenario without
+        restarting the container. Re-enforces the production guard on every call,
+        not just at construction: pydantic's model_validator only runs when the
+        object is built, so a naive `settings.injected_latency_ms = x` after
+        construction would silently bypass it.
+        """
+        if self.is_production:
+            self.injected_latency_ms = 0
+            self.injected_error_rate = 0.0
+            return
+        self.injected_latency_ms = latency_ms
+        self.injected_error_rate = error_rate
+
 
 serving_settings = ServingSettings()

@@ -9,7 +9,12 @@ from pydantic import ValidationError
 from app.serving.config import ServingSettings, serving_settings
 from app.serving.fault_injection import apply_fault_injection
 from app.serving.model_loader import LoadedModel, load_model
-from app.serving.schemas import PredictionResponse, build_request_model
+from app.serving.schemas import (
+    FaultInjectionIn,
+    FaultInjectionOut,
+    PredictionResponse,
+    build_request_model,
+)
 
 logger = logging.getLogger("model_serving")
 
@@ -54,6 +59,33 @@ def create_app(settings: ServingSettings) -> FastAPI:
             "model_version": settings.model_version,
             "features": loaded_model.features,
         }
+
+    @app.get("/fault-injection", response_model=FaultInjectionOut)
+    def get_fault_injection() -> FaultInjectionOut:
+        return FaultInjectionOut(
+            latency_ms=settings.injected_latency_ms,
+            error_rate=settings.injected_error_rate,
+            environment=settings.environment,
+        )
+
+    @app.put("/fault-injection", response_model=FaultInjectionOut)
+    def put_fault_injection(payload: FaultInjectionIn) -> FaultInjectionOut:
+        """Lets a benchmark turn a fault on/off for this container without a
+        restart (see backend/scripts/benchmarks/run_benchmark.py). Forbidden in
+        production - `settings.is_production` is enforced here (before the update
+        is even attempted) AND inside set_fault_injection itself (defense in
+        depth, same pattern as apply_fault_injection's own is_production check).
+        """
+        if settings.is_production:
+            raise HTTPException(
+                status_code=403, detail="Fault injection is disabled in production"
+            )
+        settings.set_fault_injection(payload.latency_ms, payload.error_rate)
+        return FaultInjectionOut(
+            latency_ms=settings.injected_latency_ms,
+            error_rate=settings.injected_error_rate,
+            environment=settings.environment,
+        )
 
     @app.post("/predict", response_model=PredictionResponse)
     def predict(payload: dict[str, Any]) -> PredictionResponse:

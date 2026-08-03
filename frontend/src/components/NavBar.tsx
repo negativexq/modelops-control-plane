@@ -7,6 +7,7 @@ const LINKS = [
   { href: "/", label: "Overview" },
   { href: "/models", label: "Models" },
   { href: "/deployments", label: "Deployments" },
+  { href: "/benchmarks", label: "Benchmarks" },
 ];
 
 export function NavBar() {

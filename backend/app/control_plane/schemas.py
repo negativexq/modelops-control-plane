@@ -1,8 +1,10 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.control_plane.models import DeploymentStatus
+from app.policy.config import PolicyConfig
 
 
 class TargetWeight(BaseModel):
@@ -15,6 +17,10 @@ class CreateDeploymentRequest(BaseModel):
     stable_version: str
     canary_version: str
     canary_weight: float = Field(default=0.1, ge=0, le=1)
+    # If omitted, the environment-configured PolicySettings defaults are resolved and
+    # stored on the deployment at creation time (see service.create_deployment) - the
+    # deployment's policy_config is always a fully-resolved snapshot, never None.
+    policy_config: PolicyConfig | None = None
 
 
 class DeploymentEventOut(BaseModel):
@@ -41,6 +47,8 @@ class DeploymentOut(BaseModel):
     stable_version: str
     canary_version: str
     status: DeploymentStatus
+    policy_config: dict[str, Any] | None
+    inconclusive_retry_count: int
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None

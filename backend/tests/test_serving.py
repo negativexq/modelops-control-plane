@@ -184,3 +184,74 @@ def test_normalize_class_weight_converts_string_keys() -> None:
 
 def test_normalize_class_weight_passthrough_for_non_dict() -> None:
     assert normalize_class_weight("balanced") == "balanced"
+
+
+def test_get_fault_injection_defaults_to_zero(artifacts_dir: Path) -> None:
+    client = TestClient(create_app(_settings(artifacts_dir)))
+    response = client.get("/fault-injection")
+    assert response.status_code == 200
+    assert response.json() == {"latency_ms": 0, "error_rate": 0.0, "environment": "development"}
+
+
+def test_put_fault_injection_mutates_at_runtime(artifacts_dir: Path) -> None:
+    client = TestClient(create_app(_settings(artifacts_dir)))
+
+    response = client.put("/fault-injection", json={"latency_ms": 300, "error_rate": 0.4})
+    assert response.status_code == 200
+    assert response.json() == {"latency_ms": 300, "error_rate": 0.4, "environment": "development"}
+
+    # And it's actually live - a subsequent GET (and predict) sees the new values.
+    assert client.get("/fault-injection").json()["latency_ms"] == 300
+
+
+def test_put_fault_injection_then_predict_uses_new_values(artifacts_dir: Path) -> None:
+    client = TestClient(create_app(_settings(artifacts_dir)))
+    client.put("/fault-injection", json={"latency_ms": 200, "error_rate": 0.0})
+
+    start = time.perf_counter()
+    response = client.post("/predict", json=_sample_payload(FULL_FEATURES))
+    elapsed_ms = (time.perf_counter() - start) * 1000
+
+    assert response.status_code == 200
+    assert elapsed_ms >= 200
+
+
+def test_put_fault_injection_can_reset_to_zero(artifacts_dir: Path) -> None:
+    client = TestClient(create_app(_settings(artifacts_dir)))
+    client.put("/fault-injection", json={"latency_ms": 300, "error_rate": 0.4})
+
+    response = client.put("/fault-injection", json={"latency_ms": 0, "error_rate": 0.0})
+
+    assert response.json() == {"latency_ms": 0, "error_rate": 0.0, "environment": "development"}
+
+
+def test_put_fault_injection_forbidden_in_production(artifacts_dir: Path) -> None:
+    settings = _settings(artifacts_dir, environment="production")
+    client = TestClient(create_app(settings))
+
+    response = client.put("/fault-injection", json={"latency_ms": 300, "error_rate": 0.4})
+
+    assert response.status_code == 403
+    # And the attempt must not have mutated anything, even partially.
+    assert settings.injected_latency_ms == 0
+    assert settings.injected_error_rate == 0.0
+
+
+def test_get_fault_injection_allowed_in_production_and_shows_zero(artifacts_dir: Path) -> None:
+    client = TestClient(create_app(_settings(artifacts_dir, environment="production")))
+    response = client.get("/fault-injection")
+    assert response.status_code == 200
+    assert response.json()["latency_ms"] == 0
+    assert response.json()["error_rate"] == 0.0
+
+
+def test_put_fault_injection_rejects_negative_latency(artifacts_dir: Path) -> None:
+    client = TestClient(create_app(_settings(artifacts_dir)))
+    response = client.put("/fault-injection", json={"latency_ms": -1, "error_rate": 0.0})
+    assert response.status_code == 422
+
+
+def test_put_fault_injection_rejects_error_rate_above_one(artifacts_dir: Path) -> None:
+    client = TestClient(create_app(_settings(artifacts_dir)))
+    response = client.put("/fault-injection", json={"latency_ms": 0, "error_rate": 1.5})
+    assert response.status_code == 422

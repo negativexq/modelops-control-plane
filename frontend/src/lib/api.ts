@@ -1,10 +1,13 @@
 import type {
+  BenchmarkRun,
   ComparisonOut,
   CreateDeploymentRequest,
   DeploymentOut,
   MetricsOut,
   ModelVersionEvaluation,
   ModelVersionMetadata,
+  RunBenchmarkRequest,
+  ScenarioInfo,
 } from "./types";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -124,4 +127,29 @@ export function getDeploymentComparison(
 ): Promise<ComparisonOut> {
   const query = windowSeconds ? `?window_seconds=${windowSeconds}` : "";
   return request<ComparisonOut>(`/api/deployments/${encodeURIComponent(id)}/comparison${query}`);
+}
+
+// --- Benchmarks --------------------------------------------------------------
+
+export function getScenarios(): Promise<ScenarioInfo[]> {
+  return request<ScenarioInfo[]>("/api/benchmarks/scenarios");
+}
+
+export function getCurrentBenchmarkRun(): Promise<BenchmarkRun | null> {
+  return request<BenchmarkRun | null>("/api/benchmarks/current");
+}
+
+export function startBenchmarkRun(payload: RunBenchmarkRequest): Promise<BenchmarkRun> {
+  return request<BenchmarkRun>("/api/benchmarks/run", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getBenchmarkRun(id: string): Promise<BenchmarkRun> {
+  return request<BenchmarkRun>(`/api/benchmarks/${encodeURIComponent(id)}`);
+}
+
+export function listBenchmarkRuns(): Promise<BenchmarkRun[]> {
+  return request<BenchmarkRun[]>("/api/benchmarks");
 }

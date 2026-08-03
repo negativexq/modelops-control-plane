@@ -1,4 +1,4 @@
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel, Field, create_model
 
 # Business-column dtypes for the fraud dataset (see backend/scripts/generate_dataset.py).
 # Serving does not import that script (it isn't shipped in the runtime image), so the
@@ -41,3 +41,14 @@ class PredictionResponse(BaseModel):
     model_name: str
     model_version: str
     latency_ms: float
+
+
+class FaultInjectionIn(BaseModel):
+    latency_ms: int = Field(ge=0)
+    error_rate: float = Field(ge=0, le=1)
+
+
+class FaultInjectionOut(BaseModel):
+    latency_ms: int
+    error_rate: float
+    environment: str

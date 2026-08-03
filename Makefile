@@ -1,5 +1,7 @@
 .PHONY: dev test lint down backend-install frontend-install \
-	generate-data train-models evaluate-models prepare-models migrate
+	generate-data train-models evaluate-models prepare-models migrate \
+	benchmark-baseline benchmark-latency-failure benchmark-error-failure \
+	benchmark-quality-failure benchmark-success benchmark-all
 
 dev:
 	docker compose up --build
@@ -33,3 +35,27 @@ evaluate-models: backend-install
 	cd backend && .venv/bin/python -m scripts.evaluate_models
 
 prepare-models: generate-data train-models evaluate-models
+
+# Benchmarks assume backend, router, worker, and the model-serving-* services are
+# already up (`make dev`, or `docker compose up backend router worker
+# model-serving-v1 model-serving-v2-good model-serving-v2-quality-bad`). Each one
+# runs alone in its own isolated model_name - see backend/scripts/benchmarks/ - but
+# they share the router's single active traffic split, so run them one at a time,
+# not concurrently with each other or with a real demo you care about.
+benchmark-baseline: backend-install
+	cd backend && .venv/bin/python -m scripts.benchmarks.run_benchmark --scenario baseline
+
+benchmark-latency-failure: backend-install
+	cd backend && .venv/bin/python -m scripts.benchmarks.run_benchmark --scenario latency-failure
+
+benchmark-error-failure: backend-install
+	cd backend && .venv/bin/python -m scripts.benchmarks.run_benchmark --scenario error-failure
+
+benchmark-quality-failure: backend-install
+	cd backend && .venv/bin/python -m scripts.benchmarks.run_benchmark --scenario quality-failure
+
+benchmark-success: backend-install
+	cd backend && .venv/bin/python -m scripts.benchmarks.run_benchmark --scenario success
+
+benchmark-all: benchmark-baseline benchmark-latency-failure benchmark-error-failure \
+	benchmark-quality-failure benchmark-success
