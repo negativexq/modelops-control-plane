@@ -8,6 +8,10 @@ backend/.mypy_cache/
 backend/*.egg-info/
 backend/modelops.db
 
+# Generated data / model artifacts (reproducible via make prepare-models)
+backend/data/
+backend/artifacts/
+
 # Node / Next.js
 frontend/node_modules/
 frontend/.next/

@@ -9,7 +9,10 @@ services:
     environment:
       MODELOPS_ENVIRONMENT: development
       MODELOPS_DATABASE_URL: sqlite:///./modelops.db
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      CONTROL_PLANE_ROUTER_BASE_URL: http://router:8000
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
   frontend:
     build:
@@ -25,4 +28,73 @@ services:
     depends_on:
       - backend
 
-  # Future sprints will add: model-serving, router, etc.
+  # Model serving: one container per (model_name, model_version).
+  # Requires artifacts to exist first: `make prepare-models` from the repo root.
+  model-serving-v1:
+    build:
+      context: ./backend
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/artifacts:/app/artifacts:ro
+    environment:
+      MODEL_NAME: fraud-model
+      MODEL_VERSION: v1
+      ENVIRONMENT: development
+    command: uvicorn app.serving.main:app --host 0.0.0.0 --port 8000 --reload
+
+  model-serving-v2-good:
+    build:
+      context: ./backend
+    ports:
+      - "8002:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/artifacts:/app/artifacts:ro
+    environment:
+      MODEL_NAME: fraud-model
+      MODEL_VERSION: v2-good
+      ENVIRONMENT: development
+    command: uvicorn app.serving.main:app --host 0.0.0.0 --port 8000 --reload
+
+  model-serving-v2-quality-bad:
+    build:
+      context: ./backend
+    ports:
+      - "8003:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/artifacts:/app/artifacts:ro
+    environment:
+      MODEL_NAME: fraud-model
+      MODEL_VERSION: v2-quality-bad
+      ENVIRONMENT: development
+    command: uvicorn app.serving.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Weighted traffic router: splits /router/predict across a list of {version, weight}
+  # targets. version_hosts (below) is the router's own deployment topology - the
+  # control plane (the `backend` service) only ever pushes "version -> weight" via
+  # PUT /router/config, never host/port.
+  router:
+    build:
+      context: ./backend
+    ports:
+      - "8080:8000"
+    volumes:
+      - ./backend/app:/app/app
+    environment:
+      ROUTER_MODEL_NAME: fraud-model
+      ROUTER_VERSION_HOSTS: >-
+        {"v1": "model-serving-v1:8000", "v2-good": "model-serving-v2-good:8000",
+        "v2-quality-bad": "model-serving-v2-quality-bad:8000"}
+      ROUTER_INITIAL_TARGETS: >-
+        [{"version": "v1", "weight": 0.9}, {"version": "v2-good", "weight": 0.1}]
+      ROUTER_CONTROL_PLANE_URL: http://backend:8000
+    command: uvicorn app.router.main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      - model-serving-v1
+      - model-serving-v2-good
+      - backend
+
+  # Future sprints will add: automated canary metrics/evaluation, etc.

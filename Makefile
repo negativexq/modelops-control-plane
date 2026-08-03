@@ -1,7 +1,11 @@
-.PHONY: dev test lint down backend-install frontend-install
+.PHONY: dev test lint down backend-install frontend-install \
+	generate-data train-models evaluate-models prepare-models migrate
 
 dev:
 	docker compose up --build
+
+migrate: backend-install
+	cd backend && .venv/bin/alembic upgrade head
 
 down:
 	docker compose down
@@ -18,3 +22,14 @@ test: backend-install
 lint: backend-install frontend-install
 	cd backend && .venv/bin/ruff check . && .venv/bin/mypy app
 	cd frontend && npm run lint && npm run type-check
+
+generate-data: backend-install
+	cd backend && .venv/bin/python scripts/generate_dataset.py
+
+train-models: backend-install
+	cd backend && .venv/bin/python -m scripts.train_models
+
+evaluate-models: backend-install
+	cd backend && .venv/bin/python -m scripts.evaluate_models
+
+prepare-models: generate-data train-models evaluate-models
