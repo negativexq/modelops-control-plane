@@ -6,6 +6,7 @@ services:
       - "8000:8000"
     volumes:
       - ./backend/app:/app/app
+      - ./backend/artifacts:/app/artifacts:ro
     environment:
       MODELOPS_ENVIRONMENT: development
       MODELOPS_DATABASE_URL: sqlite:///./modelops.db
