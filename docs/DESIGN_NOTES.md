@@ -191,3 +191,60 @@ dependency there, not just a dev one) and tracks it in a `BenchmarkRun` row.
 Completion is detected by a fire-and-forget `asyncio` task awaiting the subprocess
 (same pattern as the router's metric emission), not by the requesting client
 staying connected — the same reasoning as the metrics hot path above.
+
+## Future vision
+
+Features that were thought through but deliberately left out - not forgotten, not
+half-built, just not worth the time/complexity trade-off for a project whose goal
+is demonstrating the core canary-rollout loop clearly, not being a complete
+platform. Listed here instead of as TODOs scattered through the code so the
+reasoning survives even if nobody's actively looking at this file.
+
+- **Multi-model support.** Every service today assumes one logical model
+  (`fraud-model`) with several versions. Nothing in the schema *requires* that -
+  `Deployment.model_name` is already a free-text field, and the router already
+  keys `ROUTER_VERSION_HOSTS` per model - but the dashboard has no model picker,
+  and nothing stops two deployments for different models from racing over the
+  same router config slot (see `RouterConfigStore`'s single-slot design, Sprint 3).
+  Supporting this for real means the router holding one active config *per model*,
+  not one globally - a real change to a component that's otherwise been stable
+  since Sprint 3, not worth destabilizing for a demo with one model.
+- **A real inference gateway** (request validation independent of each serving
+  container's dynamic schema, response caching, batching, rate limiting,
+  authentication on `/predict` itself). Today the router is deliberately dumb - it
+  forwards bodies unmodified and lets each serving container's own pydantic model
+  reject bad input (see [Traffic router](#traffic-router) above). A gateway is a
+  meaningfully different component with its own request lifecycle and its own
+  failure modes; bolting gateway concerns onto the router would blur the one job
+  it has now (pick a target, forward, don't lie about failures).
+- **Cost, drift, data-quality, and availability policies.** The policy engine's
+  four checks (Sprint 7) only ever asked "is this canary statistically safe right
+  now, from the traffic it's already seeing?" Cost ($/inference), drift (feature
+  distribution shift vs. training data), data quality (schema violations, null
+  rates, out-of-range values arriving at `/predict`), and availability (uptime
+  SLO tracking over time, not just point-in-time error rate) are each a real
+  input to a real promotion decision - but each needs its own data source this
+  project doesn't have (a billing feed, a reference training distribution stored
+  per model version, a schema registry, a longer-horizon metrics store), not just
+  another `PolicyCheckResult` case. Adding the case without the data source behind
+  it would be exactly the kind of "looks done, isn't" the rest of this project
+  tries hard to avoid (see `minimum_recall`'s honest `INCONCLUSIVE` instead of a
+  fake `PASS`, for the same reason).
+- **A model approval workflow** (a human sign-off gate before a deployment can
+  even start, separate from the promote/rollback decision once it's running).
+  Today anyone who can call `POST /api/deployments` can start a canary - there's
+  no draft/pending-approval state in the state machine, and adding one changes the
+  state machine itself (Sprint 4), which every other component (worker, dashboard,
+  benchmark suite) already depends on being stable. Worth doing before any real
+  usage; not worth the churn for a demo where the "who's allowed to deploy"
+  question doesn't have a real answer anyway (see [Production
+  evolution](../README.md#production-evolution)'s auth row).
+- **Environment separation** (dev/staging/prod as first-class concepts, each with
+  its own policy thresholds, its own router/serving fleet, promotion *between*
+  environments rather than just traffic stages within one). Everything here - one
+  `docker-compose.yml`, one `PolicySettings`, one SQLite file - is implicitly
+  "one environment." Modeling more than one honestly needs separate
+  infrastructure per environment (see [Production
+  evolution](../README.md#production-evolution)'s Kubernetes row) more than it
+  needs new application code; simulating it with a flag inside this single-stack
+  demo would misrepresent what real environment isolation actually requires.

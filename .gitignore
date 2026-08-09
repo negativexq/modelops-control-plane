@@ -7,6 +7,8 @@ backend/.ruff_cache/
 backend/.mypy_cache/
 backend/*.egg-info/
 backend/modelops.db
+backend/.coverage
+backend/htmlcov/
 
 # Generated data / model artifacts (reproducible via make prepare-models)
 backend/data/

@@ -1,7 +1,7 @@
 .PHONY: dev test lint down backend-install frontend-install \
 	generate-data train-models evaluate-models prepare-models migrate \
 	benchmark-baseline benchmark-latency-failure benchmark-error-failure \
-	benchmark-quality-failure benchmark-success benchmark-all
+	benchmark-quality-failure benchmark-success benchmark-all ci-smoke-test coverage
 
 dev:
 	docker compose up --build
@@ -21,9 +21,19 @@ frontend-install:
 test: backend-install
 	cd backend && .venv/bin/pytest -q
 
+# HTML report at backend/htmlcov/index.html; terminal summary printed either way.
+coverage: backend-install
+	cd backend && .venv/bin/pytest -q --cov=app --cov-report=term-missing --cov-report=html
+
 lint: backend-install frontend-install
 	cd backend && .venv/bin/ruff check . && .venv/bin/mypy app
 	cd frontend && npm run lint && npm run type-check
+
+# Runs against an already-up stack (`make dev` in another terminal, or CI's
+# "integration" job which brings the stack up itself) - see
+# backend/scripts/ci_smoke_test.py for what it actually checks and why.
+ci-smoke-test: backend-install
+	cd backend && .venv/bin/python -m scripts.ci_smoke_test
 
 generate-data: backend-install
 	cd backend && .venv/bin/python scripts/generate_dataset.py

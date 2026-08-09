@@ -36,3 +36,33 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run type-check
+
+  # Brings up the real docker-compose stack and exercises it over HTTP exactly like
+  # a human demoing the platform would: create a deployment, send predictions,
+  # evaluate, promote, check the timeline. Deliberately separate from and gated on
+  # the lint/unit-test jobs above (no point building 8 containers if `ruff` alone
+  # already failed) - see backend/scripts/ci_smoke_test.py's docstring for why this
+  # job exists: every real bug found in this project was found by running the
+  # actual stack, not by a unit test with mocked collaborators.
+  integration:
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Prepare model artifacts (generate data, train v1/v2-good/v2-quality-bad)
+        run: make prepare-models
+      - name: Bring up the full stack
+        run: docker compose up -d --build
+      - name: Run the integration smoke test
+        run: .venv/bin/python -m scripts.ci_smoke_test
+        working-directory: backend
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker compose logs
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
