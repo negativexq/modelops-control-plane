@@ -6,6 +6,14 @@ import type { DeploymentOut, DeploymentStatus } from "@/lib/types";
 
 const ACTIONABLE_STATUSES: DeploymentStatus[] = ["CANARY_RUNNING", "EVALUATING", "INCONCLUSIVE"];
 
+// Mirrors the worker's own ACTIVE_STATUSES (app/worker/loop.py) - the automated
+// worker sweeps and acts on every deployment in one of these statuses on every
+// poll cycle, unconditionally. INCONCLUSIVE is deliberately excluded: once a
+// deployment freezes there, the worker has already stopped touching it (see
+// docs/DESIGN_NOTES.md#automated-promotion--rollback), so a manual action there
+// can't race it.
+const WORKER_MANAGED_STATUSES: DeploymentStatus[] = ["CANARY_RUNNING", "EVALUATING"];
+
 interface DeploymentActionsProps {
   deployment: DeploymentOut;
   onChanged: () => void;
@@ -26,6 +34,7 @@ export function DeploymentActions({ deployment, onChanged, size = "md" }: Deploy
   );
 
   const canAct = ACTIONABLE_STATUSES.includes(deployment.status);
+  const workerManaged = WORKER_MANAGED_STATUSES.includes(deployment.status);
   const busy = promote.submitting || rollback.submitting;
   const padding = size === "sm" ? "px-2.5 py-1 text-xs" : "px-3 py-1.5 text-sm";
 
@@ -41,6 +50,18 @@ export function DeploymentActions({ deployment, onChanged, size = "md" }: Deploy
 
   return (
     <div className="flex flex-col items-end gap-1.5">
+      {workerManaged ? (
+        <p
+          className={`text-right text-amber-700 dark:text-amber-400 ${
+            size === "sm" ? "text-xs" : "max-w-xs text-xs"
+          }`}
+          title="The automated worker polls and may promote, roll back, or advance traffic on this deployment on its own."
+        >
+          {size === "sm"
+            ? "⚠ Automated"
+            : "⚠ Automated rollout in progress — manual action may conflict."}
+        </p>
+      ) : null}
       <div className="flex gap-2">
         <button
           type="button"

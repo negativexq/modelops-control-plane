@@ -4,6 +4,7 @@ import Link from "next/link";
 import { listDeployments } from "@/lib/api";
 import { useAsync } from "@/lib/useAsync";
 import { AsyncBoundary } from "@/components/AsyncBoundary";
+import { BenchmarkBadge } from "@/components/BenchmarkBadge";
 import { Card } from "@/components/Card";
 import { DeploymentActions } from "@/components/DeploymentActions";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -47,12 +48,15 @@ export default function DeploymentsPage() {
                     {deployments.map((deployment) => (
                       <tr key={deployment.id}>
                         <td className="py-3 pr-4">
-                          <Link
-                            href={`/deployments/${deployment.id}`}
-                            className="font-medium text-blue-600 underline-offset-2 hover:underline dark:text-blue-400"
-                          >
-                            {deployment.model_name}
-                          </Link>
+                          <div className="flex items-center gap-2">
+                            <Link
+                              href={`/deployments/${deployment.id}`}
+                              className="font-medium text-blue-600 underline-offset-2 hover:underline dark:text-blue-400"
+                            >
+                              {deployment.model_name}
+                            </Link>
+                            {deployment.is_benchmark ? <BenchmarkBadge /> : null}
+                          </div>
                         </td>
                         <td className="py-3 pr-4">{deployment.stable_version}</td>
                         <td className="py-3 pr-4">{deployment.canary_version}</td>

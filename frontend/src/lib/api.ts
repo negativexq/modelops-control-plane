@@ -8,6 +8,7 @@ import type {
   ModelVersionMetadata,
   RunBenchmarkRequest,
   ScenarioInfo,
+  TimelineItem,
 } from "./types";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -127,6 +128,10 @@ export function getDeploymentComparison(
 ): Promise<ComparisonOut> {
   const query = windowSeconds ? `?window_seconds=${windowSeconds}` : "";
   return request<ComparisonOut>(`/api/deployments/${encodeURIComponent(id)}/comparison${query}`);
+}
+
+export function getDeploymentTimeline(id: string): Promise<TimelineItem[]> {
+  return request<TimelineItem[]>(`/api/deployments/${encodeURIComponent(id)}/timeline`);
 }
 
 // --- Benchmarks --------------------------------------------------------------

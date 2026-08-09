@@ -2,13 +2,15 @@
 
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { getDeployment } from "@/lib/api";
+import { getDeployment, getDeploymentTimeline } from "@/lib/api";
 import { useAsync } from "@/lib/useAsync";
 import { AsyncBoundary } from "@/components/AsyncBoundary";
+import { BenchmarkBadge } from "@/components/BenchmarkBadge";
 import { Card } from "@/components/Card";
 import { CanaryAnalysis } from "@/components/CanaryAnalysis";
 import { DeploymentActions } from "@/components/DeploymentActions";
 import { StatusBadge } from "@/components/StatusBadge";
+import { Timeline } from "@/components/Timeline";
 import { TrafficBar } from "@/components/TrafficBar";
 import { formatDate } from "@/lib/format";
 import type { DeploymentOut } from "@/lib/types";
@@ -20,6 +22,9 @@ function DeploymentDetailContent({
   deployment: DeploymentOut;
   onChanged: () => void;
 }) {
+  const { data: timeline, error: timelineError, loading: timelineLoading, refetch: refetchTimeline } =
+    useAsync(() => getDeploymentTimeline(deployment.id), [deployment.id]);
+
   return (
     <div className="space-y-6">
       <Card>
@@ -27,7 +32,10 @@ function DeploymentDetailContent({
           <dl className="grid grid-cols-2 gap-x-8 gap-y-3 text-sm sm:grid-cols-4">
             <div>
               <dt className="text-zinc-500 dark:text-zinc-400">Model</dt>
-              <dd className="font-medium">{deployment.model_name}</dd>
+              <dd className="flex items-center gap-2 font-medium">
+                {deployment.model_name}
+                {deployment.is_benchmark ? <BenchmarkBadge /> : null}
+              </dd>
             </div>
             <div>
               <dt className="text-zinc-500 dark:text-zinc-400">Stable</dt>
@@ -74,24 +82,15 @@ function DeploymentDetailContent({
         <CanaryAnalysis deploymentId={deployment.id} />
       </Card>
 
-      <Card title="Event log">
-        <ol className="space-y-2 text-sm">
-          {deployment.events.map((event) => (
-            <li key={event.id} className="flex items-start gap-3">
-              <span className="mt-0.5 whitespace-nowrap text-xs text-zinc-500 dark:text-zinc-400">
-                {formatDate(event.created_at)}
-              </span>
-              <span>
-                <span className="font-medium">{event.event_type}</span>
-                {" — "}
-                {event.message}
-              </span>
-            </li>
-          ))}
-          {deployment.events.length === 0 ? (
-            <li className="text-zinc-500 dark:text-zinc-400">No events recorded.</li>
-          ) : null}
-        </ol>
+      <Card title="Timeline">
+        <AsyncBoundary
+          data={timeline}
+          error={timelineError}
+          loading={timelineLoading}
+          onRetry={refetchTimeline}
+        >
+          {(items) => <Timeline items={items} />}
+        </AsyncBoundary>
       </Card>
     </div>
   );

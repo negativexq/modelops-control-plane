@@ -1,9 +1,9 @@
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
-from app.control_plane.models import DeploymentStatus
+from app.control_plane.models import DeploymentStatus, PolicyEvaluationResult
 from app.policy.config import PolicyConfig
 
 
@@ -54,6 +54,48 @@ class DeploymentOut(BaseModel):
     completed_at: datetime | None
     traffic_allocation: TrafficAllocationOut | None
     events: list[DeploymentEventOut]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def is_benchmark(self) -> bool:
+        """True for deployments created by the benchmark suite (model_name prefixed
+        "benchmark-", see scripts/benchmarks/scenarios.py) - lets the dashboard tell
+        them apart from real deployments without a DB column, since it's fully
+        derivable from a field already on the row."""
+        return self.model_name.startswith("benchmark-")
+
+
+class TimelineEventItem(BaseModel):
+    """One DeploymentEvent row, tagged for the merged timeline (see
+    app/control_plane/timeline.py)."""
+
+    type: Literal["event"] = "event"
+    id: str
+    timestamp: datetime
+    event_type: str
+    message: str
+
+
+class TimelinePolicyItem(BaseModel):
+    """One PolicyEvaluation row, tagged for the merged timeline, plus a derived
+    human-readable `explanation` (see app/policy/explain.py) - the raw
+    observed_value/threshold/result alone don't say *why* e.g. minimum_requests
+    stayed INCONCLUSIVE."""
+
+    type: Literal["policy_evaluation"] = "policy_evaluation"
+    id: str
+    timestamp: datetime
+    policy_name: str
+    metric_name: str
+    observed_value: float | None
+    threshold: float | None
+    result: PolicyEvaluationResult
+    explanation: str
+
+
+TimelineItem = Annotated[
+    TimelineEventItem | TimelinePolicyItem, Field(discriminator="type")
+]
 
 
 class MetricIn(BaseModel):

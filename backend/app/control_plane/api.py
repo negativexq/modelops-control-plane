@@ -12,6 +12,7 @@ from app.control_plane.schemas import (
     DeploymentOut,
     MetricIn,
     MetricsOut,
+    TimelineItem,
 )
 from app.control_plane.service import (
     AlreadyAtFinalStageError,
@@ -19,6 +20,7 @@ from app.control_plane.service import (
     DeploymentNotFoundError,
 )
 from app.control_plane.state_machine import InvalidTransitionError
+from app.control_plane.timeline import build_timeline
 from app.db import get_db
 
 TriggeredByDep = Literal["manual", "automatic"]
@@ -70,6 +72,19 @@ def get_deployment(deployment_id: str, db: DbDep) -> DeploymentOut:
     except DeploymentNotFoundError as exc:
         raise _not_found(deployment_id) from exc
     return DeploymentOut.model_validate(deployment)
+
+
+@router.get("/{deployment_id}/timeline", response_model=list[TimelineItem])
+def get_deployment_timeline(deployment_id: str, db: DbDep) -> list[TimelineItem]:
+    """DeploymentEvent (state transitions, worker actions) and PolicyEvaluation
+    (per-check results, with a derived human-readable explanation) merged into one
+    chronological list - see app/control_plane/timeline.py for how."""
+    try:
+        deployment = service.get_deployment(db, deployment_id)
+    except DeploymentNotFoundError as exc:
+        raise _not_found(deployment_id) from exc
+
+    return build_timeline(db, deployment)
 
 
 @router.post("/{deployment_id}/promote")

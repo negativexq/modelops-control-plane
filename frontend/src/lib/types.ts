@@ -38,7 +38,41 @@ export interface DeploymentOut {
   completed_at: string | null;
   traffic_allocation: TrafficAllocationOut | null;
   events: DeploymentEventOut[];
+  // Derived (model_name starts with "benchmark-"), not a stored column - see
+  // backend/app/control_plane/schemas.py's DeploymentOut.is_benchmark.
+  is_benchmark: boolean;
 }
+
+export type PolicyEvaluationResult = "PASS" | "FAIL" | "INCONCLUSIVE";
+
+// --- Timeline ------------------------------------------------------------------
+// GET /api/deployments/{id}/timeline - DeploymentEvent and PolicyEvaluation rows
+// merged into one chronological narrative. Discriminated on `type`.
+
+export interface TimelineEventItem {
+  type: "event";
+  id: string;
+  timestamp: string;
+  event_type: string;
+  message: string;
+}
+
+export interface TimelinePolicyItem {
+  type: "policy_evaluation";
+  id: string;
+  timestamp: string;
+  policy_name: string;
+  metric_name: string;
+  observed_value: number | null;
+  threshold: number | null;
+  result: PolicyEvaluationResult;
+  // Human-readable "why" for this result, derived server-side - see
+  // backend/app/policy/explain.py. Especially useful for INCONCLUSIVE, which
+  // otherwise reads as an unexplained non-answer.
+  explanation: string;
+}
+
+export type TimelineItem = TimelineEventItem | TimelinePolicyItem;
 
 export interface CreateDeploymentRequest {
   model_name: string;
