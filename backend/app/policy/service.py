@@ -7,6 +7,15 @@ from app.policy.config import PolicyConfig
 from app.policy.engine import PolicyCheckResult, evaluate_policies, overall_result
 
 
+def _weight_for(deployment: Deployment, version: str) -> float | None:
+    if deployment.traffic_allocation is None:
+        return None
+    for target in deployment.traffic_allocation.targets:
+        if target["version"] == version:
+            return float(target["weight"])
+    return None
+
+
 def run_evaluation(
     db: Session, deployment: Deployment, config: PolicyConfig
 ) -> tuple[list[PolicyCheckResult], PolicyEvaluationResult]:
@@ -22,6 +31,12 @@ def run_evaluation(
     )
 
     checks = evaluate_policies(stable, canary, config)
+    # Snapshot the deployment's own context right now, once, for every check in this
+    # evaluation - not derivable later from the deployment's *current* state, which
+    # will keep changing after this call returns (traffic ramps, gets promoted,
+    # rolled back, ...). See PolicyEvaluation's docstring and app/policy/explain.py.
+    stable_weight = _weight_for(deployment, deployment.stable_version)
+    canary_weight = _weight_for(deployment, deployment.canary_version)
     for check in checks:
         db.add(
             PolicyEvaluation(
@@ -31,6 +46,11 @@ def run_evaluation(
                 observed_value=check.observed_value,
                 threshold=check.threshold,
                 result=check.result,
+                evaluation_window_seconds=config.evaluation_window_seconds,
+                stable_weight=stable_weight,
+                canary_weight=canary_weight,
+                stable_sample_count=stable.sample_count,
+                canary_sample_count=canary.sample_count,
             )
         )
     db.commit()

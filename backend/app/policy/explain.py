@@ -29,14 +29,25 @@ def explain_policy_check(
     threshold: float | None,
     result: PolicyEvaluationResult,
     canary_weight: float | None = None,
+    is_estimated: bool = False,
 ) -> str:
-    """Human-readable explanation of one policy check. `canary_weight` (the
-    deployment's *current* canary traffic share, 0-1) is optional context used only
-    to make a minimum_requests INCONCLUSIVE concrete when the canary is already at
-    100% - see _explain_minimum_requests.
+    """Human-readable explanation of one policy check. `canary_weight` is context
+    used only to make a minimum_requests INCONCLUSIVE concrete when the canary is
+    already at 100% - see _explain_minimum_requests.
+
+    Callers should pass the canary weight *as it was recorded on the
+    PolicyEvaluation row itself* (PolicyEvaluation.canary_weight, snapshotted at
+    evaluation time - see policy/service.py's run_evaluation) whenever that
+    snapshot exists. Only for pre-snapshot rows (evaluated before that column
+    existed, so it's NULL) should a caller fall back to the deployment's *current*
+    traffic weight - and when it does, it must pass `is_estimated=True`, which this
+    function calls out explicitly in the explanation text rather than silently
+    presenting a guess as recorded fact.
     """
     if policy_name == "minimum_requests":
-        return _explain_minimum_requests(observed_value, threshold, result, canary_weight)
+        return _explain_minimum_requests(
+            observed_value, threshold, result, canary_weight, is_estimated
+        )
     if policy_name == "latency_p95_increase":
         return _explain_latency(observed_value, threshold, result)
     if policy_name == "max_error_rate":
@@ -55,16 +66,24 @@ def _explain_minimum_requests(
     threshold: float | None,
     result: PolicyEvaluationResult,
     canary_weight: float | None,
+    is_estimated: bool,
 ) -> str:
     counts = f"({_fmt_count(observed)}/{_fmt_count(threshold)} requests)"
     if result == PASS:
         return f"both sides have received enough traffic to evaluate {counts}."
     if canary_weight is not None and canary_weight >= _FULLY_PROMOTED_CANARY_WEIGHT:
+        estimate_note = (
+            " (estimated from the deployment's current traffic split - no traffic "
+            "snapshot was recorded for this older check, so this may not exactly "
+            "match what was true at evaluation time)"
+            if is_estimated
+            else ""
+        )
         return (
             f"stable side has not received enough traffic to evaluate {counts} - the "
             "canary is already at 100% of traffic, so the stable side will not "
             "accumulate more requests until traffic is rebalanced. This is an "
-            "expected platform limit, not a bug."
+            f"expected platform limit, not a bug{estimate_note}."
         )
     return f"insufficient data: at least one side has not received enough traffic yet {counts}."
 

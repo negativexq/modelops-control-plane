@@ -10,6 +10,8 @@ from app.control_plane.models import (
     Deployment,
     DeploymentEvent,
     DeploymentStatus,
+    PolicyEvaluation,
+    PolicyEvaluationResult,
     PredictionMetric,
 )
 from app.control_plane.router_gateway import RouterGateway, get_router_gateway
@@ -148,8 +150,14 @@ def test_timeline_explains_stable_starvation_when_canary_is_fully_promoted(
 ) -> None:
     """The known platform limit: a canary at 100% traffic starves the stable side of
     requests, so minimum_requests can never pass - the timeline should say so plainly
-    rather than leaving a bare INCONCLUSIVE for a human to puzzle over."""
-    client.post(f"/api/deployments/{deployment.id}/promote")
+    rather than leaving a bare INCONCLUSIVE for a human to puzzle over.
+
+    Reaches 100% via advance-traffic (stays CANARY_RUNNING) rather than /promote
+    (terminal PROMOTED) - /evaluate now 409s on a terminal deployment, so this has
+    to stay active to exercise the check at all.
+    """
+    for _ in range(4):  # 0% (no allocation yet) -> 10% -> 25% -> 50% -> 100%
+        client.post(f"/api/deployments/{deployment.id}/advance-traffic")
 
     _add_metrics(db_session, deployment.id, "v2-good", count=5)  # canary only, stable starved
 
@@ -162,6 +170,64 @@ def test_timeline_explains_stable_starvation_when_canary_is_fully_promoted(
     assert "stable side" in explanation
     assert "100% of traffic" in explanation
     assert "not a bug" in explanation
+
+
+def test_timeline_explanation_reflects_traffic_at_evaluation_time_not_current(
+    client: TestClient, db_session: Session, deployment: Deployment
+) -> None:
+    """A PolicyEvaluation's explanation must describe what was true when it was
+    recorded, not the deployment's current state - otherwise an old INCONCLUSIVE
+    check would flip its story every time the deployment's traffic changes later,
+    misrepresenting the actual audit trail."""
+    client.post(f"/api/deployments/{deployment.id}/advance-traffic")  # -> 10% canary
+
+    client.post(f"/api/deployments/{deployment.id}/evaluate", json={"minimum_requests": 100})
+
+    # Traffic moves on well past the moment of that evaluation.
+    for _ in range(3):  # 10% -> 25% -> 50% -> 100%
+        client.post(f"/api/deployments/{deployment.id}/advance-traffic")
+
+    body = client.get(f"/api/deployments/{deployment.id}/timeline").json()
+    policy_items = [item for item in body if item["type"] == "policy_evaluation"]
+    assert len(policy_items) == 1
+    assert policy_items[0]["is_estimated"] is False
+    explanation = policy_items[0]["explanation"]
+    # Must NOT have flipped to the "canary already at 100%" wording just because
+    # the deployment is at 100% *now* - at evaluation time it was only at 10%.
+    assert "100% of traffic" not in explanation
+    assert "insufficient data" in explanation
+
+
+def test_timeline_falls_back_to_current_state_when_no_snapshot_and_flags_estimated(
+    client: TestClient, db_session: Session, deployment: Deployment
+) -> None:
+    """Pre-migration rows (written before the snapshot columns existed) have no
+    recorded context - build_timeline must fall back to the deployment's current
+    traffic split for these, and must say so explicitly rather than presenting a
+    guess as recorded fact."""
+    for _ in range(4):  # -> 100% canary (the *current* state, read as a fallback)
+        client.post(f"/api/deployments/{deployment.id}/advance-traffic")
+
+    db_session.add(
+        PolicyEvaluation(
+            deployment_id=deployment.id,
+            policy_name="minimum_requests",
+            metric_name="sample_count",
+            observed_value=0.0,
+            threshold=100.0,
+            result=PolicyEvaluationResult.INCONCLUSIVE,
+            # evaluation_window_seconds/stable_weight/canary_weight/*_sample_count
+            # all left at their default None, simulating a pre-migration row.
+        )
+    )
+    db_session.commit()
+
+    body = client.get(f"/api/deployments/{deployment.id}/timeline").json()
+    policy_items = [item for item in body if item["type"] == "policy_evaluation"]
+    assert len(policy_items) == 1
+    assert policy_items[0]["is_estimated"] is True
+    assert "estimated" in policy_items[0]["explanation"]
+    assert "stable side" in policy_items[0]["explanation"]  # falls back to current (100%) weight
 
 
 def test_deployment_out_marks_benchmark_deployments(

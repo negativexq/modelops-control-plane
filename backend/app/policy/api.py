@@ -3,7 +3,13 @@ from typing import Annotated
 from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.control_plane.service import DeploymentNotFoundError, get_deployment, get_policy_config
+from app.control_plane.service import (
+    DeploymentNotActiveError,
+    DeploymentNotFoundError,
+    get_deployment,
+    get_policy_config,
+    require_active,
+)
 from app.db import get_db
 from app.policy import service as policy_service
 from app.policy.config import PolicyConfig
@@ -30,11 +36,21 @@ def evaluate_deployment(
     the worker or a human); this just evaluates and reports. An optional PolicyConfig
     body overrides the deployment's own persisted policy_config for this one call
     only (nothing is re-saved).
+
+    409s if the deployment isn't CANARY_RUNNING or EVALUATING - a terminal
+    deployment (PROMOTED/ROLLED_BACK/FAILED/INCONCLUSIVE) has nothing left to
+    evaluate, and writing more PolicyEvaluation rows against it would just pollute
+    its timeline with checks that can no longer affect anything.
     """
     try:
         deployment = get_deployment(db, deployment_id)
     except DeploymentNotFoundError as exc:
         raise _not_found(deployment_id) from exc
+
+    try:
+        require_active(deployment)
+    except DeploymentNotActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     effective_config = config if config is not None else get_policy_config(deployment)
     checks, overall = policy_service.run_evaluation(db, deployment, effective_config)

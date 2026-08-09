@@ -356,7 +356,7 @@ walkthrough, real measured [resource footprint](#resource-footprint), and the
 
 ```bash
 make dev             # bring up the whole stack via docker compose
-make test            # backend tests (pytest) - 198 tests, ~91% statement coverage
+make test            # backend tests (pytest) - 210 tests, ~91% statement coverage
 make coverage        # same, plus an HTML report at backend/htmlcov/index.html
 make lint            # backend (ruff, mypy) + frontend (eslint, tsc) lint/type-check
 make ci-smoke-test   # the same real-stack check CI runs - needs `make dev` running
@@ -368,9 +368,19 @@ every push/PR:
 
 | Job | What it checks | Runtime |
 |---|---|---|
-| `backend` | `ruff`, `mypy --strict`, `pytest` (198 tests, mocked collaborators) | seconds |
+| `backend` | `ruff`, `mypy --strict`, `pytest` (210 tests, mocked collaborators) | seconds |
 | `frontend` | `eslint`, `tsc --noEmit` | seconds |
-| `integration` | Builds and boots the **real** 8-container stack, then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py): create a deployment, send predictions through the real router, evaluate, promote, verify the timeline - gated on the two jobs above passing first | a few minutes |
+| `integration` | Builds and boots the **real** 9-container stack (8 HTTP-exposed services + the worker, which has no HTTP surface), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s three scenarios - gated on the two jobs above passing first | a few minutes |
+
+The `integration` job's three scenarios, in order: **(1)** a fast manual create →
+evaluate → promote path; **(2)** inject real latency into a canary and wait for the
+**actual automated worker** (not a manual call standing in for it) to detect the
+resulting policy FAIL and roll back on its own; **(3)** a healthy canary, waiting
+for the worker to really walk it through every traffic stage (10% → 25% → 50% →
+100%) and promote it. Scenarios 2 and 3 only finish in reasonable CI time because
+the worker's poll interval is turned down to 2s for this job specifically
+(`WORKER_POLL_INTERVAL_SECONDS` in the workflow file - defaults to 15s for real use
+and for local `make dev`, unaffected unless that env var is set).
 
 The `integration` job exists because every real bug found in this project (see
 [Troubleshooting](#troubleshooting)) was found by running the actual stack, not by

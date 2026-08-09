@@ -24,6 +24,14 @@ function PolicyTimelineRow({ item }: { item: TimelinePolicyItem }) {
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span className="font-medium">{POLICY_LABELS[item.policy_name] ?? item.policy_name}</span>
           <PolicyResultBadge result={item.result} />
+          {item.is_estimated ? (
+            <span
+              className="inline-flex items-center rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-medium tracking-wide text-zinc-600 uppercase dark:bg-zinc-800 dark:text-zinc-400"
+              title="Recorded before traffic-context snapshots existed - this explanation falls back to the deployment's current traffic split, not what it was at evaluation time."
+            >
+              Estimated
+            </span>
+          ) : null}
           <span className="text-xs text-zinc-500 dark:text-zinc-400">{formatDate(item.timestamp)}</span>
         </div>
         <p className="text-xs text-zinc-500 dark:text-zinc-400">

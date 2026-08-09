@@ -74,6 +74,20 @@ class Deployment(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Bumped on every write (see control_plane/service.py's _touch) so a concurrent
+    # promote/rollback/advance-traffic/record-inconclusive that read a stale copy of
+    # this row loses its commit instead of silently overwriting a newer one - see
+    # version_id below. Also independently useful as a plain "last modified" column.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), default=_utcnow, onupdate=_utcnow
+    )
+    # SQLAlchemy optimistic-locking column: every UPDATE to this row is guarded by
+    # `WHERE version_id = <the value this session last read>`, and SQLAlchemy raises
+    # StaleDataError (caught in service.py as ConcurrentUpdateError, surfaced as a
+    # 409) if zero rows matched - i.e. someone else committed a change to this same
+    # deployment first. This is what actually makes concurrent actions race-safe,
+    # not just sequential stale-status checks (see docs/DESIGN_NOTES.md).
+    version_id: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     traffic_allocation: Mapped["TrafficAllocation | None"] = relationship(
         back_populates="deployment", uselist=False, cascade="all, delete-orphan"
@@ -83,6 +97,8 @@ class Deployment(Base):
         cascade="all, delete-orphan",
         order_by="DeploymentEvent.created_at",
     )
+
+    __mapper_args__ = {"version_id_col": version_id}
 
 
 class TrafficAllocation(Base):
@@ -148,6 +164,20 @@ class PolicyEvaluation(Base):
     evaluated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=_utcnow, index=True
     )
+    # Snapshot of the deployment's own context AT THE MOMENT this check ran - not
+    # derivable after the fact from the deployment's *current* state, which can
+    # (and does) change later. Without this, a human reading an old PolicyEvaluation
+    # after the deployment moved on would see an explanation computed from whatever
+    # traffic split happens to be live *now*, silently misdescribing what was
+    # actually true when the check fired - see app/policy/explain.py and
+    # app/control_plane/timeline.py. All nullable: rows written before this column
+    # existed have no snapshot, and explain.py falls back to current-state
+    # estimation for those (flagged as estimated, never silently treated as exact).
+    evaluation_window_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stable_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    canary_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stable_sample_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    canary_sample_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class BenchmarkRunStatus(enum.StrEnum):

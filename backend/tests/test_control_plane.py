@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -6,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.control_plane.models import Deployment, DeploymentStatus, TrafficAllocation
 from app.control_plane.router_gateway import RouterGateway, get_router_gateway
 from app.db import get_db
 from app.main import app
@@ -134,9 +136,63 @@ def test_duplicate_idempotency_key_does_not_create_second_deployment(client: Tes
 def test_requests_without_idempotency_key_each_create_a_new_deployment(
     client: TestClient,
 ) -> None:
-    first = _create_deployment(client)
-    second = _create_deployment(client)
+    # Different model_names: two *active* deployments for the *same* model are
+    # rejected regardless of idempotency key (see the 409 test below) - this test
+    # is specifically about the idempotency key itself, not about that rule, so it
+    # sidesteps it rather than retesting it.
+    first = _create_deployment(client, model_name="model-a")
+    second = _create_deployment(client, model_name="model-b")
     assert first.json()["id"] != second.json()["id"]
+
+
+def test_second_active_deployment_for_same_model_is_rejected(client: TestClient) -> None:
+    first = _create_deployment(client)
+    assert first.status_code == 201
+
+    second = _create_deployment(client, idempotency_key="a-different-key")
+    assert second.status_code == 409
+
+    # And no second row was actually created.
+    listing = client.get("/api/deployments").json()
+    matching = [d for d in listing if d["model_name"] == "fraud-model"]
+    assert len(matching) == 1
+
+
+def test_new_deployment_allowed_once_previous_one_is_terminal(client: TestClient) -> None:
+    first_id = _create_deployment(client).json()["id"]
+    client.post(f"/api/deployments/{first_id}/rollback")  # -> ROLLED_BACK (terminal)
+
+    second = _create_deployment(client)
+    assert second.status_code == 201
+    assert second.json()["id"] != first_id
+
+
+def test_create_deployment_rejects_identical_stable_and_canary_version(
+    client: TestClient,
+) -> None:
+    response = _create_deployment(client, canary_version="v1")  # same as stable_version
+    assert response.status_code == 422
+
+
+def test_create_deployment_rejects_zero_canary_weight_by_default(client: TestClient) -> None:
+    response = _create_deployment(client, canary_weight=0.0)
+    assert response.status_code == 422
+
+
+def test_create_deployment_rejects_full_canary_weight_by_default(client: TestClient) -> None:
+    response = _create_deployment(client, canary_weight=1.0)
+    assert response.status_code == 422
+
+
+def test_create_deployment_allows_zero_canary_weight_with_explicit_bypass(
+    client: TestClient,
+) -> None:
+    """The benchmark suite's "baseline" scenario deliberately uses canary_weight=0
+    (no canary traffic at all) - see scripts/benchmarks/control_plane_client.py."""
+    response = _create_deployment(
+        client, canary_weight=0.0, allow_degenerate_canary_weight=True
+    )
+    assert response.status_code == 201
 
 
 def test_get_deployment_not_found_returns_404(client: TestClient) -> None:
@@ -229,19 +285,43 @@ def test_router_config_endpoint_ignores_rolled_back_deployment(client: TestClien
 
 
 def test_router_config_endpoint_prefers_active_over_newer_terminal_deployment(
-    client: TestClient,
+    client: TestClient, db_session: Session
 ) -> None:
-    first_id = _create_deployment(client, model_name="shared-model").json()["id"]
+    """get_active_deployment must filter by status, not just take the newest row -
+    constructed directly via the ORM (rather than two /api/deployments calls)
+    since an active deployment now blocks a second one for the same model, so this
+    exact shape (older active + newer terminal for one model) can no longer arise
+    through the API itself - only from data written before that rule existed.
+    """
+    older_active = Deployment(
+        model_name="shared-model",
+        stable_version="v1",
+        canary_version="v2-good",
+        status=DeploymentStatus.CANARY_RUNNING,
+        created_at=datetime.now(UTC) - timedelta(minutes=5),
+    )
+    db_session.add(older_active)
+    db_session.flush()
+    db_session.add(
+        TrafficAllocation(
+            deployment_id=older_active.id,
+            targets=[{"version": "v1", "weight": 0.9}, {"version": "v2-good", "weight": 0.1}],
+        )
+    )
 
-    second = _create_deployment(client, model_name="shared-model")
-    second_id = second.json()["id"]
-    client.post(f"/api/deployments/{second_id}/promote")  # -> PROMOTED (terminal)
+    newer_terminal = Deployment(
+        model_name="shared-model",
+        stable_version="v1",
+        canary_version="v2-good",
+        status=DeploymentStatus.PROMOTED,
+        created_at=datetime.now(UTC),
+    )
+    db_session.add(newer_terminal)
+    db_session.commit()
 
-    # `second` is newer but terminal; `first` is still CANARY_RUNNING and should be
-    # the one the router syncs from.
     response = client.get("/api/router-config/shared-model")
     assert response.status_code == 200
-    assert response.json()["deployment_id"] == first_id
+    assert response.json()["deployment_id"] == older_active.id
 
 
 def test_list_deployments_orders_newest_first(client: TestClient) -> None:

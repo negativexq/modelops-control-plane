@@ -46,6 +46,13 @@ class ControlPlaneClient:
             "canary_version": canary_version,
             "canary_weight": canary_weight,
         }
+        if not (0 < canary_weight < 1):
+            # The "baseline" scenario deliberately uses canary_weight=0 (no canary
+            # traffic at all - see scripts/benchmarks/scenarios.py). The public API
+            # rejects a degenerate weight by default; this internal-only client
+            # opts back in explicitly instead of loosening validation for every
+            # caller (see CreateDeploymentRequest in app/control_plane/schemas.py).
+            payload["allow_degenerate_canary_weight"] = True
         if policy_config is not None:
             payload["policy_config"] = policy_config
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}

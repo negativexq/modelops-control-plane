@@ -15,7 +15,9 @@ from app.control_plane.schemas import (
     TimelineItem,
 )
 from app.control_plane.service import (
+    ActiveDeploymentExistsError,
     AlreadyAtFinalStageError,
+    ConcurrentUpdateError,
     DeploymentNotActiveError,
     DeploymentNotFoundError,
 )
@@ -45,16 +47,20 @@ async def create_deployment(
     router_gateway: RouterGatewayDep,
     idempotency_key: IdempotencyKeyDep = None,
 ) -> DeploymentOut:
-    deployment, created = await service.create_deployment(
-        db=db,
-        router_gateway=router_gateway,
-        model_name=payload.model_name,
-        stable_version=payload.stable_version,
-        canary_version=payload.canary_version,
-        canary_weight=payload.canary_weight,
-        idempotency_key=idempotency_key,
-        policy_config=payload.policy_config,
-    )
+    try:
+        deployment, created = await service.create_deployment(
+            db=db,
+            router_gateway=router_gateway,
+            model_name=payload.model_name,
+            stable_version=payload.stable_version,
+            canary_version=payload.canary_version,
+            canary_weight=payload.canary_weight,
+            idempotency_key=idempotency_key,
+            policy_config=payload.policy_config,
+        )
+    except ActiveDeploymentExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
     return DeploymentOut.model_validate(deployment)
 
@@ -105,6 +111,8 @@ async def promote_deployment(
         )
     except InvalidTransitionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ConcurrentUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     return DeploymentOut.model_validate(deployment)
 
@@ -126,6 +134,8 @@ async def rollback_deployment(
             db, router_gateway, deployment, triggered_by=triggered_by
         )
     except InvalidTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ConcurrentUpdateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     return DeploymentOut.model_validate(deployment)
@@ -152,6 +162,8 @@ async def advance_traffic(
         raise HTTPException(
             status_code=409, detail=f"{exc} - use /promote instead"
         ) from exc
+    except ConcurrentUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     return DeploymentOut.model_validate(deployment)
 
@@ -170,6 +182,8 @@ def record_inconclusive(deployment_id: str, db: DbDep) -> DeploymentOut:
     try:
         deployment = service.record_inconclusive(db, deployment, max_retries)
     except DeploymentNotActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ConcurrentUpdateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     return DeploymentOut.model_validate(deployment)

@@ -160,7 +160,11 @@ services:
       - ./backend/app:/app/app
     environment:
       WORKER_CONTROL_PLANE_BASE_URL: http://backend:8000
-      WORKER_POLL_INTERVAL_SECONDS: "15"
+      # Overridable so CI (.github/workflows/ci.yml's "integration" job) can poll
+      # much faster than a real deployment ever would, so a test that waits for the
+      # worker to actually act doesn't need to wait 15s+ per cycle - defaults to 15
+      # for local `make dev`, unaffected unless this env var is set beforehand.
+      WORKER_POLL_INTERVAL_SECONDS: "${WORKER_POLL_INTERVAL_SECONDS:-15}"
     command: python -m app.worker.main
     depends_on:
       - backend

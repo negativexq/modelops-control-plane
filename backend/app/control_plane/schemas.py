@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from app.control_plane.models import DeploymentStatus, PolicyEvaluationResult
 from app.policy.config import PolicyConfig
@@ -21,6 +21,27 @@ class CreateDeploymentRequest(BaseModel):
     # stored on the deployment at creation time (see service.create_deployment) - the
     # deployment's policy_config is always a fully-resolved snapshot, never None.
     policy_config: PolicyConfig | None = None
+    # Internal-only escape hatch: the benchmark suite's "baseline" scenario
+    # deliberately uses canary_weight=0 (no canary traffic at all, v1-only
+    # throughput measurement - see scripts/benchmarks/scenarios.py) - a
+    # canary_version is still required by the schema even though it's never
+    # actually routed to. A normal deployment with canary_weight=0 or 1 is
+    # meaningless (there's no canary rollout happening), so the public API rejects
+    # it by default; this flag opts back in explicitly rather than loosening
+    # validation for every caller. The dashboard's NewDeploymentForm never sets it.
+    allow_degenerate_canary_weight: bool = False
+
+    @model_validator(mode="after")
+    def _validate_versions_and_weight(self) -> Self:
+        if self.stable_version == self.canary_version:
+            raise ValueError("stable_version and canary_version must differ")
+        if not self.allow_degenerate_canary_weight and not (0 < self.canary_weight < 1):
+            raise ValueError(
+                "canary_weight must be strictly between 0 and 1 for a real canary "
+                "rollout (set allow_degenerate_canary_weight=true only if you "
+                "genuinely mean 'no canary traffic at all')"
+            )
+        return self
 
 
 class DeploymentEventOut(BaseModel):
@@ -91,6 +112,11 @@ class TimelinePolicyItem(BaseModel):
     threshold: float | None
     result: PolicyEvaluationResult
     explanation: str
+    # True when this check predates the traffic-context snapshot columns on
+    # PolicyEvaluation (added in a later migration) and `explanation` therefore had
+    # to fall back to the deployment's *current* traffic split rather than what was
+    # actually true at evaluation time - see app/control_plane/timeline.py.
+    is_estimated: bool
 
 
 TimelineItem = Annotated[

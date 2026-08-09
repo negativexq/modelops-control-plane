@@ -55,6 +55,21 @@ currently-**active** allocation for that model (status `CANARY_RUNNING` or
 `EVALUATING`) — a `FAILED`/`ROLLED_BACK`/`PROMOTED` deployment is never returned
 here even if it's the most recent row.
 
+**One active deployment per model.** `POST /api/deployments` now 409s
+(`ActiveDeploymentExistsError`) if `model_name` already has a `CANARY_RUNNING`/
+`EVALUATING` deployment — regardless of `Idempotency-Key`, which only dedupes a
+*retry of the same logical request*, not two genuinely different requests for the
+same model. Without this, two concurrent rollouts for one model would silently
+fight over the router's single traffic-split slot (`RouterConfigStore`, Sprint 3)
+with no way to tell which one "wins." A caller that wants to replace an in-flight
+rollout has to promote or roll it back first, same as a human would.
+
+`POST /api/deployments/{id}/evaluate` (see [Policy engine](#policy-engine)) has
+the same active-only requirement as the worker's own action endpoints — a
+`PROMOTED`/`ROLLED_BACK`/`FAILED`/`INCONCLUSIVE` deployment has nothing left to
+evaluate, and recording more `PolicyEvaluation` rows against it would just
+misrepresent the timeline as if the rollout were still being judged.
+
 ## Metrics
 
 `POST /api/deployments/{id}/metrics` is deliberately minimal (one PK existence
@@ -125,6 +140,20 @@ inconclusive check (most often `minimum_recall`, since no `actual_label` source
 exists) can never be outvoted into a PASS by the other checks. "Couldn't tell" and
 "looked fine" are never the same bucket.
 
+**Explanations are audit-accurate, not present-tense.** Each `PolicyEvaluation`
+row snapshots the deployment's own context *at the moment it ran*
+(`evaluation_window_seconds`, `stable_weight`, `canary_weight`,
+`stable_sample_count`, `canary_sample_count` — all nullable, since rows written
+before this snapshot existed have none). `app/policy/explain.py`'s human-readable
+`explanation` (surfaced on the timeline, see [Incident timeline & explainable
+policy UI](../README.md#incident-timeline--explainable-policy-ui-sprint-10)) uses
+that snapshot, not the deployment's *current* traffic split - otherwise an old
+`minimum_requests` INCONCLUSIVE would silently reword itself every time the
+deployment's traffic changed later, misrepresenting what was actually true when
+the check fired. Rows with no snapshot (pre-migration) fall back to current state
+and say so explicitly (`is_estimated: true` in the API response, plus a note in
+the prose) rather than presenting a guess as recorded fact.
+
 ## Automated promotion & rollback
 
 The worker has **no direct DB access and keeps no in-memory rollout state**; every
@@ -143,13 +172,27 @@ re-evaluating until that policy's window has actually elapsed. This is what make
 it restart-safe without a separate "last checked" store: the record it needs
 already exists in the same table being written to.
 
-**Race safety**: every action endpoint (`advance-traffic`, `promote`, `rollback`,
-`record-inconclusive`) independently re-checks the deployment is still
-`CANARY_RUNNING`/`EVALUATING` server-side and returns **409** otherwise - so if a
-human promotes/rolls back a deployment between the worker's `evaluate` call and its
-follow-up action, the server rejects the stale action instead of corrupting an
-already-final `TrafficAllocation`. The worker treats a 409 as "someone else already
-handled this," logs it, and moves on to the next deployment.
+**Race safety, two layers**: every action endpoint (`advance-traffic`, `promote`,
+`rollback`, `record-inconclusive`) independently re-checks the deployment is still
+`CANARY_RUNNING`/`EVALUATING` server-side and returns **409** otherwise - this
+catches a *sequential* stale action (the deployment settled into a new status
+before this request even started, e.g. a human acted between the worker's
+`evaluate` call and its follow-up action).
+
+That status check alone is not enough for a genuinely *concurrent* race, though:
+two requests can both read the same "still active" status and both pass every
+in-memory check before either commits - `Deployment.status` doesn't change during
+`promote_deployment`/`rollback_deployment`'s in-memory transitions until the final
+`db.commit()`. `Deployment.version_id` (a SQLAlchemy `version_id_col`, bumped on
+every commit that mutates the row - see `service._touch`, needed because
+`advance_traffic`'s success path otherwise only touches `TrafficAllocation`, a
+different table) closes this: a commit whose `WHERE version_id = <what this
+session read>` matches zero rows raises `StaleDataError`, which `service._commit`
+turns into `ConcurrentUpdateError` (409). Whichever request commits first wins;
+the loser gets a clean 409 instead of silently overwriting - or racing to
+corrupt - what the winner just wrote. The worker treats any 409 (stale-status or
+concurrent-update) as "someone else already handled this," logs it, and moves on
+to the next deployment.
 
 ## Benchmark suite
 

@@ -37,17 +37,28 @@ jobs:
       - run: npm run lint
       - run: npm run type-check
 
-  # Brings up the real docker-compose stack and exercises it over HTTP exactly like
-  # a human demoing the platform would: create a deployment, send predictions,
-  # evaluate, promote, check the timeline. Deliberately separate from and gated on
-  # the lint/unit-test jobs above (no point building 8 containers if `ruff` alone
-  # already failed) - see backend/scripts/ci_smoke_test.py's docstring for why this
-  # job exists: every real bug found in this project was found by running the
-  # actual stack, not by a unit test with mocked collaborators.
+  # Brings up the real docker-compose stack (9 containers: 8 HTTP-exposed services
+  # + the worker, which has no HTTP surface) and exercises it over HTTP exactly like
+  # a human demoing the platform would - including waiting for the real automated
+  # worker to actually act (not a manual call standing in for it): a real automatic
+  # rollback triggered by an injected latency fault, and a real automatic promotion
+  # walked through every traffic stage. Deliberately separate from and gated on the
+  # lint/unit-test jobs above (no point building 9 containers if `ruff` alone
+  # already failed) - see backend/scripts/ci_smoke_test.py's docstring for the full
+  # scenario list and for why this job exists at all: every real bug found in this
+  # project was found by running the actual stack, not by a unit test with mocked
+  # collaborators.
   integration:
     runs-on: ubuntu-latest
     needs: [backend, frontend]
     timeout-minutes: 20
+    env:
+      # The worker's real (production) poll interval is 15s - two of the three
+      # smoke-test scenarios wait for it to actually act (real automatic rollback,
+      # real automatic promote through every traffic stage), which would make this
+      # job needlessly slow at that cadence. Turned down for this job only; local
+      # `make dev` is unaffected since this env var isn't set there.
+      WORKER_POLL_INTERVAL_SECONDS: "2"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

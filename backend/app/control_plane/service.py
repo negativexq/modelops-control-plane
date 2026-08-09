@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.control_plane.models import (
     Deployment,
@@ -55,6 +56,46 @@ class AlreadyAtFinalStageError(Exception):
         super().__init__(f"deployment {deployment_id} canary is already at the final stage")
 
 
+class ConcurrentUpdateError(Exception):
+    """Raised when a commit lost a race against another write to the same
+    deployment row - SQLAlchemy's version_id_col (see models.Deployment) caught a
+    stale write: this session read the row, someone else (a human clicking
+    promote/rollback, or the worker's own poll cycle) committed a change to it
+    first, and now this session's WHERE version_id=<old value> matched zero rows.
+
+    Unlike DeploymentNotActiveError (a *sequential* stale-status check - the row
+    settled into a new status before this request even started), this is a genuine
+    *concurrent* write race caught at commit time - both requests could have read
+    the same "active" status and passed every earlier check. Neither write silently
+    overwrote the other. The caller should treat this like a 409 and, if it still
+    wants to act, re-fetch and retry against the new state.
+    """
+
+    def __init__(self, deployment_id: str) -> None:
+        self.deployment_id = deployment_id
+        super().__init__(
+            f"deployment {deployment_id} was concurrently modified by another "
+            "request - retry against its current state"
+        )
+
+
+class ActiveDeploymentExistsError(Exception):
+    """Raised by create_deployment when `model_name` already has a deployment in
+    CANARY_RUNNING/EVALUATING - the router holds exactly one traffic split per
+    model, so a second concurrent rollout would silently fight the first one over
+    it. A caller that wants to replace an in-flight rollout must promote/roll it
+    back first, not start a second one out from under it.
+    """
+
+    def __init__(self, model_name: str, existing_deployment_id: str) -> None:
+        self.model_name = model_name
+        self.existing_deployment_id = existing_deployment_id
+        super().__init__(
+            f"model '{model_name}' already has an active deployment "
+            f"({existing_deployment_id}) - promote or roll it back first"
+        )
+
+
 def get_active_deployment(db: Session, model_name: str) -> Deployment | None:
     """The one deployment (if any) whose traffic allocation is currently live for
     this model. Used by both the router-config sync endpoint and anything else that
@@ -96,9 +137,33 @@ def _set_traffic_allocation(
         db.add(TrafficAllocation(deployment_id=deployment.id, targets=targets))
 
 
-def _require_active(deployment: Deployment) -> None:
+def require_active(deployment: Deployment) -> None:
+    """Raises DeploymentNotActiveError unless `deployment` is CANARY_RUNNING or
+    EVALUATING. Public (used by policy/api.py's /evaluate guard too, not just the
+    worker-only action endpoints in this module) - see DeploymentNotActiveError."""
     if deployment.status not in ACTIVE_STATUSES:
         raise DeploymentNotActiveError(deployment.id, deployment.status)
+
+
+def _touch(deployment: Deployment) -> None:
+    """Explicitly dirties the Deployment row so its version_id_col (optimistic
+    lock) is checked and bumped on every action that goes through this module -
+    some actions (e.g. advance_traffic's success path) only otherwise mutate
+    TrafficAllocation, a *different* table, which wouldn't by itself put Deployment
+    in that flush's UPDATE and would silently skip the stale-version check.
+    """
+    deployment.updated_at = datetime.now(UTC)
+
+
+def _commit(db: Session, deployment: Deployment) -> None:
+    """db.commit(), translating a lost optimistic-lock race into
+    ConcurrentUpdateError instead of letting StaleDataError (a SQLAlchemy-internal
+    exception type) leak past this module."""
+    try:
+        db.commit()
+    except StaleDataError as exc:
+        db.rollback()
+        raise ConcurrentUpdateError(deployment.id) from exc
 
 
 def get_deployment(db: Session, deployment_id: str) -> Deployment:
@@ -146,6 +211,10 @@ async def create_deployment(
         existing = find_by_idempotency_key(db, idempotency_key)
         if existing is not None:
             return existing, False
+
+    existing_active = get_active_deployment(db, model_name)
+    if existing_active is not None:
+        raise ActiveDeploymentExistsError(model_name, existing_active.id)
 
     effective_policy_config = (
         policy_config if policy_config is not None else policy_settings.to_policy_config()
@@ -199,6 +268,7 @@ async def promote_deployment(
     """Promote the canary to 100% of traffic. `triggered_by` ("manual" or
     "automatic") is recorded in the event message so the audit trail can tell a human
     click apart from a worker decision."""
+    _touch(deployment)
     if deployment.status == DeploymentStatus.CANARY_RUNNING:
         _transition(
             db,
@@ -217,7 +287,7 @@ async def promote_deployment(
             db, deployment, DeploymentStatus.FAILED, f"router update failed during promote: {exc}"
         )
         deployment.completed_at = datetime.now(UTC)
-        db.commit()
+        _commit(db, deployment)
         db.refresh(deployment)
         return deployment
 
@@ -230,7 +300,7 @@ async def promote_deployment(
     )
     deployment.completed_at = datetime.now(UTC)
 
-    db.commit()
+    _commit(db, deployment)
     db.refresh(deployment)
     return deployment
 
@@ -241,6 +311,7 @@ async def rollback_deployment(
     """Roll back all traffic to the stable version. `triggered_by` distinguishes a
     manual dashboard click from a worker's automated FAIL decision in the event log.
     """
+    _touch(deployment)
     if deployment.status == DeploymentStatus.CANARY_RUNNING:
         _transition(
             db,
@@ -262,7 +333,7 @@ async def rollback_deployment(
             f"router update failed during rollback: {exc}",
         )
         deployment.completed_at = datetime.now(UTC)
-        db.commit()
+        _commit(db, deployment)
         db.refresh(deployment)
         return deployment
 
@@ -275,7 +346,7 @@ async def rollback_deployment(
     )
     deployment.completed_at = datetime.now(UTC)
 
-    db.commit()
+    _commit(db, deployment)
     db.refresh(deployment)
     return deployment
 
@@ -298,7 +369,8 @@ async def advance_traffic(
     (CANARY_RUNNING or EVALUATING); ramping up traffic isn't itself a state-machine
     transition.
     """
-    _require_active(deployment)
+    require_active(deployment)
+    _touch(deployment)
 
     current_weight = _current_canary_weight(deployment)
     next_weight = next((w for w in TRAFFIC_STAGES if w > current_weight + 1e-9), None)
@@ -319,7 +391,7 @@ async def advance_traffic(
             f"router update failed during automatic traffic advance: {exc}",
         )
         deployment.completed_at = datetime.now(UTC)
-        db.commit()
+        _commit(db, deployment)
         db.refresh(deployment)
         return deployment
 
@@ -333,7 +405,7 @@ async def advance_traffic(
         f"auto: advanced canary traffic from {from_pct:.0f}% to {to_pct:.0f}%",
     )
 
-    db.commit()
+    _commit(db, deployment)
     db.refresh(deployment)
     return deployment
 
@@ -345,7 +417,8 @@ def record_inconclusive(db: Session, deployment: Deployment, max_retries: int) -
     look at it - an unlabeled canary otherwise stays INCONCLUSIVE forever, which is
     the expected (not buggy) outcome while there's no actual_label source (Sprint 5).
     """
-    _require_active(deployment)
+    require_active(deployment)
+    _touch(deployment)
 
     deployment.inconclusive_retry_count += 1
     attempt = deployment.inconclusive_retry_count
@@ -372,6 +445,6 @@ def record_inconclusive(db: Session, deployment: Deployment, max_retries: int) -
         )
         deployment.completed_at = datetime.now(UTC)
 
-    db.commit()
+    _commit(db, deployment)
     db.refresh(deployment)
     return deployment

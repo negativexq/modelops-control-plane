@@ -171,6 +171,25 @@ def test_evaluate_does_not_change_deployment_status(
     assert detail["status"] == "CANARY_RUNNING"
 
 
+def test_evaluate_rejects_terminal_deployment(
+    client: TestClient, db_session: Session, deployment: Deployment
+) -> None:
+    """A PROMOTED/ROLLED_BACK/FAILED/INCONCLUSIVE deployment has nothing left to
+    evaluate - writing more PolicyEvaluation rows against it would just pollute its
+    timeline with checks that can no longer affect anything."""
+    deployment.status = DeploymentStatus.PROMOTED
+    db_session.commit()
+
+    response = client.post(
+        f"/api/deployments/{deployment.id}/evaluate", json={"minimum_requests": 1}
+    )
+    assert response.status_code == 409
+
+    # And no PolicyEvaluation row was actually written.
+    evaluations = client.get(f"/api/deployments/{deployment.id}/policy-evaluations").json()
+    assert evaluations == []
+
+
 def test_evaluate_unknown_deployment_returns_404(client: TestClient) -> None:
     response = client.post("/api/deployments/does-not-exist/evaluate", json={})
     assert response.status_code == 404

@@ -70,6 +70,11 @@ export interface TimelinePolicyItem {
   // backend/app/policy/explain.py. Especially useful for INCONCLUSIVE, which
   // otherwise reads as an unexplained non-answer.
   explanation: string;
+  // True only for checks recorded before the traffic-context snapshot columns
+  // existed on PolicyEvaluation - `explanation` then falls back to the
+  // deployment's *current* traffic split rather than what was true at evaluation
+  // time (see backend/app/control_plane/timeline.py).
+  is_estimated: boolean;
 }
 
 export type TimelineItem = TimelineEventItem | TimelinePolicyItem;
@@ -79,6 +84,11 @@ export interface CreateDeploymentRequest {
   stable_version: string;
   canary_version: string;
   canary_weight: number;
+  // Internal-only escape hatch for the benchmark suite's "baseline" scenario
+  // (canary_weight=0) - never set by this dashboard's own NewDeploymentForm, which
+  // already enforces 0 < weight < 1 client-side. See backend's
+  // CreateDeploymentRequest for the validation this bypasses.
+  allow_degenerate_canary_weight?: boolean;
 }
 
 export interface MetricsSummary {

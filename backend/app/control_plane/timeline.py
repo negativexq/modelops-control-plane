@@ -32,7 +32,7 @@ def _canary_weight(deployment: Deployment) -> float | None:
 
 
 def build_timeline(db: Session, deployment: Deployment) -> list[TimelineItem]:
-    canary_weight = _canary_weight(deployment)
+    current_canary_weight = _canary_weight(deployment)
 
     items: list[TimelineItem] = [
         TimelineEventItem(
@@ -43,24 +43,35 @@ def build_timeline(db: Session, deployment: Deployment) -> list[TimelineItem]:
         )
         for event in deployment.events
     ]
-    items += [
-        TimelinePolicyItem(
-            id=evaluation.id,
-            timestamp=evaluation.evaluated_at,
-            policy_name=evaluation.policy_name,
-            metric_name=evaluation.metric_name,
-            observed_value=evaluation.observed_value,
-            threshold=evaluation.threshold,
-            result=evaluation.result,
-            explanation=explain_policy_check(
+    for evaluation in list_policy_evaluations(db, deployment.id):
+        # Prefer the snapshot recorded at evaluation time (PolicyEvaluation.
+        # canary_weight - see policy/service.py's run_evaluation); only fall back
+        # to the deployment's *current* traffic split for rows written before that
+        # snapshot column existed, and flag the fallback explicitly rather than
+        # silently presenting a guess as recorded fact.
+        has_snapshot = evaluation.canary_weight is not None
+        weight_for_explanation = (
+            evaluation.canary_weight if has_snapshot else current_canary_weight
+        )
+        items.append(
+            TimelinePolicyItem(
+                id=evaluation.id,
+                timestamp=evaluation.evaluated_at,
                 policy_name=evaluation.policy_name,
+                metric_name=evaluation.metric_name,
                 observed_value=evaluation.observed_value,
                 threshold=evaluation.threshold,
                 result=evaluation.result,
-                canary_weight=canary_weight,
-            ),
+                explanation=explain_policy_check(
+                    policy_name=evaluation.policy_name,
+                    observed_value=evaluation.observed_value,
+                    threshold=evaluation.threshold,
+                    result=evaluation.result,
+                    canary_weight=weight_for_explanation,
+                    is_estimated=not has_snapshot,
+                ),
+                is_estimated=not has_snapshot,
+            )
         )
-        for evaluation in list_policy_evaluations(db, deployment.id)
-    ]
     items.sort(key=lambda item: item.timestamp)
     return items
