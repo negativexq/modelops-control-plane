@@ -105,7 +105,11 @@ def test_compute_version_summary_separates_by_deployment(
     db_session: Session, deployment: Deployment
 ) -> None:
     other = Deployment(
-        model_name="fraud-model",
+        # Different model_name than the `deployment` fixture - only deployment_id
+        # isolation is under test here, but two simultaneously non-terminal
+        # deployments for the *same* model_name now violates a DB-level invariant
+        # (uq_deployments_active_per_model - see app/control_plane/models.py).
+        model_name="other-model",
         stable_version="v1",
         canary_version="v2-good",
         status=DeploymentStatus.CANARY_RUNNING,

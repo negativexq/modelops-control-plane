@@ -3,7 +3,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -37,6 +38,22 @@ TERMINAL_STATUSES = frozenset(
         DeploymentStatus.FAILED,
     }
 )
+
+# Raw SQL fragment for the partial-unique-index WHERE clause below - built from
+# TERMINAL_STATUSES (sorted for a deterministic string - a plain frozenset's
+# iteration order isn't guaranteed stable) so the index's notion of "still
+# in-flight" can never silently drift from the enum it's derived from. Broader
+# than ACTIVE_STATUSES in control_plane/service.py on purpose: INCONCLUSIVE is a
+# frozen-but-unresolved deployment (a human still has to promote/roll it back), so
+# a second deployment for the same model would be just as confusing there as while
+# CANARY_RUNNING - see the migration and docs/DESIGN_NOTES.md for the full
+# reasoning. Do not touch service.get_active_deployment's ACTIVE_STATUSES to match
+# this - that helper answers a different, narrower question ("what does the router
+# sync from"), not "what does this DB invariant allow".
+_TERMINAL_STATUS_VALUES_SQL = ", ".join(
+    f"'{value}'" for value in sorted(status.value for status in TERMINAL_STATUSES)
+)
+ACTIVE_PER_MODEL_INDEX_NAME = "uq_deployments_active_per_model"
 
 
 def _new_id() -> str:
@@ -88,6 +105,23 @@ class Deployment(Base):
     # deployment first. This is what actually makes concurrent actions race-safe,
     # not just sequential stale-status checks (see docs/DESIGN_NOTES.md).
     version_id: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    # DB-level backstop for "one in-flight deployment per model" (app-level
+    # pre-check: service.get_active_deployment + ActiveDeploymentExistsError, in
+    # service.create_deployment). The pre-check alone is check-then-act and races;
+    # this partial unique index makes the invariant true even under a concurrent
+    # INSERT that slipped past the pre-check - see the migration that added it and
+    # docs/DESIGN_NOTES.md. sqlite_where/postgresql_where are both given so this
+    # survives an eventual SQLite -> Postgres move without rewriting the index.
+    __table_args__ = (
+        Index(
+            ACTIVE_PER_MODEL_INDEX_NAME,
+            "model_name",
+            unique=True,
+            sqlite_where=sql_text(f"status NOT IN ({_TERMINAL_STATUS_VALUES_SQL})"),
+            postgresql_where=sql_text(f"status NOT IN ({_TERMINAL_STATUS_VALUES_SQL})"),
+        ),
+    )
 
     traffic_allocation: Mapped["TrafficAllocation | None"] = relationship(
         back_populates="deployment", uselist=False, cascade="all, delete-orphan"

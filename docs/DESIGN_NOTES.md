@@ -55,14 +55,33 @@ currently-**active** allocation for that model (status `CANARY_RUNNING` or
 `EVALUATING`) — a `FAILED`/`ROLLED_BACK`/`PROMOTED` deployment is never returned
 here even if it's the most recent row.
 
-**One active deployment per model.** `POST /api/deployments` now 409s
-(`ActiveDeploymentExistsError`) if `model_name` already has a `CANARY_RUNNING`/
-`EVALUATING` deployment — regardless of `Idempotency-Key`, which only dedupes a
-*retry of the same logical request*, not two genuinely different requests for the
-same model. Without this, two concurrent rollouts for one model would silently
-fight over the router's single traffic-split slot (`RouterConfigStore`, Sprint 3)
-with no way to tell which one "wins." A caller that wants to replace an in-flight
-rollout has to promote or roll it back first, same as a human would.
+**One active deployment per model - enforced at two layers, not check-then-act.**
+`POST /api/deployments` 409s (`ActiveDeploymentExistsError`) if `model_name`
+already has a non-terminal deployment — regardless of `Idempotency-Key`, which
+only dedupes a *retry of the same logical request*, not two genuinely different
+requests for the same model. Without this, two concurrent rollouts for one model
+would silently fight over the router's single traffic-split slot
+(`RouterConfigStore`, Sprint 3) with no way to tell which one "wins." A caller
+that wants to replace an in-flight rollout has to promote or roll it back first,
+same as a human would.
+
+The app-level pre-check (`service.get_active_deployment`, querying
+`CANARY_RUNNING`/`EVALUATING` only) exists purely for a friendly, immediate error
+message in the common case - on its own it's check-then-act and races: two
+concurrent requests can both read "no active deployment" before either commits.
+The real guarantee is `uq_deployments_active_per_model`, a **partial unique
+index** on `deployments.model_name` (see the migration that added it,
+`Deployment.__table_args__`, and `sqlite_where`/`postgresql_where` both being set
+so an eventual Postgres move doesn't need this index rewritten) covering every
+*non-terminal* status - deliberately wider than the pre-check's
+`CANARY_RUNNING`/`EVALUATING`: `INCONCLUSIVE` counts too, since a frozen,
+unresolved deployment is just as much "not done" as a running one. A request that
+slips past the pre-check still hits this index at `flush()` time; `service.
+create_deployment` catches that `IntegrityError` and translates it into the same
+`ActiveDeploymentExistsError` the pre-check raises (distinguishing it from an
+`idempotency_key` collision on the same statement, a different constraint with a
+different meaning) - so a caller never needs to know two mechanisms exist, only
+that the guarantee is real either way.
 
 `POST /api/deployments/{id}/evaluate` (see [Policy engine](#policy-engine)) has
 the same active-only requirement as the worker's own action endpoints — a

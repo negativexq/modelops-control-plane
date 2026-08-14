@@ -2,6 +2,7 @@ import logging
 from datetime import UTC, datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -229,7 +230,26 @@ async def create_deployment(
         policy_config=effective_policy_config.model_dump(),
     )
     db.add(deployment)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        # Defense-in-depth against the TOCTOU race the pre-check above can't close
+        # on its own: two concurrent requests can both see "no active deployment"
+        # before either commits. The DB-level partial unique index
+        # (uq_deployments_active_per_model - see the migration and
+        # docs/DESIGN_NOTES.md) is what actually makes this exclusive; this is just
+        # translating its violation into the same ActiveDeploymentExistsError the
+        # pre-check raises, so callers don't need to know two different mechanisms
+        # exist. Must not swallow an idempotency_key collision here - that's a
+        # different constraint, on the same statement, with a different meaning.
+        db.rollback()
+        orig_message = str(exc.orig) if exc.orig is not None else str(exc)
+        if "idempotency_key" in orig_message:
+            raise
+        winner = get_active_deployment(db, model_name)
+        raise ActiveDeploymentExistsError(
+            model_name, winner.id if winner is not None else "<unknown - lost the race>"
+        ) from exc
     _log_event(
         db,
         deployment,
