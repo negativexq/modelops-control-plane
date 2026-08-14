@@ -166,6 +166,18 @@ class TrafficAllocation(Base):
     )
     # [{"version": "v1", "weight": 0.9}, {"version": "v2-good", "weight": 0.1}, ...]
     targets: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    # Desired-state revision for this deployment's traffic split - bumped by 1 in
+    # the same transaction as every `targets` change (see service._set_traffic_
+    # allocation). Scoped per-deployment, not per-model: only one deployment is
+    # ever active for a given model at a time (uq_deployments_active_per_model),
+    # so the router only ever needs to compare (deployment_id, revision) against
+    # what it last applied - see docs/DESIGN_NOTES.md#desired-observed-reconciliation
+    # for why a model-scoped counter would need a table this project doesn't
+    # otherwise have. The router (app/router/main.py's put_config) rejects a push
+    # for the same deployment_id whose revision isn't strictly greater than what
+    # it already has - this is what makes a losing concurrent writer's stale push
+    # harmless instead of silently corrupting observed state.
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=_utcnow, onupdate=_utcnow
     )

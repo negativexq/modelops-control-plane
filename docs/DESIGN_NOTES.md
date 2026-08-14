@@ -423,6 +423,106 @@ decision in those two scenarios rests solely on the quality signal
 separately, and for real, by scenario 2 - scenarios 3/4 have nothing further
 to prove there and would only add CI flakiness by trying.
 
+## Desired/observed reconciliation
+
+**The bug this closes.** Every traffic-changing action (`create_deployment`,
+`promote_deployment`, `rollback_deployment`, `advance_traffic`) used to push the
+new config to the router *before* committing it to the DB. Two concurrent
+requests against the same deployment (a human promoting while the worker's own
+FAIL decision rolls back, say) could both read the same `version_id`, both push
+to the router, and only one would win the DB's optimistic lock - but the loser
+had *already written to the router* by the time its commit was rejected. Result:
+the DB says PROMOTED, the router is still serving 100% stable. No data was
+corrupted, but the control plane was now lying about what was actually running.
+A second, unrelated version of the same class of bug: the router keeps its
+traffic split in memory only, so a plain restart loses it and nothing notices.
+
+**The fix has two parts, and neither alone is sufficient.** (1) Commit desired
+state to the DB *first*, push to the router *after* - see
+`service._push_best_effort` and every action function's comment on this. This
+closes the original race outright: a losing writer's commit now fails at the DB
+layer before it ever attempts a router push, so the router can no longer end up
+holding a stale writer's state. But reversing the order introduces a new,
+narrower gap on its own: a commit can succeed and the *following* push can then
+fail (router down, network blip) or land stale, leaving DB (desired) and router
+(observed) briefly diverged with nothing to close that gap. (2) The reconciler
+(`app/control_plane/reconcile.py`) is what actually guarantees convergence,
+closing exactly that gap on a schedule - which is why this is shipped as one
+change, not two: commit-then-push without a reconciler would just trade "the
+router can lie" for "the router can silently drift and stay wrong forever."
+
+**No outbox table.** The desired state a reconciler needs to compare against is
+already fully durable in `Deployment`/`TrafficAllocation` - that's the whole
+point of committing before pushing. An outbox table (a queue of "pending router
+pushes" rows) would store the *same* information a second time, in a second
+place that itself needs to stay consistent with the first - a new source of the
+exact kind of bug this feature exists to remove, for no benefit: nothing here
+needs ordered delivery, exactly-once semantics, or a producer/consumer split
+across process boundaries. The reconciler doesn't drain a queue; it diffs two
+already-durable pieces of state and re-pushes when they disagree, exactly like
+a Kubernetes controller diffs a resource's `spec` against its live status
+rather than replaying a log of past intents.
+
+**Revision scope: per-deployment, not per-model.** `TrafficAllocation.revision`
+increments once per `targets` change, scoped to the one deployment row it lives
+on - not a single counter shared across every deployment a model has ever had.
+A model-scoped counter would need somewhere to live: there's no `Model` table
+in this system (models are plain strings), so it would mean adding one just to
+hold an integer, for a guarantee the per-deployment scope already provides for
+free. `uq_deployments_active_per_model` (see [Control plane & deployment
+lifecycle](#control-plane--deployment-lifecycle)) guarantees at most one
+non-terminal deployment per model at any time, and the router only ever needs
+to answer one question - "have I already applied this exact (deployment_id,
+revision) or newer?" - which a per-deployment counter answers completely: a
+different deployment_id is definitionally a different rollout (the previous one
+is terminal) and always wins outright, regardless of what revision number it
+starts from; the same deployment_id needs simple monotonicity, which the
+existing optimistic-locked commit already guarantees for free.
+
+**A stale-revision 409 is coordination working, not a failure.** `app/router/
+main.py`'s `put_config` rejects a push for the same `deployment_id` whose
+revision isn't strictly greater than what it already has - see
+`StaleRevisionError`. This fires constantly in entirely healthy operation: the
+losing side of a race, or a reconcile tick that lost a footrace against a
+concurrent promote/rollback that had already landed the same or a newer
+revision by the time the reconciler's own push arrived. `service.
+_push_best_effort` catches it and logs at `info`, not `warning` or `error`, and
+never touches the deployment's status - see the next paragraph for why a plain
+`RouterUpdateError` (the router being genuinely unreachable) is treated the
+same way for a different reason. Both are deliberately distinct exception
+types, though, because they mean different things to a human reading logs: one
+says "someone else's write already won," the other says "the router didn't
+respond at all."
+
+**Why a router push failure no longer marks a deployment FAILED.** Before this
+sprint, an unreachable router during promote/rollback/advance/create
+transitioned the deployment to `FAILED`. That made sense when the push
+happened *before* the commit - if the push failed, nothing had happened yet,
+so `FAILED` was accurate. It stopped being accurate once desired state commits
+first: by the time a push can fail, the DB has *already* agreed that
+`CANARY_RUNNING`/`PROMOTED`/`ROLLED_BACK`/the new traffic split is this
+deployment's real, current, intended state. Marking it `FAILED` at that point
+wouldn't describe reality - it would silently discard a decision that was
+already made and durably recorded, over a problem (the router hasn't caught up
+yet) the reconciler exists specifically to fix on its own. `FAILED` remains a
+valid state-machine target (see `state_machine.py`) for genuine irrecoverable
+failures; it's just no longer what a temporarily-unreachable router produces.
+
+**A router outage must be visible, not just swallowed.** Not transitioning to
+`FAILED` is only defensible because the outage doesn't disappear - it shows up
+somewhere a human can see it. `service.record_router_reachability_change`
+writes a one-time `router_unreachable`/`router_recovered` `DeploymentEvent` on
+the actual transition (derived from the deployment's own event history, not a
+new column - see the function's docstring), called from both
+`_push_best_effort` and `reconcile.py`, so a sustained outage produces exactly
+one event on the way down and one on the way back up, not a log line per tick
+that nothing else ever surfaces. `GET /api/router/observed` reports a
+`reachable` flag for the same reason: a genuinely unreachable router and a
+reachable-but-never-configured one (e.g. right after a restart) both report
+`deployment_id: None`, so without `reachable` the dashboard couldn't tell a
+serious outage apart from a harmless one-tick-old boot state - which would
+make the drift warning disappear exactly when it matters most.
+
 ## Benchmark suite
 
 Locust was chosen over k6 because it's Python, so the load definition

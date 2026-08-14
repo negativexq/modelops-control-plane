@@ -23,6 +23,14 @@ class RouterConfig(BaseModel):
     # otherwise None (e.g. the router's own static default before any deployment
     # exists), in which case metric emission is skipped.
     deployment_id: str | None = None
+    # Desired-state revision this config represents, for the *same* deployment_id -
+    # see app/control_plane/models.py's TrafficAllocation.revision. 0 for the
+    # router's own static bootstrap config (no real deployment behind it yet), so
+    # any real push (always >= 1) is accepted regardless of what came before.
+    # PUT /router/config (below) rejects a push for the same deployment_id whose
+    # revision isn't strictly greater than what's already applied - see
+    # docs/DESIGN_NOTES.md#desired-observed-reconciliation.
+    revision: int = 0
 
     @model_validator(mode="after")
     def _validate_targets(self) -> "RouterConfig":

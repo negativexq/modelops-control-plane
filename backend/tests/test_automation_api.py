@@ -12,16 +12,29 @@ from app.main import app
 
 
 class FakeRouterGateway:
+    """Router-shaped fake - see tests/test_control_plane.py's identical class for
+    the full rationale (staleness rejection, why `should_fail` no longer implies
+    a FAILED transition)."""
+
     def __init__(self, should_fail: bool = False) -> None:
         self.should_fail = should_fail
-        self.calls: list[tuple[str, str, list[dict[str, Any]]]] = []
+        self.calls: list[tuple[str, str, int, list[dict[str, Any]]]] = []
+        self.observed_deployment_id: str | None = None
+        self.observed_revision: int = 0
 
     async def push_traffic_allocation(
-        self, model_name: str, deployment_id: str, targets: list[dict[str, Any]]
+        self, model_name: str, deployment_id: str, revision: int, targets: list[dict[str, Any]]
     ) -> None:
+        from app.control_plane.router_gateway import StaleRevisionError
+
         if self.should_fail:
             raise RouterUpdateError("simulated router failure")
-        self.calls.append((model_name, deployment_id, targets))
+        same_deployment = deployment_id == self.observed_deployment_id
+        if same_deployment and revision <= self.observed_revision:
+            raise StaleRevisionError(f"stale revision {revision} for {deployment_id}")
+        self.observed_deployment_id = deployment_id
+        self.observed_revision = revision
+        self.calls.append((model_name, deployment_id, revision, targets))
 
 
 @pytest.fixture
@@ -151,7 +164,7 @@ def test_advance_traffic_moves_to_next_stage(
     assert len(events) == 1
     assert "auto:" in events[0]["message"]
 
-    model_name, called_deployment_id, targets = fake_gateway.calls[-1]
+    model_name, called_deployment_id, _revision, targets = fake_gateway.calls[-1]
     assert called_deployment_id == deployment_id
     assert {t["version"]: t["weight"] for t in targets} == {"v1": 0.75, "v2-good": 0.25}
 
@@ -199,9 +212,14 @@ def test_advance_traffic_unknown_deployment_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
-def test_advance_traffic_marks_failed_when_router_push_fails(
+def test_advance_traffic_succeeds_even_when_router_push_fails(
     db_session: Session,
 ) -> None:
+    """Same reasoning as test_control_plane.py's create-deployment equivalent:
+    desired state (the DB) is committed before the router push, so a router
+    that's unreachable during advance-traffic no longer marks the deployment
+    FAILED - the traffic advance is still the deployment's real desired state,
+    and the reconciler is what catches the router up, not this request."""
     failing_gateway = FakeRouterGateway(should_fail=False)
 
     def _get_db() -> Iterator[Session]:
@@ -218,7 +236,10 @@ def test_advance_traffic_marks_failed_when_router_push_fails(
             failing_gateway.should_fail = True
             response = test_client.post(f"/api/deployments/{deployment_id}/advance-traffic")
             assert response.status_code == 200
-            assert response.json()["status"] == "FAILED"
+            body = response.json()
+            assert body["status"] == "CANARY_RUNNING"
+            weights = {t["version"]: t["weight"] for t in body["traffic_allocation"]["targets"]}
+            assert weights["v2-good"] == 0.25
     finally:
         app.dependency_overrides.pop(get_db, None)
         app.dependency_overrides.pop(get_router_gateway, None)

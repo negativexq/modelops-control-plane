@@ -21,12 +21,12 @@ from app.main import app
 
 class FakeRouterGateway:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str, list[dict[str, Any]]]] = []
+        self.calls: list[tuple[str, str, int, list[dict[str, Any]]]] = []
 
     async def push_traffic_allocation(
-        self, model_name: str, deployment_id: str, targets: list[dict[str, Any]]
+        self, model_name: str, deployment_id: str, revision: int, targets: list[dict[str, Any]]
     ) -> None:
-        self.calls.append((model_name, deployment_id, targets))
+        self.calls.append((model_name, deployment_id, revision, targets))
 
 
 @pytest.fixture

@@ -3,7 +3,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
-from app.control_plane import metrics_service, service
+from app.control_plane import metrics_service, reconcile, service
 from app.control_plane.models import Deployment
 from app.control_plane.router_gateway import RouterGateway, get_router_gateway
 from app.control_plane.schemas import (
@@ -30,6 +30,7 @@ TriggeredByDep = Literal["manual", "automatic"]
 
 router = APIRouter(prefix="/api/deployments", tags=["deployments"])
 router_config_router = APIRouter(prefix="/api/router-config", tags=["router-config"])
+reconcile_router = APIRouter(prefix="/api/router", tags=["router"])
 
 DbDep = Annotated[Session, Depends(get_db)]
 RouterGatewayDep = Annotated[RouterGateway, Depends(get_router_gateway)]
@@ -310,4 +311,52 @@ def get_router_config(model_name: str, db: DbDep) -> dict[str, Any]:
         "model_name": model_name,
         "deployment_id": deployment.id,
         "targets": deployment.traffic_allocation.targets,
+    }
+
+
+@reconcile_router.get("/observed")
+async def get_observed_router_state(router_gateway: RouterGatewayDep) -> dict[str, Any]:
+    """Read-only passthrough of the router's current observed config (GET
+    /router/config) - never mutates anything, unlike POST /reconcile. Exists so
+    the dashboard (which only ever talks to the control plane, not the router
+    directly) can show desired-vs-observed drift without triggering a
+    correction just by loading a page.
+
+    `reachable` is the field the dashboard must check first: a router that's
+    genuinely down and one that's up but has never had a deployment pushed to
+    it (a fresh restart) both report `deployment_id: None`, so `deployment_id`
+    alone can't tell those apart - only whether the GET itself succeeded can.
+    Conflating them would make a real outage look identical to a harmless
+    one-tick-old boot state, which is exactly the failure mode this field
+    exists to avoid. See docs/DESIGN_NOTES.md#desired-observed-reconciliation.
+    """
+    observed = await router_gateway.get_observed_config()
+    if observed is None:
+        return {
+            "reachable": False,
+            "model_name": None,
+            "deployment_id": None,
+            "revision": None,
+            "targets": None,
+        }
+    return {"reachable": True, **observed}
+
+
+@reconcile_router.post("/reconcile")
+async def reconcile_router_state(db: DbDep, router_gateway: RouterGatewayDep) -> dict[str, Any]:
+    """Compares the router's observed (deployment_id, revision) against the DB's
+    desired state and re-pushes if they differ - see
+    app/control_plane/reconcile.py and
+    docs/DESIGN_NOTES.md#desired-observed-reconciliation. Called once per sweep by
+    the worker's poll loop (app/worker/loop.py); never raises on its own account -
+    a genuinely unreachable router or "nothing to reconcile" are both reported as
+    `reconciled: false` with a `reason`, not an error.
+    """
+    result = await reconcile.reconcile_router_state(db, router_gateway)
+    return {
+        "reconciled": result.reconciled,
+        "reason": result.reason,
+        "deployment_id": result.deployment_id,
+        "from_revision": result.from_revision,
+        "to_revision": result.to_revision,
     }

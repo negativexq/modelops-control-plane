@@ -106,7 +106,22 @@ async def run_once(client: WorkerClient, default_window_seconds: int) -> None:
     control_plane/service.py's pause_automation and create_deployment) - not by
     the worker's own (stateless, restart-safe) observation of that flag on some
     later sweep. See docs/DESIGN_NOTES.md#manual-automation-hold.
+
+    Also triggers one desired/observed reconcile tick (see
+    app/control_plane/reconcile.py) - the control plane does the actual desired-
+    vs-observed comparison and push (it owns the RouterGateway; the worker never
+    talks to the router or any other infrastructure directly), the worker just
+    calls the endpoint. Wrapped in its own try/except so a transient failure
+    here (the control plane restarting mid-migration, a network blip) can't
+    crash the rest of this sweep - same reasoning as run_forever's own outer
+    try/except, see docs/DESIGN_NOTES.md#automated-promotion--rollback for the
+    worker-crash bug this pattern already exists to avoid.
     """
+    try:
+        await client.reconcile()
+    except Exception:
+        logger.exception("error during router reconcile - will retry next cycle")
+
     deployments = await client.list_deployments()
     active_ids = [
         d["id"]

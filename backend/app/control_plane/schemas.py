@@ -63,6 +63,12 @@ class TrafficAllocationOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     targets: list[TargetWeight]
+    # This deployment's desired-state revision (see
+    # app/control_plane/models.py's TrafficAllocation.revision) - what the
+    # router *should* have applied. Compared against the router's own observed
+    # revision (GET /router/config) for drift detection - see
+    # docs/DESIGN_NOTES.md#desired-observed-reconciliation.
+    revision: int
     updated_at: datetime
 
 

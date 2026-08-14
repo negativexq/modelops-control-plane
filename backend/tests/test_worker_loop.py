@@ -18,6 +18,8 @@ class FakeWorkerClient:
         self.evaluate_result: dict[str, str] = {}
         self.calls: list[tuple[str, str]] = []
         self.conflict_on: set[tuple[str, str]] = set()
+        self.reconcile_calls: int = 0
+        self.reconcile_should_raise: bool = False
 
     def _maybe_conflict(self, action: str, deployment_id: str) -> None:
         self.calls.append((action, deployment_id))
@@ -59,6 +61,12 @@ class FakeWorkerClient:
     async def record_inconclusive(self, deployment_id: str) -> dict[str, Any]:
         self._maybe_conflict("record_inconclusive", deployment_id)
         return {}
+
+    async def reconcile(self) -> dict[str, Any]:
+        self.reconcile_calls += 1
+        if self.reconcile_should_raise:
+            raise RuntimeError("simulated reconcile failure")
+        return {"reconciled": False, "reason": "already in sync"}
 
 
 def _deployment(
@@ -257,6 +265,34 @@ def test_action_conflict_during_action_dispatch_is_swallowed() -> None:
     assert action is None
     assert ("evaluate", "dep-1") in client.calls
     assert ("advance_traffic", "dep-1") in client.calls
+
+
+# --- run_once triggers one reconcile tick per sweep -----------------------------
+
+
+def test_run_once_calls_reconcile_exactly_once() -> None:
+    client = FakeWorkerClient()
+
+    run(run_once(client, default_window_seconds=300))
+
+    assert client.reconcile_calls == 1
+
+
+def test_run_once_survives_a_reconcile_failure_and_still_sweeps_deployments() -> None:
+    """Mirrors run_forever's own outer try/except (see
+    test_run_forever_survives_list_deployments_failure below): a transient
+    reconcile failure (control plane restarting, network blip) must not stop
+    this sweep from still processing active deployments - see
+    docs/DESIGN_NOTES.md#desired-observed-reconciliation."""
+    client = FakeWorkerClient()
+    client.reconcile_should_raise = True
+    client.deployments["dep-1"] = _deployment(canary_weight=0.1)
+    client.evaluate_result["dep-1"] = "PASS"
+
+    run(run_once(client, default_window_seconds=300))
+
+    assert client.reconcile_calls == 1
+    assert ("evaluate", "dep-1") in client.calls
 
 
 # --- run_once sweeps only active deployments ------------------------------------

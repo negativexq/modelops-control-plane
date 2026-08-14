@@ -201,6 +201,67 @@ def test_put_config_rejects_target_with_unknown_version(artifacts_dir: Path) -> 
     assert response.status_code == 400
 
 
+def test_put_config_rejects_stale_revision_for_same_deployment(artifacts_dir: Path) -> None:
+    """See app/control_plane/models.py's TrafficAllocation.revision and
+    docs/DESIGN_NOTES.md#desired-observed-reconciliation - a push for the same
+    deployment_id at an equal-or-lower revision than what's already applied is
+    the losing side of a race (or stale reconciler data) and must be rejected,
+    not silently accepted."""
+    client = _router_client(artifacts_dir)
+    config = client.get("/router/config").json()
+    config["deployment_id"] = "dep-1"
+    config["revision"] = 2
+    accepted = client.put("/router/config", json=config)
+    assert accepted.status_code == 200
+    assert accepted.json()["revision"] == 2
+
+    for stale_revision in (1, 2):  # both older and equal must be rejected
+        config["revision"] = stale_revision
+        response = client.put("/router/config", json=config)
+        assert response.status_code == 409
+        assert "stale revision" in response.json()["detail"]
+
+    # The rejected pushes must not have changed the router's observed state.
+    current = client.get("/router/config").json()
+    assert current["revision"] == 2
+
+
+def test_put_config_accepts_higher_revision_for_same_deployment(artifacts_dir: Path) -> None:
+    client = _router_client(artifacts_dir)
+    config = client.get("/router/config").json()
+    config["deployment_id"] = "dep-1"
+    config["revision"] = 1
+    client.put("/router/config", json=config)
+
+    config["revision"] = 2
+    config["targets"] = [{"version": "v1", "weight": 0.0}, {"version": "v2-good", "weight": 1.0}]
+    response = client.put("/router/config", json=config)
+    assert response.status_code == 200
+
+    current = client.get("/router/config").json()
+    assert current["revision"] == 2
+    assert {t["version"]: t["weight"] for t in current["targets"]}["v2-good"] == 1.0
+
+
+def test_put_config_accepts_new_deployment_regardless_of_revision(artifacts_dir: Path) -> None:
+    """A different deployment_id is a genuinely different rollout - revision is
+    scoped per-deployment (see TrafficAllocation.revision), so a brand-new
+    deployment_id always wins outright, even at revision 1 after the router
+    already saw a much higher revision from a *previous* (now terminal)
+    deployment for the same model."""
+    client = _router_client(artifacts_dir)
+    config = client.get("/router/config").json()
+    config["deployment_id"] = "dep-old"
+    config["revision"] = 99
+    client.put("/router/config", json=config)
+
+    config["deployment_id"] = "dep-new"
+    config["revision"] = 1
+    response = client.put("/router/config", json=config)
+    assert response.status_code == 200
+    assert response.json()["deployment_id"] == "dep-new"
+
+
 def test_weighted_distribution_is_close_to_configured_ratio(artifacts_dir: Path) -> None:
     client = _router_client(artifacts_dir, stable_weight=0.9, canary_weight=0.1)
     sample = _sample_payload(FULL_FEATURES)

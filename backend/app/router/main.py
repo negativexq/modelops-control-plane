@@ -142,10 +142,35 @@ def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None
                 status_code=400,
                 detail=f"No host:port mapping for version(s): {unknown}",
             )
+
+        current = store.get()
+        # Only compare revisions when this push is for the *same* deployment the
+        # router already has applied - a different (or first-ever) deployment_id
+        # always wins outright, since revision is scoped per-deployment, not
+        # globally (see TrafficAllocation.revision). A losing side of a
+        # concurrent promote/rollback (same deployment_id, an equal-or-older
+        # revision) is rejected outright rather than silently accepted - this is
+        # what stops a stale desired-state write from corrupting observed state.
+        # See docs/DESIGN_NOTES.md#desired-observed-reconciliation.
+        same_deployment = (
+            config.deployment_id is not None and config.deployment_id == current.deployment_id
+        )
+        if same_deployment and config.revision <= current.revision:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"stale revision {config.revision} for deployment "
+                    f"{config.deployment_id} - router already has revision "
+                    f"{current.revision} applied"
+                ),
+            )
+
         store.set(config)
         logger.info(
-            "router config updated: model=%s targets=%s",
+            "router config updated: model=%s deployment=%s revision=%s targets=%s",
             config.model_name,
+            config.deployment_id,
+            config.revision,
             [(t.version, t.weight) for t in config.targets],
         )
         return config

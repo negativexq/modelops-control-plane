@@ -14,22 +14,45 @@ to mean anything.
 """
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.control_plane import service
 from app.control_plane.models import Deployment, DeploymentStatus
+from app.db import Base
 
 
 class FakeRouterGateway:
+    """Router-shaped fake: tracks observed (deployment_id, revision, targets) and
+    rejects a same-deployment push whose revision isn't strictly greater, exactly
+    like app/router/main.py's real staleness check - see StaleRevisionError.
+    A single instance is meant to be shared across "both sides" of a race in
+    these tests, since in reality there's only ever one router.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, int, list[dict[str, Any]]]] = []
+        self.observed_deployment_id: str | None = None
+        self.observed_revision: int = 0
+        self.observed_targets: list[dict[str, Any]] | None = None
+
     async def push_traffic_allocation(
-        self, model_name: str, deployment_id: str, targets: list[dict[str, Any]]
+        self, model_name: str, deployment_id: str, revision: int, targets: list[dict[str, Any]]
     ) -> None:
-        pass
+        from app.control_plane.router_gateway import StaleRevisionError
+
+        same_deployment = deployment_id == self.observed_deployment_id
+        if same_deployment and revision <= self.observed_revision:
+            raise StaleRevisionError(f"stale revision {revision} for {deployment_id}")
+        self.observed_deployment_id = deployment_id
+        self.observed_revision = revision
+        self.observed_targets = targets
+        self.calls.append((model_name, deployment_id, revision, targets))
 
 
 def run(coro: Any) -> Any:
@@ -43,6 +66,126 @@ def session_factory(db_session: Session) -> sessionmaker[Session]:
     row, exactly like two separate FastAPI requests would (see app/db.py's
     SessionLocal, one per request)."""
     return sessionmaker(bind=db_session.bind, autoflush=False, autocommit=False)
+
+
+@pytest.fixture
+def file_session_factory(tmp_path: Path) -> sessionmaker[Session]:
+    """A sessionmaker bound to a *file-based* SQLite database, each Session
+    getting its own real, independent connection - unlike `db_session`'s
+    `StaticPool` in-memory engine, where every Session bound to it shares the
+    exact same physical connection (confirmed empirically: an uncommitted flush
+    on one Session is visible to another Session's plain SELECT before the
+    first one even commits). That makes StaticPool unable to prove anything
+    about a genuine cross-connection race - session_b's own pre-checks would
+    "see" session_a's uncommitted writes and behave as if they were already
+    serialized, which a real concurrent request pair never gets to assume. Two
+    connections against the same file is what an actual pair of concurrent API
+    requests looks like.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'concurrency-test.db'}")
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+
+@pytest.fixture
+def file_deployment_id(file_session_factory: sessionmaker[Session]) -> str:
+    session = file_session_factory()
+    try:
+        deployment = Deployment(
+            model_name="fraud-model",
+            stable_version="v1",
+            canary_version="v2-good",
+            status=DeploymentStatus.CANARY_RUNNING,
+        )
+        session.add(deployment)
+        session.commit()
+        return deployment.id
+    finally:
+        session.close()
+
+
+def test_concurrent_promote_and_rollback_router_reflects_winner_only(
+    file_session_factory: sessionmaker[Session], file_deployment_id: str
+) -> None:
+    """The sprint's actual reason for existing: with the old push-before-commit
+    ordering, a losing writer's router push could land *before* its DB commit
+    was rejected by the optimistic lock, leaving the router observing state the
+    DB never actually agreed to. With desired state committed first (see
+    service.promote_deployment/rollback_deployment), the loser's commit fails
+    at the DB layer and its push is never even attempted - so the router's
+    final state must reflect the winner's desired state, exactly, using real
+    independent DB connections (see file_session_factory) and a single shared
+    router fake, since there's only ever one real router.
+    """
+    router = FakeRouterGateway()
+    session_a = file_session_factory()
+    session_b = file_session_factory()
+    try:
+        deployment_a = session_a.get(Deployment, file_deployment_id)
+        deployment_b = session_b.get(Deployment, file_deployment_id)
+        assert deployment_a is not None
+        assert deployment_b is not None
+        assert deployment_a.version_id == deployment_b.version_id
+
+        promoted = run(
+            service.promote_deployment(session_a, router, deployment_a, triggered_by="manual")
+        )
+        assert promoted.status == DeploymentStatus.PROMOTED
+
+        with pytest.raises(service.ConcurrentUpdateError):
+            run(
+                service.rollback_deployment(
+                    session_b, router, deployment_b, triggered_by="automatic"
+                )
+            )
+
+        # The router never even saw the loser's rollback - its commit failed
+        # before service._push_best_effort ever ran.
+        assert len(router.calls) == 1
+        assert router.observed_deployment_id == file_deployment_id
+        assert router.observed_targets == [{"version": "v2-good", "weight": 1.0}]
+
+        final = file_session_factory().get(Deployment, file_deployment_id)
+        assert final is not None
+        assert final.status == DeploymentStatus.PROMOTED
+    finally:
+        session_a.close()
+        session_b.close()
+
+
+def test_stale_push_is_rejected_and_does_not_change_router_state() -> None:
+    """Direct proof of the router-shaped fake's staleness check (mirroring
+    app/router/main.py's real one, see StaleRevisionError) - a push for the same
+    deployment_id at an equal-or-lower revision than what's already applied is
+    rejected outright, and the router's observed state is untouched by it."""
+    router = FakeRouterGateway()
+
+    async def _apply() -> None:
+        await router.push_traffic_allocation(
+            "fraud-model", "dep-1", 2, [{"version": "v2-good", "weight": 1.0}]
+        )
+
+    run(_apply())
+    assert router.observed_revision == 2
+
+    from app.control_plane.router_gateway import StaleRevisionError
+
+    async def _stale_push(revision: int) -> None:
+        await router.push_traffic_allocation(
+            "fraud-model", "dep-1", revision, [{"version": "v1", "weight": 1.0}]
+        )
+
+    for stale_revision in (1, 2):  # both older and equal must be rejected
+        with pytest.raises(StaleRevisionError):
+            run(_stale_push(stale_revision))
+        # Rejected push must not have mutated observed state.
+        assert router.observed_revision == 2
+        assert router.observed_targets == [{"version": "v2-good", "weight": 1.0}]
+
+    # A genuinely newer revision is still accepted.
+    run(_stale_push(3))
+    assert router.observed_revision == 3
+    assert router.observed_targets == [{"version": "v1", "weight": 1.0}]
 
 
 @pytest.fixture

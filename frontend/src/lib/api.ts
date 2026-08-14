@@ -6,6 +6,7 @@ import type {
   MetricsOut,
   ModelVersionEvaluation,
   ModelVersionMetadata,
+  ObservedRouterState,
   RunBenchmarkRequest,
   ScenarioInfo,
   TimelineItem,
@@ -126,6 +127,11 @@ export function resumeAutomation(id: string): Promise<DeploymentOut> {
     `/api/deployments/${encodeURIComponent(id)}/resume-automation`,
     { method: "POST" },
   );
+}
+
+// Read-only - never triggers a push. See ObservedRouterState.
+export function getObservedRouterState(): Promise<ObservedRouterState> {
+  return request<ObservedRouterState>("/api/router/observed");
 }
 
 export function getDeploymentMetrics(

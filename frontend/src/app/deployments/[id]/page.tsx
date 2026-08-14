@@ -2,7 +2,7 @@
 
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { getDeployment, getDeploymentTimeline } from "@/lib/api";
+import { getDeployment, getDeploymentTimeline, getObservedRouterState } from "@/lib/api";
 import { useAsync } from "@/lib/useAsync";
 import { AsyncBoundary } from "@/components/AsyncBoundary";
 import { AutomationPausedBadge } from "@/components/AutomationPausedBadge";
@@ -15,6 +15,64 @@ import { Timeline } from "@/components/Timeline";
 import { TrafficBar } from "@/components/TrafficBar";
 import { formatDate } from "@/lib/format";
 import type { DeploymentOut } from "@/lib/types";
+
+const ROUTER_MANAGED_STATUSES = new Set(["CANARY_RUNNING", "EVALUATING"]);
+
+/** Desired (DB) vs. observed (router) revision for this deployment's traffic
+ * split - see backend/docs/DESIGN_NOTES.md#desired-observed-reconciliation.
+ * Only meaningful for the deployment the router is *currently* supposed to be
+ * serving - a terminal/historical deployment's revision is frozen, and the
+ * router only ever reports state for whichever deployment is live right now,
+ * so comparing an old deployment against it would just be a false alarm, not
+ * real drift. */
+function RouterReconciliationStatus({ deployment }: { deployment: DeploymentOut }) {
+  const { data: observed, loading } = useAsync(() => getObservedRouterState(), [deployment.id]);
+
+  if (!deployment.traffic_allocation) return null;
+  const desiredRevision = deployment.traffic_allocation.revision;
+
+  if (!ROUTER_MANAGED_STATUSES.has(deployment.status)) {
+    return (
+      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+        Desired revision {desiredRevision} (final - not currently router-managed).
+      </p>
+    );
+  }
+
+  if (loading || !observed) {
+    return <p className="text-xs text-zinc-500 dark:text-zinc-400">Checking router state…</p>;
+  }
+
+  if (!observed.reachable) {
+    return (
+      <p className="text-xs font-medium text-red-700 dark:text-red-400">
+        Desired revision {desiredRevision} — router unreachable, actual traffic state unknown.
+      </p>
+    );
+  }
+
+  if (observed.deployment_id !== deployment.id) {
+    return (
+      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+        Desired revision {desiredRevision} (router not yet synced to this deployment).
+      </p>
+    );
+  }
+
+  const inSync = observed.revision === desiredRevision;
+  return (
+    <p
+      className={`text-xs ${
+        inSync
+          ? "text-zinc-500 dark:text-zinc-400"
+          : "font-medium text-amber-700 dark:text-amber-400"
+      }`}
+    >
+      Desired revision {desiredRevision} · Observed revision {observed.revision}
+      {inSync ? "" : " — router has not caught up yet (will self-correct on the next reconcile tick)"}
+    </p>
+  );
+}
 
 function DeploymentDetailContent({
   deployment,
@@ -72,7 +130,10 @@ function DeploymentDetailContent({
 
       <Card title="Traffic distribution">
         {deployment.traffic_allocation ? (
-          <TrafficBar targets={deployment.traffic_allocation.targets} />
+          <div className="space-y-2">
+            <TrafficBar targets={deployment.traffic_allocation.targets} />
+            <RouterReconciliationStatus deployment={deployment} />
+          </div>
         ) : (
           <p className="text-sm text-zinc-500 dark:text-zinc-400">
             No traffic allocation recorded.

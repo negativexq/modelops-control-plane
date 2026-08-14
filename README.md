@@ -7,7 +7,7 @@ canary deployments, with policy-based promotion/rollback, a benchmark suite to
 exercise the whole loop end to end, and an incident timeline that explains *why*
 each decision happened.
 
-Built as a 12-sprint solo project to demonstrate the full loop a real MLOps/
+Built as a 13-sprint solo project to demonstrate the full loop a real MLOps/
 platform team owns - not a wrapper around someone else's inference server, but the
 control plane, traffic router, policy engine, and automation that decide when a new
 model is safe to receive real traffic. Designed to run comfortably on a 16 GB RAM
@@ -52,10 +52,17 @@ change if this had to actually run at scale.
 | `model-serving-v2-good-error-fault` | 8005 | Same artifact as v2-good, runtime-toggleable error fault |
 | `worker` | *(internal only)* | Automated promotion/rollback loop, no HTTP surface |
 
-The control plane is the single source of truth for traffic allocation - the
-router's config is just a cache, pushed by the control plane on every change. See
-[docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) for the reasoning behind this and every
-other cross-service boundary in the system.
+The control plane's database is the durable **desired state** for traffic
+allocation (`Deployment` + `TrafficAllocation`, each revisioned); the router's
+in-memory config is **observed state** - a best-effort, restart-losable cache
+pushed by the control plane on every change. The two are kept in sync by a
+periodic reconciler (worker-triggered, `POST /api/router/reconcile`) that
+diffs desired against observed and re-pushes on drift - not by assuming every
+push always lands, and not by a message queue replaying missed writes. See
+[Desired/observed
+reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for why,
+and [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) generally for every other
+cross-service boundary in the system.
 
 ### How the pieces talk to each other
 
@@ -416,11 +423,49 @@ resolve to `PASS` or `FAIL`, not just `INCONCLUSIVE` forever.
   [Known limitations](#known-limitations) for why the stratification is
   necessary and what it does and doesn't claim.
 
+### Desired/observed reconciliation (Sprint 13)
+
+```bash
+curl -X POST localhost:8000/api/router/reconcile   # what the worker calls every poll cycle
+curl localhost:8000/api/router/observed            # read-only, never pushes anything
+```
+
+The platform's last remaining structural honesty gap: promote/rollback used to
+push the router's new config *before* committing the decision to the DB, so a
+losing side of a concurrent write could leave the router serving traffic the
+DB no longer agreed to - and a router restart lost its config with nothing to
+notice or fix it. See [Desired/observed
+reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for the
+full story, including how this was actually found (three separate,
+unrelated-looking CI runs failing the identical way).
+
+- `TrafficAllocation.revision` (per-deployment, monotonic) plus `POST
+  /router/config` on the router itself now rejecting an equal-or-stale
+  revision for the same `deployment_id` with `409` - not silently accepting it.
+- Desired state (the DB) commits *first*; the router push happens after and is
+  now best-effort - neither a stale-revision `409` nor a genuinely unreachable
+  router marks a deployment `FAILED` anymore, since the desired state is
+  already correct and durable either way.
+- The worker triggers one reconcile tick per poll cycle
+  (`POST /api/router/reconcile`) - the control plane (which owns the
+  `RouterGateway`) does the actual desired-vs-observed diff and re-push; the
+  worker itself never talks to the router directly, same boundary as every
+  other automated action.
+- A correction is recorded as a `router_reconciled` `DeploymentEvent`; an
+  already-in-sync tick writes nothing, so the timeline isn't spammed every 15s.
+- Dashboard: the deployment detail page shows desired vs. observed revision
+  for the currently router-managed deployment, with a visible warning while
+  they differ.
+- CI scenario 5 is the platform's one real proof of self-healing: it restarts
+  the router mid-rollout, confirms it genuinely lost its config, and waits for
+  the worker's own reconcile tick - not a human, not a replay - to catch it
+  back up.
+
 ## Development
 
 ```bash
 make dev             # bring up the whole stack via docker compose
-make test            # backend tests (pytest) - 250 tests, ~92% statement coverage
+make test            # backend tests (pytest) - 266 tests, ~91% statement coverage
 make coverage        # same, plus an HTML report at backend/htmlcov/index.html
 make lint            # backend (ruff, mypy) + frontend (eslint, tsc) lint/type-check
 make ci-smoke-test   # the same real-stack check CI runs - needs `make dev` running
@@ -432,11 +477,11 @@ every push/PR:
 
 | Job | What it checks | Runtime |
 |---|---|---|
-| `backend` | `ruff`, `mypy --strict`, `pytest` (250 tests, mocked collaborators) | seconds |
+| `backend` | `ruff`, `mypy --strict`, `pytest` (266 tests, mocked collaborators) | seconds |
 | `frontend` | `eslint`, `tsc --noEmit` | seconds |
-| `integration` | Builds and boots the **real** 9-container stack (8 HTTP-exposed services + the worker, which has no HTTP surface), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s four scenarios - gated on the two jobs above passing first | a few minutes |
+| `integration` | Builds and boots the **real** 9-container stack (8 HTTP-exposed services + the worker, which has no HTTP surface), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s five scenarios - gated on the two jobs above passing first | a few minutes |
 
-The `integration` job's four scenarios, in order: **(1)** a fast manual create →
+The `integration` job's five scenarios, in order: **(1)** a fast manual create →
 evaluate → promote path, created with `automation_paused=True` so the always-on
 worker can't race the scenario's own manual `/evaluate` call - see
 [Manual automation hold](docs/DESIGN_NOTES.md#manual-automation-hold), added
@@ -447,8 +492,13 @@ back on its own; **(3)** a healthy canary, waiting for the worker to really
 walk it through every traffic stage (10% → 25% → 50% → 100%) and promote it on
 a genuine `minimum_recall` PASS; **(4)** a deliberately weak canary, same real
 delayed label flow as (3), rolled back automatically on a genuine
-`minimum_recall` FAIL. Scenarios 2-4 only finish in reasonable CI time because
-the worker's poll interval is turned down to 2s for this job specifically
+`minimum_recall` FAIL; **(5)** a real `docker compose restart router` mid-rollout
+- the router genuinely loses its config, and the worker's own reconcile tick
+(not a human, not a replay) pushes it back to the DB's desired revision on its
+own - see [Desired/observed
+reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation). Scenarios
+2-5 only finish in reasonable CI time because the worker's poll interval is
+turned down to 2s for this job specifically
 (`WORKER_POLL_INTERVAL_SECONDS` in the workflow file - defaults to 15s for real use
 and for local `make dev`, unaffected unless that env var is set).
 
@@ -521,6 +571,26 @@ etiketleridir; bu gerçek bir üretim geri besleme akışı değildir.
   deployment per model") also covers `INCONCLUSIVE` - a deployment frozen after
   `max_inconclusive_retries` still counts as active and blocks a new deployment
   for that `model_name` until it's manually promoted or rolled back.
+- Reconciliation is periodic, not instant - drift between the DB's desired
+  traffic split and the router's observed one (a failed push, a router
+  restart) is closed on the worker's next poll cycle
+  (`WORKER_POLL_INTERVAL_SECONDS`, 15s by default), not the moment it happens.
+  See [Desired/observed
+  reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation).
+- The reconciler assumes a single router instance. It compares the DB's
+  desired state against *one* `GET /router/config` response and re-pushes to
+  that same router - there's no notion of multiple router replicas each with
+  their own (possibly different) observed state to reconcile independently.
+  This matches the rest of the project's "one router process" assumption (see
+  [Benchmark suite](docs/DESIGN_NOTES.md#benchmark-suite)'s note on why
+  benchmarks can't run concurrently), not a new limitation this sprint
+  introduced.
+- A sustained router outage is surfaced (a one-time `router_unreachable`/
+  `router_recovered` timeline event, and a `reachable` flag the dashboard
+  turns into a visible warning), not silently swallowed - see [Desired/observed
+  reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for why
+  that visibility matters once router push failures stopped marking a
+  deployment `FAILED`.
 
 Beyond that specific gap, a number of features were deliberately left out of scope
 for this project rather than half-built - see [docs/DESIGN_NOTES.md's Future

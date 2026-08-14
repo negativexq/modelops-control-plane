@@ -23,6 +23,7 @@ class WorkerClient(Protocol):
     async def promote(self, deployment_id: str) -> dict[str, Any]: ...
     async def rollback(self, deployment_id: str) -> dict[str, Any]: ...
     async def record_inconclusive(self, deployment_id: str) -> dict[str, Any]: ...
+    async def reconcile(self) -> dict[str, Any]: ...
 
 
 class HttpWorkerClient:
@@ -82,3 +83,9 @@ class HttpWorkerClient:
 
     async def record_inconclusive(self, deployment_id: str) -> dict[str, Any]:
         return await self._post(f"/api/deployments/{deployment_id}/record-inconclusive")
+
+    async def reconcile(self) -> dict[str, Any]:
+        # Not deployment-scoped (there's no {deployment_id} in the path) - the
+        # control plane figures out which deployment is desired from the
+        # router's own reported model_name. See app/control_plane/reconcile.py.
+        return await self._post("/api/router/reconcile")

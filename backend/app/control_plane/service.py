@@ -13,7 +13,7 @@ from app.control_plane.models import (
     DeploymentStatus,
     TrafficAllocation,
 )
-from app.control_plane.router_gateway import RouterGateway, RouterUpdateError
+from app.control_plane.router_gateway import RouterGateway, RouterUpdateError, StaleRevisionError
 from app.control_plane.state_machine import validate_transition
 from app.policy.config import PolicyConfig, policy_settings
 
@@ -151,11 +151,21 @@ def _transition(
 
 def _set_traffic_allocation(
     db: Session, deployment: Deployment, targets: list[dict[str, float | str]]
-) -> None:
+) -> int:
+    """Writes `targets` as this deployment's desired TrafficAllocation and bumps
+    its revision - in the same transaction as whatever else the caller is doing
+    (a Deployment.status transition, an event log write), so both land in one
+    commit together. Returns the new revision, for the caller to pass to the
+    router push that follows the commit - see docs/DESIGN_NOTES.md
+    #desired-observed-reconciliation.
+    """
     if deployment.traffic_allocation is not None:
         deployment.traffic_allocation.targets = targets
-    else:
-        db.add(TrafficAllocation(deployment_id=deployment.id, targets=targets))
+        deployment.traffic_allocation.revision += 1
+        return deployment.traffic_allocation.revision
+    allocation = TrafficAllocation(deployment_id=deployment.id, targets=targets, revision=1)
+    db.add(allocation)
+    return allocation.revision
 
 
 def require_active(deployment: Deployment) -> None:
@@ -193,6 +203,95 @@ def _commit(db: Session, deployment: Deployment) -> None:
     except StaleDataError as exc:
         db.rollback()
         raise ConcurrentUpdateError(deployment.id) from exc
+
+
+ROUTER_UNREACHABLE_EVENT = "router_unreachable"
+ROUTER_RECOVERED_EVENT = "router_recovered"
+
+
+def record_router_reachability_change(db: Session, deployment_id: str, *, reachable: bool) -> None:
+    """Writes a one-time router_unreachable/router_recovered DeploymentEvent when
+    the router's reachability for this deployment actually *changes* -
+    never on every failed push or every successful one, only on the
+    transition, so a sustained outage produces one event on the way down and
+    one on the way back up instead of spamming the timeline every tick.
+
+    "Did it change" is derived from this deployment's own event history
+    (the most recent of these two event types) rather than a new column -
+    reachability is an observability signal here, not part of the
+    desired/observed state the reconciler enforces, so it doesn't need its
+    own durable field. See docs/DESIGN_NOTES.md#desired-observed-reconciliation.
+    """
+    stmt = (
+        select(DeploymentEvent)
+        .where(
+            DeploymentEvent.deployment_id == deployment_id,
+            DeploymentEvent.event_type.in_((ROUTER_UNREACHABLE_EVENT, ROUTER_RECOVERED_EVENT)),
+        )
+        .order_by(DeploymentEvent.created_at.desc())
+        .limit(1)
+    )
+    last = db.execute(stmt).scalars().first()
+    was_unreachable = last is not None and last.event_type == ROUTER_UNREACHABLE_EVENT
+    if reachable != was_unreachable:
+        return  # no change in reachability state - stay silent
+
+    if reachable:
+        event_type, message = (
+            ROUTER_RECOVERED_EVENT,
+            "router is reachable again - traffic state will be reconciled",
+        )
+    else:
+        event_type, message = (
+            ROUTER_UNREACHABLE_EVENT,
+            "router became unreachable - actual traffic state is unknown until it recovers",
+        )
+    db.add(DeploymentEvent(deployment_id=deployment_id, event_type=event_type, message=message))
+    logger.info("deployment %s: %s", deployment_id, message)
+    db.commit()
+
+
+async def _push_best_effort(
+    db: Session,
+    router_gateway: RouterGateway,
+    model_name: str,
+    deployment_id: str,
+    revision: int,
+    targets: list[dict[str, float | str]],
+) -> None:
+    """Pushes `targets` to the router as `revision`, called ONLY after the same
+    desired state has already been committed to the DB (see
+    docs/DESIGN_NOTES.md#desired-observed-reconciliation for why that ordering
+    matters). Never raises: a stale-revision rejection or router unreachability
+    just leaves DB (desired) and router (observed) temporarily diverged, which
+    `reconcile.reconcile_router_state` (driven by the worker's own poll loop, via
+    POST /api/router/reconcile) closes on its own next tick. This function's job
+    is best-effort, immediate convergence, not lossless delivery - the reconciler
+    is what actually guarantees convergence.
+    """
+    try:
+        await router_gateway.push_traffic_allocation(model_name, deployment_id, revision, targets)
+    except StaleRevisionError as exc:
+        logger.info(
+            "deployment %s: router already at revision >= %s, not applying: %s",
+            deployment_id,
+            revision,
+            exc,
+        )
+        # A 409 means the router answered - it's reachable, just already ahead.
+        record_router_reachability_change(db, deployment_id, reachable=True)
+        return
+    except RouterUpdateError as exc:
+        logger.warning(
+            "deployment %s: router push failed for revision %s - the reconciler "
+            "will retry on its next tick: %s",
+            deployment_id,
+            revision,
+            exc,
+        )
+        record_router_reachability_change(db, deployment_id, reachable=False)
+        return
+    record_router_reachability_change(db, deployment_id, reachable=True)
 
 
 def get_deployment(db: Session, deployment_id: str) -> Deployment:
@@ -303,20 +402,24 @@ async def create_deployment(
     _transition(db, deployment, DeploymentStatus.DEPLOYING, "starting canary rollout")
     deployment.started_at = datetime.now(UTC)
 
-    try:
-        await router_gateway.push_traffic_allocation(model_name, deployment.id, targets)
-    except RouterUpdateError as exc:
-        _transition(db, deployment, DeploymentStatus.FAILED, f"router update failed: {exc}")
-        deployment.completed_at = datetime.now(UTC)
-        db.commit()
-        db.refresh(deployment)
-        return deployment, True
-
-    _set_traffic_allocation(db, deployment, targets)
+    # Desired state (DB) is committed FIRST, router push happens after - see
+    # docs/DESIGN_NOTES.md#desired-observed-reconciliation for why the reverse
+    # order (push-then-commit, this project's original design) was wrong: a
+    # push that lands but whose commit then loses a race left the router
+    # observing state the DB never actually agreed to. Pushing after commit can
+    # still fail or land stale, but that only ever leaves DB and router
+    # temporarily diverged - never inconsistent about what's *authoritative* -
+    # and the reconciler closes that gap on its own next tick. A router push
+    # failure here no longer transitions the deployment to FAILED for the same
+    # reason: the desired state this deployment now has (CANARY_RUNNING) is
+    # correct regardless of whether the router has caught up to it yet.
+    revision = _set_traffic_allocation(db, deployment, targets)
     _transition(db, deployment, DeploymentStatus.CANARY_RUNNING, "canary receiving traffic")
 
     db.commit()
     db.refresh(deployment)
+
+    await _push_best_effort(db, router_gateway, model_name, deployment.id, revision, targets)
     return deployment, True
 
 
@@ -338,18 +441,9 @@ async def promote_deployment(
     _transition(db, deployment, DeploymentStatus.PROMOTING, f"{triggered_by} promote requested")
 
     targets: list[dict[str, float | str]] = [{"version": deployment.canary_version, "weight": 1.0}]
-    try:
-        await router_gateway.push_traffic_allocation(deployment.model_name, deployment.id, targets)
-    except RouterUpdateError as exc:
-        _transition(
-            db, deployment, DeploymentStatus.FAILED, f"router update failed during promote: {exc}"
-        )
-        deployment.completed_at = datetime.now(UTC)
-        _commit(db, deployment)
-        db.refresh(deployment)
-        return deployment
-
-    _set_traffic_allocation(db, deployment, targets)
+    # Commit desired state before pushing to the router - see create_deployment's
+    # comment and docs/DESIGN_NOTES.md#desired-observed-reconciliation.
+    revision = _set_traffic_allocation(db, deployment, targets)
     _transition(
         db,
         deployment,
@@ -360,6 +454,10 @@ async def promote_deployment(
 
     _commit(db, deployment)
     db.refresh(deployment)
+
+    await _push_best_effort(
+        db, router_gateway, deployment.model_name, deployment.id, revision, targets
+    )
     return deployment
 
 
@@ -381,21 +479,9 @@ async def rollback_deployment(
     _transition(db, deployment, DeploymentStatus.ROLLING_BACK, f"{triggered_by} rollback requested")
 
     targets: list[dict[str, float | str]] = [{"version": deployment.stable_version, "weight": 1.0}]
-    try:
-        await router_gateway.push_traffic_allocation(deployment.model_name, deployment.id, targets)
-    except RouterUpdateError as exc:
-        _transition(
-            db,
-            deployment,
-            DeploymentStatus.FAILED,
-            f"router update failed during rollback: {exc}",
-        )
-        deployment.completed_at = datetime.now(UTC)
-        _commit(db, deployment)
-        db.refresh(deployment)
-        return deployment
-
-    _set_traffic_allocation(db, deployment, targets)
+    # Commit desired state before pushing to the router - see create_deployment's
+    # comment and docs/DESIGN_NOTES.md#desired-observed-reconciliation.
+    revision = _set_traffic_allocation(db, deployment, targets)
     _transition(
         db,
         deployment,
@@ -406,6 +492,10 @@ async def rollback_deployment(
 
     _commit(db, deployment)
     db.refresh(deployment)
+
+    await _push_best_effort(
+        db, router_gateway, deployment.model_name, deployment.id, revision, targets
+    )
     return deployment
 
 
@@ -439,21 +529,9 @@ async def advance_traffic(
         {"version": deployment.stable_version, "weight": round(1 - next_weight, 6)},
         {"version": deployment.canary_version, "weight": round(next_weight, 6)},
     ]
-    try:
-        await router_gateway.push_traffic_allocation(deployment.model_name, deployment.id, targets)
-    except RouterUpdateError as exc:
-        _transition(
-            db,
-            deployment,
-            DeploymentStatus.FAILED,
-            f"router update failed during automatic traffic advance: {exc}",
-        )
-        deployment.completed_at = datetime.now(UTC)
-        _commit(db, deployment)
-        db.refresh(deployment)
-        return deployment
-
-    _set_traffic_allocation(db, deployment, targets)
+    # Commit desired state before pushing to the router - see create_deployment's
+    # comment and docs/DESIGN_NOTES.md#desired-observed-reconciliation.
+    revision = _set_traffic_allocation(db, deployment, targets)
     from_pct = current_weight * 100
     to_pct = next_weight * 100
     _log_event(
@@ -465,6 +543,10 @@ async def advance_traffic(
 
     _commit(db, deployment)
     db.refresh(deployment)
+
+    await _push_best_effort(
+        db, router_gateway, deployment.model_name, deployment.id, revision, targets
+    )
     return deployment
 
 

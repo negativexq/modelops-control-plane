@@ -14,24 +14,49 @@ from app.main import app
 
 
 class FakeRouterGateway:
-    """Records every push instead of making a real HTTP call.
-
-    `should_fail` lets tests simulate the router being unreachable / rejecting the
-    config, to exercise the FAILED-transition path.
+    """Router-shaped fake: tracks observed (deployment_id, revision, targets) and
+    rejects a same-deployment push whose revision isn't strictly greater, exactly
+    like app/router/main.py's real staleness check (see StaleRevisionError) - not
+    just a call recorder. `should_fail` simulates the router being completely
+    unreachable (RouterUpdateError) regardless of revision - since a push failure
+    no longer marks a deployment FAILED (see
+    docs/DESIGN_NOTES.md#desired-observed-reconciliation), this now exercises the
+    "desired committed, router push best-effort" path, not a FAILED transition.
     """
 
     def __init__(self, should_fail: bool = False) -> None:
         self.should_fail = should_fail
-        self.calls: list[tuple[str, str, list[dict[str, Any]]]] = []
+        self.calls: list[tuple[str, str, int, list[dict[str, Any]]]] = []
+        self.observed_model_name: str | None = None
+        self.observed_deployment_id: str | None = None
+        self.observed_revision: int = 0
+        self.observed_targets: list[dict[str, Any]] | None = None
 
     async def push_traffic_allocation(
-        self, model_name: str, deployment_id: str, targets: list[dict[str, Any]]
+        self, model_name: str, deployment_id: str, revision: int, targets: list[dict[str, Any]]
     ) -> None:
-        from app.control_plane.router_gateway import RouterUpdateError
+        from app.control_plane.router_gateway import RouterUpdateError, StaleRevisionError
 
         if self.should_fail:
             raise RouterUpdateError("simulated router failure")
-        self.calls.append((model_name, deployment_id, targets))
+        same_deployment = deployment_id == self.observed_deployment_id
+        if same_deployment and revision <= self.observed_revision:
+            raise StaleRevisionError(f"stale revision {revision} for {deployment_id}")
+        self.observed_model_name = model_name
+        self.observed_deployment_id = deployment_id
+        self.observed_revision = revision
+        self.observed_targets = targets
+        self.calls.append((model_name, deployment_id, revision, targets))
+
+    async def get_observed_config(self) -> dict[str, Any] | None:
+        if self.observed_deployment_id is None:
+            return None
+        return {
+            "model_name": self.observed_model_name,
+            "deployment_id": self.observed_deployment_id,
+            "revision": self.observed_revision,
+            "targets": self.observed_targets,
+        }
 
 
 @pytest.fixture
@@ -80,7 +105,7 @@ def test_create_deployment_reaches_canary_running(
     assert body["started_at"] is not None
 
     assert len(fake_gateway.calls) == 1
-    model_name, deployment_id, targets = fake_gateway.calls[0]
+    model_name, deployment_id, _revision, targets = fake_gateway.calls[0]
     assert model_name == "fraud-model"
     assert deployment_id == body["id"]
     weights = {t["version"]: t["weight"] for t in targets}
@@ -95,7 +120,16 @@ def test_create_deployment_logs_events(client: TestClient) -> None:
     assert event_types.count("status_changed") >= 2  # DEPLOYING, then CANARY_RUNNING
 
 
-def test_create_deployment_marks_failed_when_router_push_fails(db_session: Session) -> None:
+def test_create_deployment_reaches_canary_running_even_when_router_push_fails(
+    db_session: Session,
+) -> None:
+    """The DB is authoritative desired state, committed BEFORE the router push -
+    see docs/DESIGN_NOTES.md#desired-observed-reconciliation. A router that's
+    unreachable at creation time no longer marks the deployment FAILED: desired
+    state (CANARY_RUNNING) is correct regardless of whether the router has
+    caught up to it yet, and the reconciler (POST /api/router/reconcile) is what
+    actually closes that gap - not this request.
+    """
     failing_gateway = FakeRouterGateway(should_fail=True)
 
     def _get_db() -> Iterator[Session]:
@@ -115,8 +149,9 @@ def test_create_deployment_marks_failed_when_router_push_fails(db_session: Sessi
 
     assert response.status_code == 201
     body = response.json()
-    assert body["status"] == "FAILED"
-    assert any("router update failed" in e["message"] for e in body["events"])
+    assert body["status"] == "CANARY_RUNNING"
+    # The push was attempted (and failed) but never recorded as a successful call.
+    assert failing_gateway.calls == []
 
 
 def test_duplicate_idempotency_key_does_not_create_second_deployment(client: TestClient) -> None:
@@ -213,7 +248,7 @@ def test_promote_updates_traffic_allocation_and_status(
     assert body["traffic_allocation"]["targets"] == [{"version": "v2-good", "weight": 1.0}]
 
     # Last call to the router gateway should be the 100%-canary allocation.
-    model_name, called_deployment_id, targets = fake_gateway.calls[-1]
+    model_name, called_deployment_id, _revision, targets = fake_gateway.calls[-1]
     assert model_name == "fraud-model"
     assert called_deployment_id == deployment_id
     assert targets == [{"version": "v2-good", "weight": 1.0}]
@@ -234,7 +269,7 @@ def test_rollback_returns_all_traffic_to_stable(
     assert body["status"] == "ROLLED_BACK"
     assert body["traffic_allocation"]["targets"] == [{"version": "v1", "weight": 1.0}]
 
-    model_name, called_deployment_id, targets = fake_gateway.calls[-1]
+    model_name, called_deployment_id, _revision, targets = fake_gateway.calls[-1]
     assert called_deployment_id == deployment_id
     assert targets == [{"version": "v1", "weight": 1.0}]
 
@@ -348,6 +383,32 @@ def test_router_config_endpoint_returns_active_allocation(client: TestClient) ->
 def test_router_config_endpoint_404_for_unknown_model(client: TestClient) -> None:
     response = client.get("/api/router-config/unknown-model")
     assert response.status_code == 404
+
+
+def test_traffic_allocation_out_includes_revision(client: TestClient) -> None:
+    body = _create_deployment(client).json()
+    assert body["traffic_allocation"]["revision"] == 1
+
+
+def test_get_observed_router_state_reflects_last_push(client: TestClient) -> None:
+    deployment_id = _create_deployment(client).json()["id"]
+
+    response = client.get("/api/router/observed")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reachable"] is True
+    assert body["deployment_id"] == deployment_id
+    assert body["revision"] == 1
+
+
+def test_reconcile_endpoint_is_a_noop_when_already_in_sync(client: TestClient) -> None:
+    _create_deployment(client)
+
+    response = client.post("/api/router/reconcile")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reconciled"] is False
+    assert body["reason"] == "already in sync"
 
 
 def test_router_config_endpoint_ignores_rolled_back_deployment(client: TestClient) -> None:

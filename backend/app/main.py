@@ -9,8 +9,8 @@ from app.api.health import router as health_router
 from app.api.models import router as models_router
 from app.benchmarks.api import router as benchmarks_router
 from app.config import settings
+from app.control_plane.api import reconcile_router, router_config_router
 from app.control_plane.api import router as deployments_router
-from app.control_plane.api import router_config_router
 from app.control_plane.labels_api import router as labels_router
 from app.policy.api import router as policy_router
 
@@ -38,6 +38,7 @@ app.include_router(health_router)
 app.include_router(models_router)
 app.include_router(deployments_router)
 app.include_router(router_config_router)
+app.include_router(reconcile_router)
 app.include_router(labels_router)
 app.include_router(policy_router)
 app.include_router(benchmarks_router)

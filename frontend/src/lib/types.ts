@@ -17,7 +17,24 @@ export interface TargetWeight {
 
 export interface TrafficAllocationOut {
   targets: TargetWeight[];
+  // Desired-state revision - what the router *should* have applied. Compared
+  // against ObservedRouterState.revision for drift detection - see
+  // backend/docs/DESIGN_NOTES.md#desired-observed-reconciliation.
+  revision: number;
   updated_at: string;
+}
+
+// GET /api/router/observed - read-only passthrough of the router's own
+// GET /router/config (never mutates anything, unlike POST /api/router/reconcile).
+// Check `reachable` first: a genuinely unreachable router and a reachable-but-
+// never-configured one (fresh restart) both report deployment_id: null, so
+// only `reachable` tells them apart.
+export interface ObservedRouterState {
+  reachable: boolean;
+  model_name: string | null;
+  deployment_id: string | null;
+  revision: number | null;
+  targets: TargetWeight[] | null;
 }
 
 export interface DeploymentEventOut {
