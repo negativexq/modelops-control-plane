@@ -5,7 +5,7 @@
 A control plane that decides whether a new model version earns production
 traffic - and keeps that decision honest by continuously reconciling it against
 what the router is actually doing. Not a deployment tool; a policy-driven
-judgment loop, with the audit trail to show its work.
+control loop.
 
 What it actually does:
 
@@ -15,8 +15,8 @@ What it actually does:
   (precision/recall over labeled outcomes), not just "is it up."
 - Tells "not enough data yet" apart from "genuinely healthy" instead of
   guessing when data is thin.
-- Promotes or rolls back on its own when a policy resolves, and explains *why*
-  in plain English on the deployment's timeline.
+- Promotes or rolls back on its own when a policy resolves, and records why in
+  plain English as part of the deployment's audit trail.
 - Lets an operator take a specific deployment out of automation without
   stopping the automation loop for everything else.
 - Keeps the database's desired traffic split and the router's actual one in
