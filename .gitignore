@@ -29,3 +29,5 @@ frontend/*.tsbuildinfo
 
 # OS
 .DS_Store
+
+.claude/
