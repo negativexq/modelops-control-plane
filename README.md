@@ -2,23 +2,36 @@
 
 [![CI](https://github.com/negativexq/modelops-control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/negativexq/modelops-control-plane/actions/workflows/ci.yml)
 
-A lightweight ModelOps platform that rolls out new ML model versions via controlled
-canary deployments, with policy-based promotion/rollback, a benchmark suite to
-exercise the whole loop end to end, and an incident timeline that explains *why*
-each decision happened.
+A control plane that decides whether a new model version earns production
+traffic - and keeps that decision honest by continuously reconciling it against
+what the router is actually doing. Not a deployment tool; a policy-driven
+judgment loop, with the audit trail to show its work.
 
-Built as a 13-sprint solo project to demonstrate the full loop a real MLOps/
-platform team owns - not a wrapper around someone else's inference server, but the
-control plane, traffic router, policy engine, and automation that decide when a new
-model is safe to receive real traffic. Designed to run comfortably on a 16 GB RAM
-machine; heavy components like Kubernetes, MLflow, and Prometheus are deliberately
-not part of it - see [Production evolution](#production-evolution) for what would
-change if this had to actually run at scale.
+What it actually does:
+
+- Ramps a candidate model into real production traffic gradually, not all at once.
+- Ingests delayed ground truth through a real API surface, not a synthetic backfill.
+- Judges a canary on both reliability (latency, error rate) *and* model quality
+  (precision/recall over labeled outcomes), not just "is it up."
+- Tells "not enough data yet" apart from "genuinely healthy" instead of
+  guessing when data is thin.
+- Promotes or rolls back on its own when a policy resolves, and explains *why*
+  in plain English on the deployment's timeline.
+- Lets an operator take a specific deployment out of automation without
+  stopping the automation loop for everything else.
+- Keeps the database's desired traffic split and the router's actual one in
+  sync on its own, even after the router restarts and loses its state.
+
+Designed to run comfortably on a 16 GB RAM machine; heavy components like
+Kubernetes, MLflow, and Prometheus are deliberately not part of it - see
+[Production evolution](#production-evolution) for what would change if this had
+to actually run at scale.
 
 ## Contents
 
 - [Architecture](#architecture)
 - [Quickstart](#quickstart)
+- [Screenshots](#screenshots)
 - [Demo walkthrough](#demo-walkthrough)
 - [Project layout](#project-layout)
 - [Components](#components)
@@ -117,6 +130,26 @@ Then check:
 - Backend: http://localhost:8000/health
 - Frontend: http://localhost:3000
 - Router: http://localhost:8080/router/health
+
+## Screenshots
+
+**Deployment detail** - canary traffic split, quality metrics (label coverage,
+positive label count) from real delayed ground truth, and the desired-vs-observed
+router revision:
+
+![Deployment detail: canary traffic split, quality metrics, and desired/observed revision](docs/screenshots/deployment-detail.png)
+
+**Timeline - automatic, quality-based rollback** - every policy check's plain-English
+explanation, ending in a genuine `minimum_recall` FAIL and an automatic rollback,
+no human involved:
+
+![Timeline showing a genuine minimum_recall FAIL and an automatic rollback](docs/screenshots/timeline-quality-rollback.png)
+
+**Timeline - self-healing after a router restart** - the `router_reconciled` event
+the worker's own reconcile tick writes after catching the router back up to the
+DB's desired revision, on its own:
+
+![Timeline showing an automatic router_reconciled event after a router restart](docs/screenshots/timeline-router-reconciled.png)
 
 ## Demo walkthrough
 
