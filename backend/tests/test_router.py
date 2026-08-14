@@ -386,6 +386,10 @@ def test_predict_emits_metric_with_deployment_id(artifacts_dir: Path) -> None:
     assert sent["model_version"] == "v1"
     assert sent["status_code"] == 200
     assert transport.calls[0].url.path == "/api/deployments/dep-123/metrics"
+    # The router must carry the serving app's prediction_id through to the metric
+    # payload unmodified - it's the only join key a later label ingestion has back
+    # to this specific prediction (see docs/DESIGN_NOTES.md).
+    assert sent["prediction_id"] == response.json()["prediction_id"]
 
 
 def test_predict_does_not_block_on_slow_metric_push(artifacts_dir: Path) -> None:

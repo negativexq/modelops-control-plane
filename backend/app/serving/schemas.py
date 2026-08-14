@@ -36,6 +36,11 @@ def build_request_model(features: list[str]) -> type[BaseModel]:
 
 
 class PredictionResponse(BaseModel):
+    # Minted here, once, per prediction (see app/serving/main.py) - the control
+    # plane and router never generate one, they only ever carry it through. This is
+    # the join key a delayed ground-truth label (POST /api/labels) uses to find its
+    # way back to the exact prediction it's labeling - see docs/DESIGN_NOTES.md.
+    prediction_id: str
     prediction: int
     fraud_probability: float
     model_name: str

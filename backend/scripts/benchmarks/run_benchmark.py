@@ -93,43 +93,27 @@ def _reset_fault_injection(target: FaultTarget | None) -> None:
         )
 
 
-def _backfill_synthetic_labels(
+def _feed_stable_side_health_checks(
     client: ControlPlaneClient,
     deployment_id: str,
     stable_version: str,
-    canary_version: str,
     stop_event: threading.Event,
     interval_seconds: float = 5.0,
     batch_size: int = 15,
 ) -> None:
-    """Runs until `stop_event` is set, periodically posting a batch of synthetic
-    labeled metrics for `canary_version` - see Scenario.backfill_synthetic_labels for
-    why this exists (there is no real actual_label source in the platform yet).
-    Uses an inflated "fraud rate" (30%, vs. the real dataset's ~2%) purely so small
-    per-window sample counts still yield a stable, non-noisy recall estimate.
-
-    Also posts a small batch of plain (unlabeled) healthy metrics for
-    `stable_version` - found necessary via manual end-to-end verification: once the
-    canary reaches 100% traffic, the router sends stable zero real requests, so
-    minimum_requests (which requires BOTH sides to have enough samples) would stay
-    unmet forever and the deployment could never reach the final PROMOTE step. This
-    simulates the kind of background health-check/synthetic-monitoring traffic real
-    systems commonly send to an idle standby instance.
+    """Runs until `stop_event` is set, periodically posting a small batch of plain
+    (unlabeled) healthy metrics for `stable_version` - found necessary via manual
+    end-to-end verification: once the canary reaches 100% traffic, the router
+    sends stable zero real requests, so minimum_requests (which requires BOTH
+    sides to have enough samples) would stay unmet forever and the deployment
+    could never reach the final PROMOTE step. This simulates the kind of
+    background health-check/synthetic-monitoring traffic real systems commonly
+    send to an idle standby instance - it carries no `actual_label`, unlike the
+    real (canary-side) traffic the Locust label feeder generates.
     """
     rng = random.Random(1234)
     while not stop_event.is_set():
         for _ in range(batch_size):
-            is_fraud = 1 if rng.random() < 0.3 else 0
-            correct = rng.random() < 0.95
-            prediction = is_fraud if correct else 1 - is_fraud
-            client.post_metric(
-                deployment_id,
-                canary_version,
-                latency_ms=rng.uniform(8, 20),
-                status_code=200,
-                prediction=prediction,
-                actual_label=is_fraud,
-            )
             client.post_metric(
                 deployment_id,
                 stable_version,
@@ -171,6 +155,8 @@ def run_scenario(
     users: int,
     target_rps: float,
     output_dir: Path = RESULTS_DIR,
+    label_delay_seconds: float = 10.0,
+    label_coverage: float = 0.8,
 ) -> BenchmarkResult:
     load_duration = duration_seconds or scenario.load_duration_seconds
     wait_budget = max_wait_seconds or scenario.max_wait_seconds
@@ -180,8 +166,8 @@ def run_scenario(
             scenario.fault_target, scenario.fault_latency_ms, scenario.fault_error_rate
         )
 
-    backfill_stop = threading.Event()
-    backfill_thread: threading.Thread | None = None
+    health_check_stop = threading.Event()
+    health_check_thread: threading.Thread | None = None
 
     try:
         with ControlPlaneClient(control_plane_url) as client:
@@ -194,19 +180,13 @@ def run_scenario(
             )
             deployment_id = deployment["id"]
 
-            if scenario.backfill_synthetic_labels:
-                backfill_thread = threading.Thread(
-                    target=_backfill_synthetic_labels,
-                    args=(
-                        client,
-                        deployment_id,
-                        scenario.stable_version,
-                        scenario.canary_version,
-                        backfill_stop,
-                    ),
+            if scenario.needs_stable_side_health_checks:
+                health_check_thread = threading.Thread(
+                    target=_feed_stable_side_health_checks,
+                    args=(client, deployment_id, scenario.stable_version, health_check_stop),
                     daemon=True,
                 )
-                backfill_thread.start()
+                health_check_thread.start()
 
             output_prefix = output_dir / f"{scenario.key}-{int(time.time())}"
             locust_process = start_locust(
@@ -215,6 +195,9 @@ def run_scenario(
                 users=users,
                 target_rps=target_rps,
                 output_prefix=output_prefix,
+                control_plane_url=control_plane_url,
+                label_delay_seconds=label_delay_seconds,
+                label_coverage=label_coverage,
             )
 
             final_deployment = _wait_for_outcome(
@@ -270,9 +253,9 @@ def run_scenario(
                 notes=list(scenario.notes),
             )
     finally:
-        backfill_stop.set()
-        if backfill_thread is not None:
-            backfill_thread.join(timeout=10)
+        health_check_stop.set()
+        if health_check_thread is not None:
+            health_check_thread.join(timeout=10)
         _reset_fault_injection(scenario.fault_target)
 
     return result
@@ -288,6 +271,21 @@ def main() -> None:
     parser.add_argument("--users", type=int, default=20)
     parser.add_argument("--target-rps", type=float, default=100.0)
     parser.add_argument("--output-dir", type=Path, default=RESULTS_DIR)
+    parser.add_argument(
+        "--label-delay-seconds",
+        type=float,
+        default=10.0,
+        help="Delay before a sampled request's true label is reported via POST "
+        "/api/labels/batch - should stay below the deployment's "
+        "label_maturity_seconds so a healthy run's labels are matured in time.",
+    )
+    parser.add_argument(
+        "--label-coverage",
+        type=float,
+        default=0.8,
+        help="Fraction of predictions whose true label actually gets reported "
+        "(< 1.0 so minimum_label_coverage's gate is genuinely exercised).",
+    )
     args = parser.parse_args()
 
     scenario = SCENARIOS[args.scenario]
@@ -300,6 +298,8 @@ def main() -> None:
         users=args.users,
         target_rps=args.target_rps,
         output_dir=args.output_dir,
+        label_delay_seconds=args.label_delay_seconds,
+        label_coverage=args.label_coverage,
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

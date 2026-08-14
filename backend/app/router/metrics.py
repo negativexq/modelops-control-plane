@@ -13,6 +13,7 @@ async def send_metric(
     latency_ms: float,
     status_code: int,
     prediction: int | None,
+    prediction_id: str | None,
     timeout: float,
 ) -> None:
     """POST one metric row to the control plane. Always run as a background task
@@ -25,6 +26,7 @@ async def send_metric(
         "latency_ms": latency_ms,
         "status_code": status_code,
         "prediction": prediction,
+        "prediction_id": prediction_id,
     }
     try:
         await client.post(url, json=payload, timeout=timeout)

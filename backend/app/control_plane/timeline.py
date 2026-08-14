@@ -69,6 +69,7 @@ def build_timeline(db: Session, deployment: Deployment) -> list[TimelineItem]:
                     result=evaluation.result,
                     canary_weight=weight_for_explanation,
                     is_estimated=not has_snapshot,
+                    labeled_sample_count=evaluation.labeled_sample_count,
                 ),
                 is_estimated=not has_snapshot,
             )

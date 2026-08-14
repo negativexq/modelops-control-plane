@@ -434,8 +434,9 @@ def record_inconclusive(db: Session, deployment: Deployment, max_retries: int) -
     """Called by the worker when an automated evaluation comes back INCONCLUSIVE.
     Increments the retry counter; once it exceeds `max_retries`, freezes the
     deployment into INCONCLUSIVE status so the worker stops retrying and a human can
-    look at it - an unlabeled canary otherwise stays INCONCLUSIVE forever, which is
-    the expected (not buggy) outcome while there's no actual_label source (Sprint 5).
+    look at it - a canary whose quality window never matures enough labeled data
+    (see app/policy/engine.py's quality data-sufficiency gate) otherwise stays
+    INCONCLUSIVE forever, which is the expected (not buggy) outcome.
     """
     require_active(deployment)
     _touch(deployment)

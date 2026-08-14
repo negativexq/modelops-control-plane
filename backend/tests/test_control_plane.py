@@ -340,7 +340,7 @@ def _post_metric(
     latency_ms: float,
     status_code: int = 200,
     prediction: int | None = None,
-    actual_label: int | None = None,
+    prediction_id: str | None = None,
 ) -> httpx.Response:
     return client.post(
         f"/api/deployments/{deployment_id}/metrics",
@@ -349,7 +349,7 @@ def _post_metric(
             "latency_ms": latency_ms,
             "status_code": status_code,
             "prediction": prediction,
-            "actual_label": actual_label,
+            "prediction_id": prediction_id,
         },
     )
 
@@ -405,11 +405,29 @@ def test_metrics_endpoint_precision_recall_none_without_labels(client: TestClien
 
 def test_metrics_endpoint_precision_recall_with_labels(client: TestClient) -> None:
     deployment_id = _create_deployment(client).json()["id"]
-    # tp=1, fp=1, fn=1, tn=1
-    _post_metric(client, deployment_id, "v1", latency_ms=10, prediction=1, actual_label=1)
-    _post_metric(client, deployment_id, "v1", latency_ms=10, prediction=1, actual_label=0)
-    _post_metric(client, deployment_id, "v1", latency_ms=10, prediction=0, actual_label=1)
-    _post_metric(client, deployment_id, "v1", latency_ms=10, prediction=0, actual_label=0)
+    # tp=1, fp=1, fn=1, tn=1 - ground truth arrives through POST /api/labels, not
+    # a direct actual_label field on the metrics endpoint (which has none, see
+    # MetricIn's docstring).
+    rows = [(1, 1), (1, 0), (0, 1), (0, 0)]
+    for i, (prediction, actual_label) in enumerate(rows):
+        prediction_id = f"pred-{i}"
+        _post_metric(
+            client,
+            deployment_id,
+            "v1",
+            latency_ms=10,
+            prediction=prediction,
+            prediction_id=prediction_id,
+        )
+        label_response = client.post(
+            "/api/labels",
+            json={
+                "prediction_id": prediction_id,
+                "actual_label": actual_label,
+                "occurred_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        assert label_response.status_code == 201
 
     body = client.get(f"/api/deployments/{deployment_id}/metrics").json()
     stable = body["stable"]

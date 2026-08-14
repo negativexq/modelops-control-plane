@@ -1,5 +1,6 @@
 import json
 import time
+import uuid
 from pathlib import Path
 
 import joblib
@@ -121,6 +122,9 @@ def test_predict_uses_full_feature_schema_for_v1(artifacts_dir: Path) -> None:
     assert "prediction" in body
     assert "fraud_probability" in body
     assert body["latency_ms"] >= 0
+    # A UUID4 minted here, once - the join key POST /api/labels uses to find its
+    # way back to this exact prediction (see docs/DESIGN_NOTES.md).
+    assert uuid.UUID(body["prediction_id"]).version == 4
 
 
 def test_predict_uses_reduced_feature_schema_for_quality_bad(artifacts_dir: Path) -> None:
@@ -131,7 +135,19 @@ def test_predict_uses_reduced_feature_schema_for_quality_bad(artifacts_dir: Path
     # only require SMALL_FEATURES, not FULL_FEATURES.
     response = client.post("/predict", json=_sample_payload(SMALL_FEATURES))
     assert response.status_code == 200
-    assert response.json()["model_version"] == "v2-quality-bad"
+    body = response.json()
+    assert body["model_version"] == "v2-quality-bad"
+    # Every version's response includes a prediction_id, even one with a reduced
+    # feature schema - PredictionResponse (unlike the request schema) is not
+    # per-version dynamic, but this is worth pinning down explicitly.
+    assert uuid.UUID(body["prediction_id"]).version == 4
+
+
+def test_predict_generates_a_distinct_prediction_id_per_call(artifacts_dir: Path) -> None:
+    client = TestClient(create_app(_settings(artifacts_dir)))
+    first = client.post("/predict", json=_sample_payload(FULL_FEATURES)).json()
+    second = client.post("/predict", json=_sample_payload(FULL_FEATURES)).json()
+    assert first["prediction_id"] != second["prediction_id"]
 
 
 def test_predict_rejects_missing_required_feature(artifacts_dir: Path) -> None:

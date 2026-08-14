@@ -47,9 +47,18 @@ def start_locust(
     users: int,
     target_rps: float,
     output_prefix: Path,
+    control_plane_url: str = "http://localhost:8000",
+    label_delay_seconds: float = 10.0,
+    label_coverage: float = 0.8,
 ) -> subprocess.Popen[bytes]:
     """Launches Locust in the background (headless) so the caller can poll the
-    control plane concurrently while load is in flight."""
+    control plane concurrently while load is in flight.
+
+    `control_plane_url`/`label_delay_seconds`/`label_coverage` are passed through
+    as env vars because Locust runs the load definition in its own subprocess
+    (see locustfile.py's `_LabelFeeder`) - there's no other channel into it from
+    here.
+    """
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         sys.executable,
@@ -80,6 +89,9 @@ def start_locust(
     env = {
         "BENCHMARK_TARGET_RPS": str(target_rps),
         "LOCUST_USER_COUNT": str(users),
+        "BENCHMARK_CONTROL_PLANE_URL": control_plane_url,
+        "BENCHMARK_LABEL_DELAY_SECONDS": str(label_delay_seconds),
+        "BENCHMARK_LABEL_COVERAGE": str(label_coverage),
     }
     return subprocess.Popen(
         cmd,
@@ -116,6 +128,9 @@ def run_locust(
     users: int,
     target_rps: float,
     output_prefix: Path,
+    control_plane_url: str = "http://localhost:8000",
+    label_delay_seconds: float = 10.0,
+    label_coverage: float = 0.8,
 ) -> LoadTestResult:
     """Blocking convenience wrapper for callers that don't need to do anything else
     while load is running (e.g. the baseline scenario)."""
@@ -125,5 +140,8 @@ def run_locust(
         users=users,
         target_rps=target_rps,
         output_prefix=output_prefix,
+        control_plane_url=control_plane_url,
+        label_delay_seconds=label_delay_seconds,
+        label_coverage=label_coverage,
     )
     return finish_locust(process, output_prefix, duration_seconds, timeout=duration_seconds + 60)

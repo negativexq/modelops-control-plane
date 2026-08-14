@@ -160,6 +160,24 @@ function ComparisonContent({ comparison }: { comparison: ComparisonOut }) {
               </td>
             </tr>
             <tr>
+              <td className="py-2 pr-4 text-zinc-500 dark:text-zinc-400">Labeled samples</td>
+              <td className="py-2 pr-4">{stable.labeled_sample_count}</td>
+              <td className="py-2 pr-4">{canary.labeled_sample_count}</td>
+              <td className="py-2 pr-4">—</td>
+            </tr>
+            <tr>
+              <td className="py-2 pr-4 text-zinc-500 dark:text-zinc-400">Label coverage</td>
+              <td className="py-2 pr-4">{formatPercent(stable.label_coverage)}</td>
+              <td className="py-2 pr-4">{formatPercent(canary.label_coverage)}</td>
+              <td className="py-2 pr-4">—</td>
+            </tr>
+            <tr>
+              <td className="py-2 pr-4 text-zinc-500 dark:text-zinc-400">Positive labels</td>
+              <td className="py-2 pr-4">{stable.positive_label_count}</td>
+              <td className="py-2 pr-4">{canary.positive_label_count}</td>
+              <td className="py-2 pr-4">—</td>
+            </tr>
+            <tr>
               <td className="py-2 pr-4 text-zinc-500 dark:text-zinc-400">Precision</td>
               <td className="py-2 pr-4">{formatNumber(stable.precision)}</td>
               <td className="py-2 pr-4">{formatNumber(canary.precision)}</td>
@@ -186,9 +204,9 @@ function ComparisonContent({ comparison }: { comparison: ComparisonOut }) {
         </table>
         {stable.precision == null && canary.precision == null ? (
           <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
-            Precision/recall/false-positive-rate show N/A because no <code>actual_label</code>{" "}
-            has been recorded yet for this window - there is no ground-truth label source wired
-            up yet (see Sprint 5 notes).
+            Precision/recall/false-positive-rate show N/A because no ground-truth label has
+            landed yet for this window. Labels arrive delayed through{" "}
+            <code>POST /api/labels</code> - see the Labeled samples / Label coverage rows above.
           </p>
         ) : null}
       </div>

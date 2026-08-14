@@ -6,12 +6,21 @@ const POLICY_LABELS: Record<string, string> = {
   minimum_requests: "Minimum requests",
   latency_p95_increase: "Latency (p95 increase)",
   max_error_rate: "Error rate",
+  minimum_labeled_samples: "Minimum labeled samples",
+  minimum_label_coverage: "Label coverage",
+  minimum_positive_labels: "Minimum positive labels",
   minimum_recall: "Recall",
 };
 
 function formatMetricValue(policyName: string, value: number | null): string {
   if (value == null) return "N/A";
   if (policyName === "minimum_requests") return `${value.toFixed(0)} requests`;
+  if (policyName === "minimum_labeled_samples") return `${value.toFixed(0)} labeled`;
+  if (policyName === "minimum_positive_labels") return `${value.toFixed(0)} positive`;
+  // minimum_label_coverage's observed_value/threshold are 0..1 fractions (same
+  // convention as MetricsSummary.label_coverage) - multiply before appending "%",
+  // unlike latency/error-rate checks below whose values are already percentages.
+  if (policyName === "minimum_label_coverage") return `${(value * 100).toFixed(0)}%`;
   if (policyName === "minimum_recall") return value.toFixed(2);
   return `${value.toFixed(2)}%`;
 }

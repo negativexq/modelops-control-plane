@@ -93,16 +93,22 @@ def test_evaluate_records_all_checks_when_traffic_sufficient(
     assert response.status_code == 200
     body = response.json()
     policy_names = {c["policy_name"] for c in body["checks"]}
+    # No labels were recorded, so the quality data-sufficiency gate stays
+    # INCONCLUSIVE and minimum_recall never runs - that's the point of the gate,
+    # see test_evaluate_passes_when_recall_meets_threshold_with_labels below for
+    # the case where it does.
     assert policy_names == {
         "minimum_requests",
         "latency_p95_increase",
         "max_error_rate",
-        "minimum_recall",
+        "minimum_labeled_samples",
+        "minimum_label_coverage",
+        "minimum_positive_labels",
     }
-    # No actual_label backfilled -> recall must be inconclusive, and that alone must
-    # not drag a clean deployment down to FAIL.
-    recall_check = next(c for c in body["checks"] if c["policy_name"] == "minimum_recall")
-    assert recall_check["result"] == "INCONCLUSIVE"
+    # No actual_label backfilled -> the quality gate must be inconclusive, and
+    # that alone must not drag a clean deployment down to FAIL.
+    coverage_check = next(c for c in body["checks"] if c["policy_name"] == "minimum_label_coverage")
+    assert coverage_check["result"] == "INCONCLUSIVE"
     assert body["overall_result"] == "INCONCLUSIVE"
 
 
@@ -150,7 +156,22 @@ def test_evaluate_passes_when_recall_meets_threshold_with_labels(
 
     response = client.post(
         f"/api/deployments/{deployment.id}/evaluate",
-        json={"minimum_requests": 10, "quality": {"minimum_recall": 0.8}},
+        json={
+            "minimum_requests": 10,
+            "quality": {"minimum_recall": 0.8},
+            # Quality reads an older, matured window by default (label_maturity_
+            # seconds=60) - these rows were inserted ~now, not 60s+ ago, so without
+            # collapsing the offset to 0 they'd fall outside that window entirely
+            # and the quality gate would never even see them. The two-window
+            # mechanic itself is covered by dedicated tests elsewhere; this test is
+            # about minimum_recall's own PASS logic.
+            "label_maturity_seconds": 0,
+            "minimum_labeled_samples": 10,
+            # All 20 canary rows are labeled positive (recall_labels=(1, 1)), so
+            # positive_label_count=20 here - well above a lowered threshold, same
+            # reasoning as minimum_labeled_samples above.
+            "minimum_positive_labels": 10,
+        },
     )
     body = response.json()
     recall_check = next(c for c in body["checks"] if c["policy_name"] == "minimum_recall")
@@ -219,8 +240,12 @@ def test_policy_evaluations_endpoint_returns_persisted_checks_newest_first(
     response = client.get(f"/api/deployments/{deployment.id}/policy-evaluations")
     assert response.status_code == 200
     body = response.json()
-    # Two evaluate() calls x 4 checks each.
-    assert len(body) == 8
+    # Two evaluate() calls x 6 checks each (minimum_requests, latency_p95_increase,
+    # max_error_rate, minimum_labeled_samples, minimum_label_coverage,
+    # minimum_positive_labels - no labels were recorded here, so minimum_recall
+    # never runs, see test_evaluate_records_all_checks_when_traffic_sufficient
+    # above).
+    assert len(body) == 12
     timestamps = [item["evaluated_at"] for item in body]
     assert timestamps == sorted(timestamps, reverse=True)
 

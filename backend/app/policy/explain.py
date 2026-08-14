@@ -30,10 +30,15 @@ def explain_policy_check(
     result: PolicyEvaluationResult,
     canary_weight: float | None = None,
     is_estimated: bool = False,
+    labeled_sample_count: int | None = None,
 ) -> str:
     """Human-readable explanation of one policy check. `canary_weight` is context
     used only to make a minimum_requests INCONCLUSIVE concrete when the canary is
-    already at 100% - see _explain_minimum_requests.
+    already at 100% - see _explain_minimum_requests. `labeled_sample_count` is
+    context used by minimum_label_coverage (to phrase coverage as "X of Y
+    labeled" rather than a bare fraction) and by minimum_positive_labels (to
+    phrase "X of Y labeled predictions are positive") - see
+    _explain_minimum_label_coverage / _explain_minimum_positive_labels.
 
     Callers should pass the canary weight *as it was recorded on the
     PolicyEvaluation row itself* (PolicyEvaluation.canary_weight, snapshotted at
@@ -52,6 +57,16 @@ def explain_policy_check(
         return _explain_latency(observed_value, threshold, result)
     if policy_name == "max_error_rate":
         return _explain_error_rate(observed_value, threshold, result)
+    if policy_name == "minimum_labeled_samples":
+        return _explain_minimum_labeled_samples(observed_value, threshold, result)
+    if policy_name == "minimum_label_coverage":
+        return _explain_minimum_label_coverage(
+            observed_value, threshold, result, labeled_sample_count
+        )
+    if policy_name == "minimum_positive_labels":
+        return _explain_minimum_positive_labels(
+            observed_value, threshold, result, labeled_sample_count
+        )
     if policy_name == "minimum_recall":
         return _explain_recall(observed_value, threshold, result)
     return f"{policy_name}: {result.value.lower()}."
@@ -114,14 +129,85 @@ def _explain_error_rate(
     return f"canary error rate ({observed:.2f}%) is within the {threshold:.2f}% threshold."
 
 
+def _explain_minimum_labeled_samples(
+    observed: float | None, threshold: float | None, result: PolicyEvaluationResult
+) -> str:
+    counts = f"({_fmt_count(observed)}/{_fmt_count(threshold)} labeled predictions)"
+    if result == PASS:
+        return (
+            f"the quality window has enough labeled canary predictions {counts} "
+            "to evaluate recall."
+        )
+    return (
+        f"insufficient labeled data in the quality window {counts} - recall was not "
+        "evaluated. Labels arrive delayed, so this is expected while the canary is "
+        "still young; see minimum_label_coverage for how that compares to the "
+        "window's overall traffic."
+    )
+
+
+def _explain_minimum_label_coverage(
+    observed: float | None,
+    threshold: float | None,
+    result: PolicyEvaluationResult,
+    labeled_sample_count: int | None,
+) -> str:
+    if observed is None or threshold is None:
+        return (
+            "insufficient data: no canary predictions in the quality window yet, so "
+            "label coverage could not be computed; recall was not evaluated."
+        )
+    coverage_pct = f"{observed * 100:.0f}%"
+    threshold_pct = f"{threshold * 100:.0f}%"
+    if labeled_sample_count is not None and observed > 0:
+        total = round(labeled_sample_count / observed)
+        detail = f"{labeled_sample_count} of {total} predictions in the quality window are labeled"
+    elif labeled_sample_count is not None:
+        detail = f"{labeled_sample_count} predictions in the quality window are labeled"
+    else:
+        detail = f"label coverage is {coverage_pct}"
+    if result == PASS:
+        return f"{detail} (coverage {coverage_pct}), meeting the {threshold_pct} threshold."
+    return (
+        f"{detail} (coverage {coverage_pct}, threshold {threshold_pct}); "
+        "recall was not evaluated."
+    )
+
+
+def _explain_minimum_positive_labels(
+    observed: float | None,
+    threshold: float | None,
+    result: PolicyEvaluationResult,
+    labeled_sample_count: int | None,
+) -> str:
+    positive_count = _fmt_count(observed)
+    threshold_count = _fmt_count(threshold)
+    of_total = f" of {labeled_sample_count}" if labeled_sample_count is not None else ""
+    if result == PASS:
+        return (
+            f"{positive_count}{of_total} labeled predictions in the quality window are the "
+            f"positive class (threshold {threshold_count}) - enough to make recall "
+            "statistically meaningful."
+        )
+    return (
+        f"only {positive_count}{of_total} labeled predictions in the quality window are "
+        f"the positive class (threshold {threshold_count}); recall was not evaluated. A "
+        "low-positive-rate dataset can clear minimum_labeled_samples/"
+        "minimum_label_coverage while the window still rests on too few positive "
+        "examples to trust a recall estimate."
+    )
+
+
 def _explain_recall(
     observed: float | None, threshold: float | None, result: PolicyEvaluationResult
 ) -> str:
     if observed is None or threshold is None:
         return (
-            "actual_label not available: recall cannot be computed until ground-truth "
-            "labels are backfilled for canary predictions - this is expected until a "
-            "label source is wired up (see README's Known limitations)."
+            "insufficient data: the quality data-sufficiency gate passed, but no "
+            "labeled canary predictions landed in this specific window regardless - "
+            "an edge case (e.g. every labeled prediction in the window happened to "
+            "belong to the stable version instead), not the common case now that "
+            "labels flow through POST /api/labels."
         )
     if result == FAIL:
         return f"canary recall ({observed:.2f}) is below the required {threshold:.2f} threshold."

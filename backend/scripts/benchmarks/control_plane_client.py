@@ -80,21 +80,34 @@ class ControlPlaneClient:
         latency_ms: float,
         status_code: int = 200,
         prediction: int | None = None,
-        actual_label: int | None = None,
+        prediction_id: str | None = None,
     ) -> None:
-        """Writes one PredictionMetric row directly - used only by the "success"
-        scenario to simulate a delayed ground-truth label feed (see scenarios.py).
-        The router itself never sets actual_label; there is no real label source in
-        the platform yet (Sprint 5/7 notes)."""
+        """Writes one PredictionMetric row directly - used to synthesize background
+        "health-check" traffic for the standby side of a benchmark once the canary
+        has claimed all real traffic (see scenarios.py). Has no `actual_label`
+        parameter: the metrics endpoint doesn't accept one - see MetricIn's
+        docstring. Ground truth for real, labeled predictions flows through
+        `post_labels_batch` instead."""
         payload = {
             "model_version": model_version,
             "latency_ms": latency_ms,
             "status_code": status_code,
             "prediction": prediction,
-            "actual_label": actual_label,
+            "prediction_id": prediction_id,
         }
         response = self._client.post(f"/api/deployments/{deployment_id}/metrics", json=payload)
         response.raise_for_status()
+
+    def post_labels_batch(self, labels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """POSTs a batch of {prediction_id, actual_label, occurred_at} dicts to
+        POST /api/labels/batch - the platform's one real ground-truth ingestion
+        surface (see docs/DESIGN_NOTES.md's "Label ingestion" section). Used by the
+        Locust label feeder and the CI quality scenarios; avoids one HTTP round
+        trip per label."""
+        response = self._client.post("/api/labels/batch", json=labels)
+        response.raise_for_status()
+        result: list[dict[str, Any]] = response.json()
+        return result
 
     def rollback(self, deployment_id: str) -> dict[str, Any]:
         response = self._client.post(f"/api/deployments/{deployment_id}/rollback")

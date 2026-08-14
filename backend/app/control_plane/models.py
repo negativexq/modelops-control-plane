@@ -212,6 +212,30 @@ class PolicyEvaluation(Base):
     canary_weight: Mapped[float | None] = mapped_column(Float, nullable=True)
     stable_sample_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     canary_sample_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Quality checks (minimum_labeled_samples, minimum_label_coverage,
+    # minimum_recall) read a *different*, older window than reliability checks -
+    # see app/policy/engine.py and docs/DESIGN_NOTES.md for why (labels arrive
+    # delayed, so the freshest window is definitionally the least-labeled one).
+    # Snapshotted here for the same audit-accuracy reason as the fields above: an
+    # old check's timeline explanation must describe the window it actually used,
+    # not one recomputed from the deployment's current policy_config. All nullable
+    # for the same pre-migration-row reason as the fields above.
+    label_maturity_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    quality_window_start: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    quality_window_end: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    labeled_sample_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    label_coverage: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # How many of `labeled_sample_count` are the positive class (actual_label=1) -
+    # recall's denominator (TP+FN) is positives, not all labeled samples, so a
+    # dataset with a low positive rate can clear minimum_labeled_samples/
+    # minimum_label_coverage while still resting on 1-3 positive examples, making
+    # recall statistically meaningless. See app/policy/engine.py's
+    # minimum_positive_labels gate and docs/DESIGN_NOTES.md.
+    positive_label_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class BenchmarkRunStatus(enum.StrEnum):
@@ -268,6 +292,55 @@ class PredictionMetric(Base):
     status_code: Mapped[int] = mapped_column(Integer, nullable=False)
     prediction: Mapped[int | None] = mapped_column(Integer, nullable=True)
     actual_label: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Born exactly once, in app/serving/ (a UUID4 minted per /predict call, returned
+    # in the response body) - the control plane and router never generate one, they
+    # only ever carry it through. This is the join key a delayed ground-truth label
+    # (POST /api/labels, see app/control_plane/labels_api.py) uses to find its way
+    # back to the specific prediction it's labeling - see docs/DESIGN_NOTES.md for
+    # why the id has to be born at the point of prediction and not, say, assigned by
+    # the router or the control plane on ingest. Nullable because rows written
+    # before this column existed have none; unique because it's a join key, not a
+    # descriptive attribute - two rows can never legitimately share one.
+    prediction_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, unique=True, index=True
+    )
+    # When actual_label was actually populated (whichever of the two paths got
+    # there first - see metrics_service.record_metric and labels_api.py). Distinct
+    # from `created_at` (when the *prediction* happened): the gap between them is
+    # exactly the real, measurable label delay this sprint exists to make visible
+    # (see metrics_service.compute_version_summary's label_delay_p50/p95_seconds).
+    label_ingested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=_utcnow, index=True
+    )
+
+
+class PendingLabel(Base):
+    """A ground-truth label that arrived (POST /api/labels) *before* the
+    PredictionMetric row it belongs to did - possible because the router publishes
+    metrics fire-and-forget (see docs/DESIGN_NOTES.md#metrics) while a label feeder
+    reports ground truth independently and asynchronously; there's no ordering
+    guarantee between the two. Matched and consumed the moment a PredictionMetric
+    with the same prediction_id is actually written (metrics_service.record_metric)
+    - never by a separate polling/background task, since that write is already the
+    one and only place a match becomes possible. A row that's never claimed just
+    sits here harmlessly (see Known limitations: no retention policy in this
+    sprint).
+    """
+
+    __tablename__ = "pending_labels"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
+    prediction_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True, index=True)
+    actual_label: Mapped[int] = mapped_column(Integer, nullable=False)
+    # When the label actually happened in the real world, per whoever's reporting it
+    # (a label feeder that just picked a known-answer row knows this exactly) -
+    # distinct from `ingested_at` (when *this server* received it). Only the latter
+    # feeds the label-delay metric (see PredictionMetric.label_ingested_at); this is
+    # kept for audit/debugging, not computed against anywhere yet.
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), default=_utcnow
     )

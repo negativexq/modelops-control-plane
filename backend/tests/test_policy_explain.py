@@ -87,12 +87,12 @@ def test_error_rate_fail() -> None:
     assert "exceeds" in text
 
 
-def test_recall_inconclusive_names_actual_label() -> None:
+def test_recall_inconclusive_describes_edge_case() -> None:
     text = explain_policy_check(
         policy_name="minimum_recall", observed_value=None, threshold=0.8, result=INCONCLUSIVE
     )
-    assert "actual_label not available" in text
-    assert "insufficient data" not in text  # distinct reason from the traffic-count cases
+    assert "insufficient data" in text
+    assert "edge case" in text
 
 
 def test_recall_fail() -> None:
@@ -107,6 +107,89 @@ def test_recall_pass() -> None:
         policy_name="minimum_recall", observed_value=0.9, threshold=0.8, result=PASS
     )
     assert "meets" in text
+
+
+def test_minimum_labeled_samples_inconclusive_mentions_counts() -> None:
+    text = explain_policy_check(
+        policy_name="minimum_labeled_samples",
+        observed_value=5.0,
+        threshold=30.0,
+        result=INCONCLUSIVE,
+    )
+    assert "5/30" in text
+    assert "recall was not evaluated" in text
+
+
+def test_minimum_labeled_samples_pass() -> None:
+    text = explain_policy_check(
+        policy_name="minimum_labeled_samples", observed_value=50.0, threshold=30.0, result=PASS
+    )
+    assert "enough labeled canary predictions" in text
+    assert "50/30" in text
+
+
+def test_minimum_label_coverage_inconclusive_mentions_fraction_and_threshold() -> None:
+    # The acceptance-criteria example: 12 predictions in the quality window, 3
+    # labeled (coverage 0.25), threshold 0.50.
+    text = explain_policy_check(
+        policy_name="minimum_label_coverage",
+        observed_value=0.25,
+        threshold=0.5,
+        result=INCONCLUSIVE,
+        labeled_sample_count=3,
+    )
+    assert "3 of 12 predictions" in text
+    assert "coverage 25%" in text
+    assert "threshold 50%" in text
+    assert "recall was not evaluated" in text
+
+
+def test_minimum_label_coverage_pass() -> None:
+    text = explain_policy_check(
+        policy_name="minimum_label_coverage",
+        observed_value=0.9,
+        threshold=0.5,
+        result=PASS,
+        labeled_sample_count=45,
+    )
+    assert "45 of 50 predictions" in text
+    assert "meeting" in text
+
+
+def test_minimum_label_coverage_inconclusive_without_data() -> None:
+    text = explain_policy_check(
+        policy_name="minimum_label_coverage",
+        observed_value=None,
+        threshold=0.5,
+        result=INCONCLUSIVE,
+    )
+    assert "insufficient data" in text
+
+
+def test_minimum_positive_labels_inconclusive_mentions_counts() -> None:
+    # The scenario the gate exists for: 71 labeled predictions, only 3 positive.
+    text = explain_policy_check(
+        policy_name="minimum_positive_labels",
+        observed_value=3.0,
+        threshold=30.0,
+        result=INCONCLUSIVE,
+        labeled_sample_count=71,
+    )
+    assert "3 of 71" in text
+    assert "30" in text
+    assert "recall was not evaluated" in text
+
+
+def test_minimum_positive_labels_pass() -> None:
+    text = explain_policy_check(
+        policy_name="minimum_positive_labels",
+        observed_value=40.0,
+        threshold=30.0,
+        result=PASS,
+        labeled_sample_count=50,
+    )
+    assert "40 of 50" in text
+    assert "statistically meaningful" in text
 
 
 def test_unknown_policy_name_falls_back_to_generic_text() -> None:

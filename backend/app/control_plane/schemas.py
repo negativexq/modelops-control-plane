@@ -126,13 +126,24 @@ TimelineItem = Annotated[
 
 class MetricIn(BaseModel):
     """What the router POSTs after each forward. Kept small on purpose - this is the
-    hot path."""
+    hot path.
+
+    Deliberately has no `actual_label` field: ground truth is never known at
+    prediction time, so this endpoint must never accept it directly from a caller
+    - see metrics_service.record_metric, which is the ONLY place a
+    PredictionMetric's actual_label gets populated, and only by matching a
+    PendingLabel created through POST /api/labels. See docs/DESIGN_NOTES.md.
+    """
 
     model_version: str
     latency_ms: float = Field(ge=0)
     status_code: int
     prediction: int | None = None
-    actual_label: int | None = None
+    # Minted in app/serving/ (see PredictionResponse.prediction_id), carried
+    # through unmodified by the router. The join key POST /api/labels uses to
+    # attach a delayed ground-truth label to this specific prediction - see
+    # metrics_service.record_metric and docs/DESIGN_NOTES.md.
+    prediction_id: str | None = None
 
 
 class MetricsSummary(BaseModel):
@@ -143,11 +154,54 @@ class MetricsSummary(BaseModel):
     p99_latency_ms: float | None
     error_rate: float | None
     # precision/recall/false_positive_rate are only meaningful once actual_label has
-    # been backfilled for at least one sample in the window - there's no label source
-    # yet, so these are None until something starts populating actual_label.
+    # been recorded for at least one sample in the window (see POST /api/labels) -
+    # None (not 0) when there's nothing labeled to compute them from.
     precision: float | None
     recall: float | None
     false_positive_rate: float | None
+    # How many of `sample_count` rows have a real actual_label, and what fraction
+    # that is - None only when sample_count itself is 0 (nothing to have a
+    # coverage fraction of); a real 0.0 means "samples exist, none labeled yet",
+    # which is a meaningfully different, common state (see label_maturity_seconds
+    # in app/policy/config.py).
+    labeled_sample_count: int
+    label_coverage: float | None
+    # How many of `labeled_sample_count` are the positive class (actual_label=1) -
+    # recall's true denominator (TP+FN), not `labeled_sample_count` itself. On a
+    # dataset with a low positive rate, `labeled_sample_count` clearing its own
+    # threshold says nothing about whether enough *positive* examples landed to
+    # make `recall` statistically meaningful - see app/policy/engine.py's
+    # minimum_positive_labels gate and docs/DESIGN_NOTES.md.
+    positive_label_count: int
+    # Wall-clock delay between a prediction happening and its label actually
+    # arriving (label_ingested_at - created_at, see PredictionMetric), summarized
+    # across whatever's labeled in this window. None when nothing in the window is
+    # labeled yet.
+    label_delay_p50_seconds: float | None
+    label_delay_p95_seconds: float | None
+
+
+class LabelIn(BaseModel):
+    """One ground-truth label - what a label feeder POSTs to /api/labels[/batch].
+    `prediction_id` is the join key back to a specific PredictionMetric (or, if it
+    hasn't landed yet, a PendingLabel - see label_service.py)."""
+
+    prediction_id: str
+    actual_label: int = Field(ge=0, le=1)
+    # When the label actually happened in the real world, per the feeder - distinct
+    # from `ingested_at` (server-assigned, see PendingLabel), which is what the
+    # label-delay metric is actually computed from.
+    occurred_at: datetime
+
+
+class LabelReportItem(BaseModel):
+    """Per-item result, returned by both POST /api/labels (a list of one) and
+    POST /api/labels/batch (the whole batch) - the same shape either way, so a
+    caller never needs two different response parsers."""
+
+    prediction_id: str
+    status: Literal["applied", "no_op", "pending", "conflict"]
+    detail: str | None = None
 
 
 class MetricsOut(BaseModel):

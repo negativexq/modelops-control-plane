@@ -31,7 +31,9 @@ def _add_metric(
     prediction: int | None = None,
     actual_label: int | None = None,
     age_seconds: float = 0,
+    label_delay_seconds: float | None = None,
 ) -> None:
+    created_at = datetime.now(UTC) - timedelta(seconds=age_seconds)
     db_session.add(
         PredictionMetric(
             deployment_id=deployment_id,
@@ -40,7 +42,12 @@ def _add_metric(
             status_code=status_code,
             prediction=prediction,
             actual_label=actual_label,
-            created_at=datetime.now(UTC) - timedelta(seconds=age_seconds),
+            created_at=created_at,
+            label_ingested_at=(
+                created_at + timedelta(seconds=label_delay_seconds)
+                if label_delay_seconds is not None
+                else None
+            ),
         )
     )
     db_session.commit()
@@ -136,6 +143,79 @@ def test_error_rate_counts_4xx_and_5xx(db_session: Session, deployment: Deployme
     assert summary.error_rate == pytest.approx(0.75)
 
 
+def test_labeled_sample_count_and_coverage(db_session: Session, deployment: Deployment) -> None:
+    _add_metric(db_session, deployment.id, "v1", latency_ms=1, prediction=1, actual_label=1)
+    _add_metric(db_session, deployment.id, "v1", latency_ms=1, prediction=0, actual_label=0)
+    _add_metric(db_session, deployment.id, "v1", latency_ms=1, prediction=1, actual_label=None)
+    _add_metric(db_session, deployment.id, "v1", latency_ms=1, prediction=0, actual_label=None)
+
+    summary = metrics_service.compute_version_summary(db_session, deployment.id, "v1", 3600)
+    assert summary.sample_count == 4
+    assert summary.labeled_sample_count == 2
+    assert summary.label_coverage == pytest.approx(0.5)
+
+
+def test_label_coverage_is_none_only_when_there_are_no_samples_at_all(
+    db_session: Session, deployment: Deployment
+) -> None:
+    empty = metrics_service.compute_version_summary(db_session, deployment.id, "v1", 3600)
+    assert empty.sample_count == 0
+    assert empty.label_coverage is None  # nothing to have a coverage fraction of
+
+    _add_metric(db_session, deployment.id, "v1", latency_ms=1, prediction=1, actual_label=None)
+    unlabeled = metrics_service.compute_version_summary(db_session, deployment.id, "v1", 3600)
+    assert unlabeled.sample_count == 1
+    assert unlabeled.label_coverage == pytest.approx(0.0)  # a real, measured zero
+
+
+def test_label_delay_percentiles_computed_from_label_ingested_at(
+    db_session: Session, deployment: Deployment
+) -> None:
+    _add_metric(
+        db_session, deployment.id, "v1", latency_ms=1, actual_label=1, label_delay_seconds=2.0
+    )
+    _add_metric(
+        db_session, deployment.id, "v1", latency_ms=1, actual_label=1, label_delay_seconds=10.0
+    )
+    # Not yet labeled - must not pull the delay percentiles down toward zero.
+    _add_metric(db_session, deployment.id, "v1", latency_ms=1, actual_label=None)
+
+    summary = metrics_service.compute_version_summary(db_session, deployment.id, "v1", 3600)
+    assert summary.label_delay_p50_seconds == pytest.approx(6.0)
+    assert summary.label_delay_p95_seconds == pytest.approx(9.6)
+
+
+def test_label_delay_is_none_when_nothing_is_labeled_yet(
+    db_session: Session, deployment: Deployment
+) -> None:
+    _add_metric(db_session, deployment.id, "v1", latency_ms=1, actual_label=None)
+    summary = metrics_service.compute_version_summary(db_session, deployment.id, "v1", 3600)
+    assert summary.label_delay_p50_seconds is None
+    assert summary.label_delay_p95_seconds is None
+
+
+def test_window_end_offset_shifts_the_window_into_the_past(
+    db_session: Session, deployment: Deployment
+) -> None:
+    """The policy engine's quality window (see app/policy/engine.py) reads an
+    *older* slice than the default now-anchored window - window_end_offset_seconds
+    is what makes that possible from the same function."""
+    _add_metric(db_session, deployment.id, "v1", latency_ms=1, age_seconds=5)  # old
+    _add_metric(db_session, deployment.id, "v1", latency_ms=1, age_seconds=200)  # older still
+
+    # Default window (ends now): both fall inside a wide-enough window.
+    now_window = metrics_service.compute_version_summary(db_session, deployment.id, "v1", 300)
+    assert now_window.sample_count == 2
+
+    # Shifted window ending 100s ago, 300s wide: only the older row (age=200s)
+    # falls inside [now-400, now-100]; the newer one (age=5s) is now in the future
+    # relative to this window's end and must be excluded.
+    shifted = metrics_service.compute_version_summary(
+        db_session, deployment.id, "v1", 300, window_end_offset_seconds=100
+    )
+    assert shifted.sample_count == 1
+
+
 def test_compute_deltas_is_canary_minus_stable() -> None:
     stable = MetricsSummary(
         version="v1",
@@ -147,6 +227,11 @@ def test_compute_deltas_is_canary_minus_stable() -> None:
         precision=0.8,
         recall=0.7,
         false_positive_rate=0.02,
+        labeled_sample_count=10,
+        label_coverage=1.0,
+        positive_label_count=7,
+        label_delay_p50_seconds=None,
+        label_delay_p95_seconds=None,
     )
     canary = MetricsSummary(
         version="v2-good",
@@ -158,6 +243,11 @@ def test_compute_deltas_is_canary_minus_stable() -> None:
         precision=0.9,
         recall=0.85,
         false_positive_rate=0.01,
+        labeled_sample_count=10,
+        label_coverage=1.0,
+        positive_label_count=8,
+        label_delay_p50_seconds=None,
+        label_delay_p95_seconds=None,
     )
 
     deltas = metrics_service.compute_deltas(stable, canary)
@@ -177,6 +267,11 @@ def test_compute_deltas_none_when_either_side_missing() -> None:
         precision=None,
         recall=None,
         false_positive_rate=None,
+        labeled_sample_count=0,
+        label_coverage=None,
+        positive_label_count=0,
+        label_delay_p50_seconds=None,
+        label_delay_p95_seconds=None,
     )
     populated = MetricsSummary(
         version="v2-good",
@@ -188,6 +283,11 @@ def test_compute_deltas_none_when_either_side_missing() -> None:
         precision=1.0,
         recall=1.0,
         false_positive_rate=0.0,
+        labeled_sample_count=1,
+        label_coverage=1.0,
+        positive_label_count=1,
+        label_delay_p50_seconds=None,
+        label_delay_p95_seconds=None,
     )
 
     deltas = metrics_service.compute_deltas(empty, populated)

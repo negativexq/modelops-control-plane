@@ -38,23 +38,21 @@ class Scenario:
     expected_outcome: ExpectedOutcome = "throughput_only"
     load_duration_seconds: int = 120
     max_wait_seconds: int = 120
-    # "success" only: since there is no real actual_label source anywhere in the
-    # platform yet (see Sprint 5/7), the quality/recall policy check is always
-    # INCONCLUSIVE and therefore no deployment can be automatically promoted or even
-    # advanced past its first traffic stage - INCONCLUSIVE beats PASS by design
-    # (Sprint 7). To still demonstrate the worker's real ramp/promote mechanics, this
-    # scenario backfills synthetic ground-truth labels via POST .../metrics after the
-    # load phase - simulating a delayed label feed that doesn't exist as a real
-    # system component. This is called out explicitly in the report, not hidden.
-    backfill_synthetic_labels: bool = False
+    # "success" only: real ground-truth labels now flow from the Locust load
+    # definition itself (see locustfile.py's _LabelFeeder, sourced from the real
+    # dataset's known labels) once the canary is receiving real traffic. But once
+    # the canary reaches 100% of traffic, the stable side stops receiving *any*
+    # real requests at all - so it needs its own synthetic (unlabeled)
+    # health-check traffic to keep satisfying minimum_requests on both sides, see
+    # run_benchmark.py's _feed_stable_side_health_checks.
+    needs_stable_side_health_checks: bool = False
     notes: tuple[str, ...] = field(default_factory=tuple)
     # User-facing disclaimer for the dashboard's scenario cards (app/benchmarks/) -
     # None for scenarios that reflect real, unmodified platform behavior
-    # (baseline/latency-failure/error-failure). Set for quality-failure (generous,
-    # non-default policy thresholds so harness noise doesn't false-trigger a latency
-    # FAIL) and success (generous thresholds PLUS synthetic actual_label backfill,
-    # since promotion is otherwise unreachable - see backfill_synthetic_labels
-    # above). The dashboard must show this, not just this script's own report.
+    # (baseline/latency-failure/error-failure). Set for quality-failure and success
+    # (both use generous, non-default policy thresholds so harness noise doesn't
+    # false-trigger a latency FAIL). The dashboard must show this, not just this
+    # script's own report.
     synthetic_disclaimer: str | None = None
 
 
@@ -68,10 +66,11 @@ _DEFAULT_RELIABILITY_POLICY = {"max_error_rate_percent": 5.0}
 # latency variance alone was enough to trigger a latency FAIL at a 20% threshold;
 # second, even at 300%, "success" still tripped a false latency FAIL right at the
 # moment load generation stopped and the canary was at 100% traffic - stable's
-# window held only low-latency synthetic health-check backfill (see
-# run_benchmark.py's _backfill_synthetic_labels) while canary's window still held
-# a residue of real, CPU-contended request latency, an apples-to-oranges comparison
-# that's a transient artifact of this benchmark harness, not a real regression.
+# window held only low-latency synthetic health-check traffic (see
+# run_benchmark.py's _feed_stable_side_health_checks) while canary's window still
+# held a residue of real, CPU-contended request latency, an apples-to-oranges
+# comparison that's a transient artifact of this benchmark harness, not a real
+# regression.
 # These scenarios use a very generous threshold so only an actual injected fault
 # (400ms in latency-failure, ~20-40x any real model's inference time observed here)
 # can trigger a latency FAIL - not routine, unfaked variance or harness artifacts.
@@ -147,14 +146,19 @@ SCENARIOS: dict[str, Scenario] = {
         key="quality-failure",
         description=(
             "Canary is v2-quality-bad (deliberately weak model, no fault injection). "
-            "The 'quality regression' this demonstrates is NOT a recall policy FAIL - "
-            "there is no actual_label data anywhere in the platform, so the recall "
-            "check is always INCONCLUSIVE, never FAIL. What this scenario actually "
-            "shows is the max-inconclusive-retries freeze: latency/error checks PASS "
-            "(no fault injection), but the perpetually-INCONCLUSIVE recall check "
-            "keeps the overall result INCONCLUSIVE (INCONCLUSIVE beats PASS, Sprint "
+            "Labels now flow through the real ingestion path (locustfile.py's "
+            "_LabelFeeder, delayed by BENCHMARK_LABEL_DELAY_SECONDS), but this "
+            "scenario's short window and low max_inconclusive_retries are tuned so "
+            "the quality data-sufficiency gate (minimum_labeled_samples/"
+            "minimum_label_coverage) typically doesn't mature in time - "
+            "demonstrating the max-inconclusive-retries freeze: latency/error "
+            "checks PASS (no fault injection), but INCONCLUSIVE beats PASS (Sprint "
             "7), so the deployment never advances traffic and eventually freezes "
-            "into INCONCLUSIVE status once max_inconclusive_retries is exceeded."
+            "into INCONCLUSIVE status. If enough labels do mature before the freeze "
+            "(a real recall FAIL on this deliberately weak model is also a "
+            "plausible, legitimate outcome now that real quality signal exists), "
+            "the worker will automatically roll it back instead - both outcomes "
+            "demonstrate the policy engine working correctly."
         ),
         model_name="benchmark-quality-failure",
         stable_version="v1",
@@ -171,9 +175,11 @@ SCENARIOS: dict[str, Scenario] = {
         load_duration_seconds=150,
         max_wait_seconds=150,
         notes=(
-            "Expected end state is INCONCLUSIVE (frozen after max_inconclusive_retries), "
-            "not ROLLED_BACK - there is no FAIL involved here, only unresolvable "
-            "INCONCLUSIVE recall checks. See scenario description.",
+            "Expected end state is INCONCLUSIVE (frozen after max_inconclusive_retries) "
+            "- the short window and low retry budget are tuned so the quality gate "
+            "typically hasn't matured enough labeled data yet. A ROLLED_BACK result "
+            "instead (a real recall FAIL resolving before the freeze) is also a "
+            "correct outcome, not a benchmark bug - see scenario description.",
         ),
         synthetic_disclaimer=(
             "Demo scenario: uses deliberately loosened latency/error thresholds so "
@@ -204,32 +210,30 @@ SCENARIOS: dict[str, Scenario] = {
         expected_outcome="promote",
         load_duration_seconds=90,
         max_wait_seconds=240,
-        backfill_synthetic_labels=True,
+        needs_stable_side_health_checks=True,
         notes=(
-            "Without a real actual_label source, the recall check is always "
-            "INCONCLUSIVE and no deployment can ever be promoted automatically - see "
-            "quality-failure. This scenario backfills synthetic (prediction, "
-            "actual_label) pairs via POST .../metrics throughout the run to "
-            "simulate a delayed ground-truth label feed, purely so the promotion "
-            "path can be exercised end to end. This is NOT real platform behavior "
-            "today; it demonstrates what happens once a real label source exists.",
+            "Ground-truth labels flow through the platform's real ingestion "
+            "surface (POST /api/labels/batch), delayed and generated by the "
+            "Locust load definition itself (locustfile.py's _LabelFeeder) - the "
+            "labels' source is still the synthetic dataset's known labels, but "
+            "the ingestion path is the same one a real deployment would use. See "
+            "docs/DESIGN_NOTES.md's Label ingestion section.",
             "Also found via manual end-to-end verification: once the canary reaches "
             "100% traffic, the stable side receives zero real requests, so "
             "minimum_requests (which requires BOTH sides to have enough samples) "
             "would stay unmet forever and PROMOTE would never fire - a genuine "
-            "platform limitation, not a benchmark bug. This scenario also backfills "
-            "small plain 'health-check' metrics for the stable version so this "
-            "specific benchmark can still reach PROMOTED; a real deployment at 100% "
-            "canary would need an equivalent synthetic-monitoring traffic source of "
-            "its own to ever complete promotion automatically.",
+            "platform limitation, not a benchmark bug. This scenario also feeds "
+            "small plain (unlabeled) 'health-check' metrics for the stable version "
+            "so this specific benchmark can still reach PROMOTED; a real deployment "
+            "at 100% canary would need an equivalent synthetic-monitoring traffic "
+            "source of its own to ever complete promotion automatically.",
         ),
         synthetic_disclaimer=(
-            "Demo scenario: uses deliberately loosened latency/error thresholds AND "
-            "backfills synthetic (prediction, actual_label) pairs via POST "
-            "/metrics to simulate ground-truth labels that don't exist as a real "
-            "system component yet. Without this, no deployment can be automatically "
-            "promoted today - see the quality-failure scenario. Not representative "
-            "of real platform behavior."
+            "Demo scenario: uses deliberately loosened latency/error thresholds. "
+            "Labels arrive delayed through the platform's real ingestion surface "
+            "(POST /api/labels), not a direct DB write - but their source is still "
+            "the synthetic dataset's known labels, not a real production feedback "
+            "loop. Not representative of real platform traffic."
         ),
     ),
 }

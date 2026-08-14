@@ -98,9 +98,20 @@ export interface MetricsSummary {
   p95_latency_ms: number | null;
   p99_latency_ms: number | null;
   error_rate: number | null;
+  // null only when sample_count is itself 0 - a real 0 means samples exist but
+  // none are labeled yet (see backend/app/control_plane/schemas.py's
+  // MetricsSummary docstring).
   precision: number | null;
   recall: number | null;
   false_positive_rate: number | null;
+  labeled_sample_count: number;
+  label_coverage: number | null;
+  // How many of `labeled_sample_count` are the positive class - recall's real
+  // denominator (TP+FN), not `labeled_sample_count` itself. See
+  // backend/app/policy/engine.py's minimum_positive_labels gate.
+  positive_label_count: number;
+  label_delay_p50_seconds: number | null;
+  label_delay_p95_seconds: number | null;
 }
 
 export interface MetricsOut {
@@ -160,8 +171,11 @@ export interface ScenarioInfo {
   description: string;
   expected_outcome: string;
   // Non-null only for quality-failure/success: those scenarios use deliberately
-  // loosened thresholds and (for success) synthetic ground-truth backfill, which is
-  // not real platform behavior - see backend/scripts/benchmarks/scenarios.py.
+  // loosened thresholds so harness noise can't false-trigger a rollback - see
+  // backend/scripts/benchmarks/scenarios.py. Ground-truth labels for both flow
+  // through the platform's real ingestion path (POST /api/labels), delayed, not
+  // a direct DB write - but their source is still the synthetic test dataset's
+  // known labels, not real production traffic.
   synthetic_disclaimer: string | null;
 }
 

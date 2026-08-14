@@ -1,5 +1,6 @@
 import logging
 import time
+import uuid
 from typing import Any
 
 import pandas as pd
@@ -114,6 +115,7 @@ def create_app(settings: ServingSettings) -> FastAPI:
         )
 
         return PredictionResponse(
+            prediction_id=str(uuid.uuid4()),
             prediction=prediction,
             fraud_probability=probability,
             model_name=settings.model_name,

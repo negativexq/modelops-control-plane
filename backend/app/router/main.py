@@ -74,7 +74,12 @@ def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None
     pending_metric_tasks: set[asyncio.Task[None]] = set()
 
     def _emit_metric(
-        deployment_id: str, model_version: str, latency_ms: float, status_code: int, prediction: Any
+        deployment_id: str,
+        model_version: str,
+        latency_ms: float,
+        status_code: int,
+        prediction: Any,
+        prediction_id: Any,
     ) -> None:
         if not settings.control_plane_url:
             return
@@ -87,6 +92,7 @@ def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None
                 latency_ms,
                 status_code,
                 prediction if isinstance(prediction, int) else None,
+                prediction_id if isinstance(prediction_id, str) else None,
                 settings.upstream_timeout_seconds,
             )
         )
@@ -200,8 +206,14 @@ def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None
 
         if config.deployment_id:
             prediction = body.get("prediction") if isinstance(body, dict) else None
+            prediction_id = body.get("prediction_id") if isinstance(body, dict) else None
             _emit_metric(
-                config.deployment_id, target.version, latency_ms, response.status_code, prediction
+                config.deployment_id,
+                target.version,
+                latency_ms,
+                response.status_code,
+                prediction,
+                prediction_id,
             )
 
         return JSONResponse(status_code=response.status_code, content=body)

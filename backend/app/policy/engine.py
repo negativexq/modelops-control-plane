@@ -76,10 +76,61 @@ def _evaluate_reliability(canary: MetricsSummary, policy: ReliabilityPolicy) -> 
     )
 
 
-def _evaluate_quality(canary: MetricsSummary, policy: QualityPolicy) -> PolicyCheckResult:
-    if canary.recall is None:
-        # No actual_label backfilled yet - there is genuinely nothing to check, not a
-        # failure. See Sprint 5 notes: this is the expected, common case today.
+def _evaluate_minimum_labeled_samples(
+    canary_quality: MetricsSummary, minimum_labeled_samples: int
+) -> PolicyCheckResult:
+    result = (
+        PASS if canary_quality.labeled_sample_count >= minimum_labeled_samples else INCONCLUSIVE
+    )
+    return PolicyCheckResult(
+        policy_name="minimum_labeled_samples",
+        metric_name="labeled_sample_count",
+        observed_value=float(canary_quality.labeled_sample_count),
+        threshold=float(minimum_labeled_samples),
+        result=result,
+    )
+
+
+def _evaluate_minimum_label_coverage(
+    canary_quality: MetricsSummary, minimum_label_coverage: float
+) -> PolicyCheckResult:
+    coverage = canary_quality.label_coverage
+    result = (
+        INCONCLUSIVE if coverage is None or coverage < minimum_label_coverage else PASS
+    )
+    return PolicyCheckResult(
+        policy_name="minimum_label_coverage",
+        metric_name="label_coverage",
+        observed_value=coverage,
+        threshold=minimum_label_coverage,
+        result=result,
+    )
+
+
+def _evaluate_minimum_positive_labels(
+    canary_quality: MetricsSummary, minimum_positive_labels: int
+) -> PolicyCheckResult:
+    result = (
+        PASS
+        if canary_quality.positive_label_count >= minimum_positive_labels
+        else INCONCLUSIVE
+    )
+    return PolicyCheckResult(
+        policy_name="minimum_positive_labels",
+        metric_name="positive_label_count",
+        observed_value=float(canary_quality.positive_label_count),
+        threshold=float(minimum_positive_labels),
+        result=result,
+    )
+
+
+def _evaluate_quality(canary_quality: MetricsSummary, policy: QualityPolicy) -> PolicyCheckResult:
+    if canary_quality.recall is None:
+        # No labeled canary predictions in the quality window - genuinely nothing
+        # to check, not a failure. In practice this shouldn't be reached once the
+        # minimum_labeled_samples/minimum_label_coverage gate below has already
+        # passed, but stays defensive (e.g. all labeled predictions happened to be
+        # for the *other* version, an edge case that gate doesn't itself rule out).
         return PolicyCheckResult(
             policy_name="minimum_recall",
             metric_name="recall",
@@ -88,22 +139,67 @@ def _evaluate_quality(canary: MetricsSummary, policy: QualityPolicy) -> PolicyCh
             result=INCONCLUSIVE,
         )
 
-    result = FAIL if canary.recall < policy.minimum_recall else PASS
+    result = FAIL if canary_quality.recall < policy.minimum_recall else PASS
     return PolicyCheckResult(
         policy_name="minimum_recall",
         metric_name="recall",
-        observed_value=canary.recall,
+        observed_value=canary_quality.recall,
         threshold=policy.minimum_recall,
         result=result,
     )
 
 
-def evaluate_policies(
-    stable: MetricsSummary, canary: MetricsSummary, config: PolicyConfig
+def evaluate_quality_policies(
+    canary_quality: MetricsSummary, config: PolicyConfig
 ) -> list[PolicyCheckResult]:
-    """Run every policy check for one evaluation. If minimum_requests isn't met, that
-    is the ONLY check returned - metric-based policies (latency/reliability/quality)
-    don't get evaluated on too little traffic, per design.
+    """The quality-window half of one evaluation: does the canary have enough
+    *labeled* data - and, within that, enough *positive-class* data - in its
+    (older, matured) window to say anything about recall at all, and if so, what
+    does recall actually say? Mirrors _evaluate_minimum_requests's
+    gate-then-proceed shape on the reliability side: if any data-sufficiency
+    check fails, minimum_recall does NOT run - "not enough data yet" and "recall
+    is bad" are different findings, and the former must never silently become the
+    latter (see docs/DESIGN_NOTES.md).
+
+    Three data-sufficiency checks run in order - minimum_labeled_samples,
+    minimum_label_coverage, minimum_positive_labels - because each catches a
+    distinct failure mode: a low-positive-rate dataset (e.g. ~2% fraud) can
+    clear the first two while the window still holds only 1-3 positive examples,
+    which makes recall (TP/(TP+FN), denominator = positives) statistically
+    meaningless even though "enough labeled samples" and "enough coverage" both
+    technically passed.
+    """
+    labeled_samples_check = _evaluate_minimum_labeled_samples(
+        canary_quality, config.minimum_labeled_samples
+    )
+    coverage_check = _evaluate_minimum_label_coverage(canary_quality, config.minimum_label_coverage)
+    positive_labels_check = _evaluate_minimum_positive_labels(
+        canary_quality, config.minimum_positive_labels
+    )
+    gate_checks = [labeled_samples_check, coverage_check, positive_labels_check]
+    if any(check.result != PASS for check in gate_checks):
+        return gate_checks
+
+    quality_check = _evaluate_quality(canary_quality, config.quality)
+    return [*gate_checks, quality_check]
+
+
+def evaluate_policies(
+    stable: MetricsSummary,
+    canary: MetricsSummary,
+    canary_quality: MetricsSummary,
+    config: PolicyConfig,
+) -> list[PolicyCheckResult]:
+    """Run every policy check for one evaluation.
+
+    `stable`/`canary` are the *reliability* window (now-window, now) -
+    minimum_requests, latency, error rate. `canary_quality` is the *quality*
+    window (now-window-maturity, now-maturity) - see evaluate_quality_policies and
+    docs/DESIGN_NOTES.md for why quality reads an older slice of history than
+    everything else.
+
+    If minimum_requests isn't met, that is the ONLY check returned - nothing else
+    (reliability or quality) gets evaluated on too little fresh traffic, per design.
     """
     minimum_requests_check = _evaluate_minimum_requests(stable, canary, config.minimum_requests)
     if minimum_requests_check.result != PASS:
@@ -113,7 +209,7 @@ def evaluate_policies(
         minimum_requests_check,
         _evaluate_latency(stable, canary, config.latency),
         _evaluate_reliability(canary, config.reliability),
-        _evaluate_quality(canary, config.quality),
+        *evaluate_quality_policies(canary_quality, config),
     ]
 
 
