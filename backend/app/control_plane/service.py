@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.control_plane.models import (
+    TERMINAL_STATUSES,
     Deployment,
     DeploymentEvent,
     DeploymentStatus,
@@ -80,6 +81,25 @@ class ConcurrentUpdateError(Exception):
         )
 
 
+class DeploymentTerminalError(Exception):
+    """Raised by pause_automation/resume_automation when a deployment is already
+    PROMOTED/ROLLED_BACK/FAILED - there's nothing left to pause or resume once a
+    deployment is done. Deliberately broader than DeploymentNotActiveError's
+    CANARY_RUNNING/EVALUATING-only check: pause/resume are meaningful in any
+    non-terminal status (including PENDING, DEPLOYING, and INCONCLUSIVE, where the
+    worker isn't currently touching the deployment but an operator may still want
+    to record intent before it becomes active again).
+    """
+
+    def __init__(self, deployment_id: str, status: DeploymentStatus) -> None:
+        self.deployment_id = deployment_id
+        self.status = status
+        super().__init__(
+            f"deployment {deployment_id} is terminal (status={status.value}) - "
+            "nothing to pause or resume"
+        )
+
+
 class ActiveDeploymentExistsError(Exception):
     """Raised by create_deployment when `model_name` already has a deployment in
     CANARY_RUNNING/EVALUATING - the router holds exactly one traffic split per
@@ -146,6 +166,14 @@ def require_active(deployment: Deployment) -> None:
         raise DeploymentNotActiveError(deployment.id, deployment.status)
 
 
+def require_not_terminal(deployment: Deployment) -> None:
+    """Raises DeploymentTerminalError if `deployment` is PROMOTED/ROLLED_BACK/
+    FAILED. Used by pause_automation/resume_automation - see require_active for
+    the narrower CANARY_RUNNING/EVALUATING-only guard other actions use."""
+    if deployment.status in TERMINAL_STATUSES:
+        raise DeploymentTerminalError(deployment.id, deployment.status)
+
+
 def _touch(deployment: Deployment) -> None:
     """Explicitly dirties the Deployment row so its version_id_col (optimistic
     lock) is checked and bumped on every action that goes through this module -
@@ -201,6 +229,7 @@ async def create_deployment(
     canary_weight: float,
     idempotency_key: str | None,
     policy_config: PolicyConfig | None = None,
+    automation_paused: bool = False,
 ) -> tuple[Deployment, bool]:
     """Start a new canary deployment.
 
@@ -228,6 +257,7 @@ async def create_deployment(
         status=DeploymentStatus.PENDING,
         idempotency_key=idempotency_key,
         policy_config=effective_policy_config.model_dump(),
+        automation_paused=automation_paused,
     )
     db.add(deployment)
     try:
@@ -256,6 +286,14 @@ async def create_deployment(
         "created",
         f"deployment created for {model_name}: stable={stable_version} canary={canary_version}",
     )
+    if automation_paused:
+        _log_event(
+            db,
+            deployment,
+            "automation_paused",
+            "automation paused at creation (manual) - the worker will not act on "
+            "this deployment until it's resumed",
+        )
 
     targets: list[dict[str, float | str]] = [
         {"version": stable_version, "weight": round(1 - canary_weight, 6)},
@@ -465,6 +503,50 @@ def record_inconclusive(db: Session, deployment: Deployment, max_retries: int) -
             f"auto: exceeded max inconclusive retries ({max_retries}), freezing for manual review",
         )
         deployment.completed_at = datetime.now(UTC)
+
+    _commit(db, deployment)
+    db.refresh(deployment)
+    return deployment
+
+
+def pause_automation(
+    db: Session, deployment: Deployment, triggered_by: str = "manual"
+) -> Deployment:
+    """Sets automation_paused=True - the worker's next sweep (app/worker/loop.py's
+    run_once) will skip this deployment entirely, before it ever calls /evaluate.
+    Manual /evaluate, /promote, /rollback remain unaffected; this only stops the
+    automated actor.
+
+    Idempotent: pausing an already-paused deployment is a silent no-op (no new
+    event, no version bump) rather than an error, so a double-click or a retried
+    request doesn't spam the timeline with duplicate "automation paused" entries.
+    """
+    require_not_terminal(deployment)
+    if deployment.automation_paused:
+        return deployment
+
+    _touch(deployment)
+    deployment.automation_paused = True
+    _log_event(db, deployment, "automation_paused", f"automation paused ({triggered_by})")
+
+    _commit(db, deployment)
+    db.refresh(deployment)
+    return deployment
+
+
+def resume_automation(
+    db: Session, deployment: Deployment, triggered_by: str = "manual"
+) -> Deployment:
+    """Sets automation_paused=False - the worker will pick this deployment back up
+    on its next sweep, same as any other active deployment. Idempotent, same
+    reasoning as pause_automation."""
+    require_not_terminal(deployment)
+    if not deployment.automation_paused:
+        return deployment
+
+    _touch(deployment)
+    deployment.automation_paused = False
+    _log_event(db, deployment, "automation_resumed", f"automation resumed ({triggered_by})")
 
     _commit(db, deployment)
     db.refresh(deployment)

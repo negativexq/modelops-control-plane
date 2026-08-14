@@ -41,6 +41,11 @@ export interface DeploymentOut {
   // Derived (model_name starts with "benchmark-"), not a stored column - see
   // backend/app/control_plane/schemas.py's DeploymentOut.is_benchmark.
   is_benchmark: boolean;
+  // Manual automation hold - when true, the worker skips this deployment
+  // entirely (see backend/app/worker/loop.py's run_once). Manual
+  // promote/rollback/evaluate are unaffected. See
+  // backend/docs/DESIGN_NOTES.md#manual-automation-hold.
+  automation_paused: boolean;
 }
 
 export type PolicyEvaluationResult = "PASS" | "FAIL" | "INCONCLUSIVE";

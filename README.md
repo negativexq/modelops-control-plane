@@ -302,6 +302,14 @@ through the control plane's own REST API - the same endpoints a human would call
   can still promote/rollback a frozen deployment).
 - `triggered_by=manual|automatic` distinguishes human vs. worker actions in the
   event log.
+- `POST /api/deployments/{id}/pause-automation` / `/resume-automation` - a
+  manual hold (Kubernetes' `spec.paused`, Argo Rollouts' manual pause) that
+  stops the worker from touching a specific deployment without stopping the
+  operator from acting on it manually. `POST /api/deployments` also accepts
+  `automation_paused: true` to create a deployment already held. See
+  [Manual automation hold](docs/DESIGN_NOTES.md#manual-automation-hold) for
+  why this exists - it closed a real, reproducible CI race, not a
+  hypothetical one.
 
 ### Benchmark suite (Sprint 9)
 
@@ -412,7 +420,7 @@ resolve to `PASS` or `FAIL`, not just `INCONCLUSIVE` forever.
 
 ```bash
 make dev             # bring up the whole stack via docker compose
-make test            # backend tests (pytest) - 240 tests, ~92% statement coverage
+make test            # backend tests (pytest) - 250 tests, ~92% statement coverage
 make coverage        # same, plus an HTML report at backend/htmlcov/index.html
 make lint            # backend (ruff, mypy) + frontend (eslint, tsc) lint/type-check
 make ci-smoke-test   # the same real-stack check CI runs - needs `make dev` running
@@ -424,16 +432,22 @@ every push/PR:
 
 | Job | What it checks | Runtime |
 |---|---|---|
-| `backend` | `ruff`, `mypy --strict`, `pytest` (210 tests, mocked collaborators) | seconds |
+| `backend` | `ruff`, `mypy --strict`, `pytest` (250 tests, mocked collaborators) | seconds |
 | `frontend` | `eslint`, `tsc --noEmit` | seconds |
-| `integration` | Builds and boots the **real** 9-container stack (8 HTTP-exposed services + the worker, which has no HTTP surface), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s three scenarios - gated on the two jobs above passing first | a few minutes |
+| `integration` | Builds and boots the **real** 9-container stack (8 HTTP-exposed services + the worker, which has no HTTP surface), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s four scenarios - gated on the two jobs above passing first | a few minutes |
 
-The `integration` job's three scenarios, in order: **(1)** a fast manual create →
-evaluate → promote path; **(2)** inject real latency into a canary and wait for the
-**actual automated worker** (not a manual call standing in for it) to detect the
-resulting policy FAIL and roll back on its own; **(3)** a healthy canary, waiting
-for the worker to really walk it through every traffic stage (10% → 25% → 50% →
-100%) and promote it. Scenarios 2 and 3 only finish in reasonable CI time because
+The `integration` job's four scenarios, in order: **(1)** a fast manual create →
+evaluate → promote path, created with `automation_paused=True` so the always-on
+worker can't race the scenario's own manual `/evaluate` call - see
+[Manual automation hold](docs/DESIGN_NOTES.md#manual-automation-hold), added
+after this exact race caused a real, reproducible CI flake; **(2)** inject real
+latency into a canary and wait for the **actual automated worker** (not a
+manual call standing in for it) to detect the resulting policy FAIL and roll
+back on its own; **(3)** a healthy canary, waiting for the worker to really
+walk it through every traffic stage (10% → 25% → 50% → 100%) and promote it on
+a genuine `minimum_recall` PASS; **(4)** a deliberately weak canary, same real
+delayed label flow as (3), rolled back automatically on a genuine
+`minimum_recall` FAIL. Scenarios 2-4 only finish in reasonable CI time because
 the worker's poll interval is turned down to 2s for this job specifically
 (`WORKER_POLL_INTERVAL_SECONDS` in the workflow file - defaults to 15s for real use
 and for local `make dev`, unaffected unless that env var is set).

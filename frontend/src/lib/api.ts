@@ -114,6 +114,20 @@ export function rollbackDeployment(id: string): Promise<DeploymentOut> {
   });
 }
 
+export function pauseAutomation(id: string): Promise<DeploymentOut> {
+  return request<DeploymentOut>(
+    `/api/deployments/${encodeURIComponent(id)}/pause-automation`,
+    { method: "POST" },
+  );
+}
+
+export function resumeAutomation(id: string): Promise<DeploymentOut> {
+  return request<DeploymentOut>(
+    `/api/deployments/${encodeURIComponent(id)}/resume-automation`,
+    { method: "POST" },
+  );
+}
+
 export function getDeploymentMetrics(
   id: string,
   windowSeconds?: number,

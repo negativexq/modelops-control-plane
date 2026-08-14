@@ -256,6 +256,83 @@ def test_rollback_after_promoted_is_rejected(client: TestClient) -> None:
     assert rollback_response.status_code == 409
 
 
+def test_create_deployment_paused_from_the_start(client: TestClient) -> None:
+    """Lets a caller (see scripts/ci_smoke_test.py's manual scenario) create an
+    already-paused deployment in one call, closing the race a create-then-pause
+    round trip would otherwise leave open against the worker's own polling."""
+    response = _create_deployment(client, automation_paused=True)
+    body = response.json()
+    assert body["automation_paused"] is True
+    event_types = [e["event_type"] for e in body["events"]]
+    assert "automation_paused" in event_types
+
+
+def test_create_deployment_defaults_to_not_paused(client: TestClient) -> None:
+    response = _create_deployment(client)
+    assert response.json()["automation_paused"] is False
+
+
+def test_pause_automation_sets_flag_and_logs_event(client: TestClient) -> None:
+    deployment_id = _create_deployment(client).json()["id"]
+
+    response = client.post(f"/api/deployments/{deployment_id}/pause-automation")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["automation_paused"] is True
+    event_types = [e["event_type"] for e in body["events"]]
+    assert "automation_paused" in event_types
+
+
+def test_pause_automation_is_idempotent(client: TestClient) -> None:
+    """Pausing an already-paused deployment must not write a second event -
+    otherwise a double-click or a retried request would spam the timeline."""
+    deployment_id = _create_deployment(client).json()["id"]
+
+    first = client.post(f"/api/deployments/{deployment_id}/pause-automation")
+    second = client.post(f"/api/deployments/{deployment_id}/pause-automation")
+    assert first.status_code == 200
+    assert second.status_code == 200
+    event_types = [e["event_type"] for e in second.json()["events"]]
+    assert event_types.count("automation_paused") == 1
+
+
+def test_resume_automation_clears_flag_and_logs_event(client: TestClient) -> None:
+    deployment_id = _create_deployment(client, automation_paused=True).json()["id"]
+
+    response = client.post(f"/api/deployments/{deployment_id}/resume-automation")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["automation_paused"] is False
+    event_types = [e["event_type"] for e in body["events"]]
+    assert "automation_resumed" in event_types
+
+
+def test_pause_automation_on_terminal_deployment_is_rejected(client: TestClient) -> None:
+    deployment_id = _create_deployment(client).json()["id"]
+    client.post(f"/api/deployments/{deployment_id}/promote")
+
+    response = client.post(f"/api/deployments/{deployment_id}/pause-automation")
+    assert response.status_code == 409
+
+
+def test_resume_automation_on_terminal_deployment_is_rejected(client: TestClient) -> None:
+    deployment_id = _create_deployment(client, automation_paused=True).json()["id"]
+    client.post(f"/api/deployments/{deployment_id}/promote")
+
+    response = client.post(f"/api/deployments/{deployment_id}/resume-automation")
+    assert response.status_code == 409
+
+
+def test_manual_promote_is_unaffected_by_automation_pause(client: TestClient) -> None:
+    """Pause only ever stops the automated worker - a human's own /promote and
+    /rollback calls must keep working exactly as before."""
+    deployment_id = _create_deployment(client, automation_paused=True).json()["id"]
+
+    response = client.post(f"/api/deployments/{deployment_id}/promote")
+    assert response.status_code == 200
+    assert response.json()["status"] == "PROMOTED"
+
+
 def test_router_config_endpoint_returns_active_allocation(client: TestClient) -> None:
     deployment_id = _create_deployment(client).json()["id"]
 

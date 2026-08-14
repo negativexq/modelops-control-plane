@@ -13,10 +13,18 @@ see README's "Troubleshooting" section.
 
 Four scenarios, run in sequence (the router holds a single active traffic split -
 see docs/DESIGN_NOTES.md#benchmark-suite - so these can't run concurrently, and
-each fully completes before the next one starts):
+each fully completes before the next one starts). Each scenario now uses its own
+model_name (SCENARIO_MODEL_NAMES below), not a shared "fraud-model": the
+active-deployment-per-model DB invariant (see
+docs/DESIGN_NOTES.md#control-plane--deployment-lifecycle) then points at
+exactly which scenario left something behind if one ever does, instead of every
+scenario racing a single ambiguous name. `_assert_no_orphaned_deployments`
+checks this explicitly before scenario 1 even starts.
 
-1. `run_manual_smoke_scenario` - the fast path: create, send traffic, evaluate,
-   manually promote. Exercises the CRUD-ish surface without waiting on the worker.
+1. `run_manual_smoke_scenario` - the fast path: create (already
+   automation_paused=True - see docs/DESIGN_NOTES.md#manual-automation-hold for
+   why), send traffic, evaluate, manually promote. Exercises the CRUD-ish
+   surface without waiting on the worker.
 2. `run_automatic_rollback_scenario` - injects real latency into a canary and
    waits for the *actual* automated worker (not a manual call standing in for it)
    to detect the FAIL and roll back on its own.
@@ -280,8 +288,27 @@ def _set_fault_injection(url: str, latency_ms: int, error_rate: float) -> None:
     response.raise_for_status()
 
 
+DEPLOYMENT_ID_LOG = os.environ.get("CI_DEPLOYMENT_ID_LOG", "/tmp/ci_smoke_deployment_ids.log")
+
+
+def _record_deployment_id(scenario_label: str, deployment_id: str) -> None:
+    """Appends "scenario_label=deployment_id" to DEPLOYMENT_ID_LOG - the only way
+    a later "dump diagnostics on failure" CI step can find out which deployments
+    this run created, since a SmokeTestFailure kills this process before it can
+    print anything else and the DB itself disappears the moment `docker compose
+    down` runs. See .github/workflows/ci.yml's "Dump policy diagnostics on
+    failure" step, which greps this file and curls /timeline for each id."""
+    with open(DEPLOYMENT_ID_LOG, "a") as f:
+        f.write(f"{scenario_label}={deployment_id}\n")
+
+
 def _create_deployment(
-    *, model_name: str, canary_version: str, canary_weight: float, policy_config: dict[str, object]
+    *,
+    model_name: str,
+    canary_version: str,
+    canary_weight: float,
+    policy_config: dict[str, object],
+    automation_paused: bool = False,
 ) -> dict[str, object]:
     response = httpx.post(
         f"{BACKEND_URL}/api/deployments",
@@ -291,6 +318,7 @@ def _create_deployment(
             "canary_version": canary_version,
             "canary_weight": canary_weight,
             "policy_config": policy_config,
+            "automation_paused": automation_paused,
         },
         headers={"Idempotency-Key": f"ci-smoke-{model_name}-{uuid.uuid4()}"},
         timeout=10,
@@ -300,24 +328,73 @@ def _create_deployment(
     return result
 
 
+def _assert_no_orphaned_deployments(model_names: Iterable[str]) -> None:
+    """Pre-flight check: none of this script's own model_names may have a
+    non-terminal deployment left over from a previous (likely crashed) local
+    run. Fails loudly with the offending deployment's id and status rather than
+    silently deleting it - a left-over CANARY_RUNNING deployment is evidence a
+    previous run didn't clean up after itself, and that's worth looking at, not
+    papering over. Each scenario uses its own model_name specifically so this
+    check (and the active-deployment-per-model DB invariant - see
+    docs/DESIGN_NOTES.md#control-plane--deployment-lifecycle) can point at
+    exactly which scenario left something behind, rather than every scenario
+    sharing one ambiguous "fraud-model" name.
+    """
+    terminal = {"PROMOTED", "ROLLED_BACK", "FAILED"}
+    response = httpx.get(f"{BACKEND_URL}/api/deployments", timeout=10)
+    response.raise_for_status()
+    offenders = [
+        d
+        for d in response.json()
+        if d["model_name"] in set(model_names) and d["status"] not in terminal
+    ]
+    if offenders:
+        details = ", ".join(f"{d['id']} ({d['model_name']}: {d['status']})" for d in offenders)
+        raise SmokeTestFailure(
+            f"[FAIL] found non-terminal deployment(s) left over from a previous run: "
+            f"{details} - clean these up manually (promote/rollback them) before "
+            "re-running; this script will not delete them for you."
+        )
+
+
 def run_manual_smoke_scenario() -> None:
     """The fast path: create a deployment, send it traffic, evaluate, and manually
     promote it - proves the CRUD-ish surface and the timeline endpoint work, without
-    waiting on the worker (that's what the other two scenarios are for)."""
+    waiting on the worker (that's what the other three scenarios are for).
+
+    Created with automation_paused=True: this scenario's whole point is a purely
+    manual flow, but the always-on worker sweeps every CANARY_RUNNING/EVALUATING
+    deployment on every poll cycle regardless of which "scenario" created it -
+    without a hold, the worker can (and, on a real CI runner, reproducibly did -
+    see docs/DESIGN_NOTES.md#manual-automation-hold) evaluate and auto-rollback
+    this deployment before the manual /evaluate call below even runs, since real
+    p95 latency noise between v1/v2-good under shared CI compute can cross the
+    *default* (non-generous) latency_p95_increase threshold this scenario
+    deliberately leaves untouched. automation_paused=True at creation - not a
+    separate pause-automation call after - closes that race entirely rather than
+    narrowing it.
+    """
     print("\n### scenario 1/4: manual create -> evaluate -> promote ###")
     deployment = _create_deployment(
-        model_name="fraud-model",
+        model_name="ci-smoke-manual",
         canary_version="v2-good",
         canary_weight=0.5,
         # Low minimum_requests / long window: this scenario only sends a couple
         # dozen predictions total, and the point is to prove the pipeline works
         # end to end, not to reproduce production-scale traffic.
         policy_config={"minimum_requests": 5, "evaluation_window_seconds": 3600},
+        automation_paused=True,
     )
     deployment_id = deployment["id"]
+    _record_deployment_id("scenario1-manual", deployment_id)
     if deployment["status"] != "CANARY_RUNNING":
         raise SmokeTestFailure(f"[FAIL] expected CANARY_RUNNING, got: {deployment}")
-    print(f"[ok] deployment {deployment_id} is CANARY_RUNNING (50/50 v1 / v2-good)")
+    if not deployment["automation_paused"]:
+        raise SmokeTestFailure(f"[FAIL] expected automation_paused=true, got: {deployment}")
+    print(
+        f"[ok] deployment {deployment_id} is CANARY_RUNNING (50/50 v1 / v2-good), "
+        "automation paused"
+    )
 
     for _ in range(40):
         payload, _true_label = _sample_row()
@@ -358,9 +435,15 @@ def run_manual_smoke_scenario() -> None:
     has_promoted_event = any(
         item["type"] == "event" and "PROMOTED" in item["message"] for item in timeline
     )
-    if not (has_policy_item and has_promoted_event):
+    has_automation_paused_event = any(
+        item["type"] == "event" and item["event_type"] == "automation_paused" for item in timeline
+    )
+    if not (has_policy_item and has_promoted_event and has_automation_paused_event):
         raise SmokeTestFailure(f"[FAIL] timeline missing expected entries: {timeline}")
-    print(f"[ok] timeline has {len(timeline)} chronologically merged entries")
+    print(
+        f"[ok] timeline has {len(timeline)} chronologically merged entries, "
+        "including the automation_paused event"
+    )
 
 
 def run_automatic_rollback_scenario() -> None:
@@ -377,7 +460,7 @@ def run_automatic_rollback_scenario() -> None:
         print("[ok] injected +400ms latency into model-serving-v2-good-latency-fault")
 
         deployment = _create_deployment(
-            model_name="fraud-model",
+            model_name="ci-smoke-latency-rollback",
             canary_version="v2-good-latency-fault",
             canary_weight=0.3,
             policy_config={
@@ -388,6 +471,7 @@ def run_automatic_rollback_scenario() -> None:
             },
         )
         deployment_id = deployment["id"]
+        _record_deployment_id("scenario2-latency-rollback", deployment_id)
         print(f"[ok] deployment {deployment_id} is {deployment['status']} (canary has the fault)")
 
         with _BackgroundTraffic():
@@ -449,7 +533,7 @@ def run_automatic_quality_promote_scenario() -> None:
     stable_version = "v1"
     canary_version = "v2-good"
     deployment = _create_deployment(
-        model_name="fraud-model",
+        model_name="ci-smoke-quality-promote",
         canary_version=canary_version,
         canary_weight=0.10,
         policy_config={
@@ -474,6 +558,7 @@ def run_automatic_quality_promote_scenario() -> None:
         },
     )
     deployment_id = deployment["id"]
+    _record_deployment_id("scenario3-quality-promote", deployment_id)
     print(f"[ok] deployment {deployment_id} is {deployment['status']} (10% healthy canary)")
 
     label_feeder = _LabelFeeder(
@@ -546,7 +631,7 @@ def run_automatic_quality_rollback_scenario() -> None:
     stable_version = "v1"
     canary_version = "v2-quality-bad"
     deployment = _create_deployment(
-        model_name="fraud-model",
+        model_name="ci-smoke-quality-rollback",
         canary_version=canary_version,
         canary_weight=0.3,
         policy_config={
@@ -566,6 +651,7 @@ def run_automatic_quality_rollback_scenario() -> None:
         },
     )
     deployment_id = deployment["id"]
+    _record_deployment_id("scenario4-quality-rollback", deployment_id)
     print(f"[ok] deployment {deployment_id} is {deployment['status']} (30% weak canary)")
 
     label_feeder = _LabelFeeder(
@@ -617,10 +703,20 @@ def run_automatic_quality_rollback_scenario() -> None:
     print("[ok] timeline shows a genuine minimum_recall FAIL and an automatic rollback event")
 
 
+SCENARIO_MODEL_NAMES = (
+    "ci-smoke-manual",
+    "ci-smoke-latency-rollback",
+    "ci-smoke-quality-promote",
+    "ci-smoke-quality-rollback",
+)
+
+
 def main() -> None:
     print("=== waiting for every service to be healthy ===")
     for name, url in HEALTH_ENDPOINTS.items():
         _wait_for(name, url)
+
+    _assert_no_orphaned_deployments(SCENARIO_MODEL_NAMES)
 
     run_manual_smoke_scenario()
     run_automatic_rollback_scenario()

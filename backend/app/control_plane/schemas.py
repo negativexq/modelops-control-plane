@@ -30,6 +30,12 @@ class CreateDeploymentRequest(BaseModel):
     # it by default; this flag opts back in explicitly rather than loosening
     # validation for every caller. The dashboard's NewDeploymentForm never sets it.
     allow_degenerate_canary_weight: bool = False
+    # Creates the deployment already paused (see Deployment.automation_paused) -
+    # lets a caller that wants to drive it purely manually do so without a
+    # create-then-pause round trip, which would otherwise leave a real window
+    # where the automated worker could already see and act on it. Used by
+    # scripts/ci_smoke_test.py's manual-flow scenario for exactly this reason.
+    automation_paused: bool = False
 
     @model_validator(mode="after")
     def _validate_versions_and_weight(self) -> Self:
@@ -70,6 +76,7 @@ class DeploymentOut(BaseModel):
     status: DeploymentStatus
     policy_config: dict[str, Any] | None
     inconclusive_retry_count: int
+    automation_paused: bool
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None

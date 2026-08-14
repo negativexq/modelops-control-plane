@@ -66,6 +66,7 @@ def _deployment(
     status: str = "CANARY_RUNNING",
     canary_weight: float = 0.1,
     evaluation_window_seconds: int = 300,
+    automation_paused: bool = False,
 ) -> dict[str, Any]:
     return {
         "id": deployment_id,
@@ -73,6 +74,7 @@ def _deployment(
         "stable_version": "v1",
         "canary_version": "v2-good",
         "policy_config": {"evaluation_window_seconds": evaluation_window_seconds},
+        "automation_paused": automation_paused,
         "traffic_allocation": {
             "targets": [
                 {"version": "v1", "weight": 1 - canary_weight},
@@ -272,6 +274,41 @@ def test_run_once_only_processes_active_deployments() -> None:
 
     assert ("evaluate", "dep-active") in client.calls
     assert ("evaluate", "dep-promoted") not in client.calls
+
+
+def test_run_once_skips_automation_paused_deployment_entirely() -> None:
+    """A paused deployment must produce zero worker-originated API calls for
+    itself - not just a skipped action - since run_once filters it out of
+    active_ids before process_deployment (and therefore /evaluate) is ever
+    called. See run_once's docstring for why the "paused" event is written by
+    whoever set the flag, not by the worker noticing it here."""
+    client = FakeWorkerClient()
+    client.deployments["dep-paused"] = _deployment(
+        deployment_id="dep-paused", canary_weight=0.1, automation_paused=True
+    )
+    client.deployments["dep-active"] = _deployment(deployment_id="dep-active", canary_weight=0.1)
+    client.evaluate_result["dep-active"] = "PASS"
+
+    run(run_once(client, default_window_seconds=300))
+
+    assert ("evaluate", "dep-paused") not in client.calls
+    assert ("advance_traffic", "dep-paused") not in client.calls
+    assert ("evaluate", "dep-active") in client.calls
+
+
+def test_run_once_processes_deployment_normally_once_resumed() -> None:
+    """The flip side of the paused test above: once automation_paused goes back
+    to False (mirroring what resume_automation does server-side), the worker
+    treats the deployment exactly like any other active one - no special-casing
+    left over from having been paused."""
+    client = FakeWorkerClient()
+    client.deployments["dep-1"] = _deployment(canary_weight=0.1, automation_paused=False)
+    client.evaluate_result["dep-1"] = "PASS"
+
+    run(run_once(client, default_window_seconds=300))
+
+    assert ("evaluate", "dep-1") in client.calls
+    assert ("advance_traffic", "dep-1") in client.calls
 
 
 def test_run_once_continues_after_one_deployment_errors() -> None:

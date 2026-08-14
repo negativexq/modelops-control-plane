@@ -5,6 +5,7 @@ import Link from "next/link";
 import { getDeployment, getDeploymentTimeline } from "@/lib/api";
 import { useAsync } from "@/lib/useAsync";
 import { AsyncBoundary } from "@/components/AsyncBoundary";
+import { AutomationPausedBadge } from "@/components/AutomationPausedBadge";
 import { BenchmarkBadge } from "@/components/BenchmarkBadge";
 import { Card } from "@/components/Card";
 import { CanaryAnalysis } from "@/components/CanaryAnalysis";
@@ -35,6 +36,7 @@ function DeploymentDetailContent({
               <dd className="flex items-center gap-2 font-medium">
                 {deployment.model_name}
                 {deployment.is_benchmark ? <BenchmarkBadge /> : null}
+                {deployment.automation_paused ? <AutomationPausedBadge /> : null}
               </dd>
             </div>
             <div>

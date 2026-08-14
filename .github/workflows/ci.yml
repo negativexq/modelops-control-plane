@@ -71,6 +71,27 @@ jobs:
       - name: Run the integration smoke test
         run: .venv/bin/python -m scripts.ci_smoke_test
         working-directory: backend
+      # `docker compose logs` (below) only ever shows uvicorn access lines
+      # ("POST /evaluate 200 OK") - never a response body, so it can't say
+      # *which* policy check actually failed. ci_smoke_test.py records every
+      # deployment it creates to /tmp/ci_smoke_deployment_ids.log as it goes
+      # (see _record_deployment_id) specifically so this step can look that up
+      # while the backend is still up (before "Tear down" below) - see
+      # docs/DESIGN_NOTES.md#manual-automation-hold for the blind spot this
+      # closes.
+      - name: Dump policy diagnostics on failure
+        if: failure()
+        run: |
+          log_file=/tmp/ci_smoke_deployment_ids.log
+          if [ ! -f "$log_file" ]; then
+            echo "no deployment ids were recorded - failure happened before any scenario created one"
+            exit 0
+          fi
+          while IFS='=' read -r label id; do
+            echo "=== $label ($id) - GET /api/deployments/$id/timeline ==="
+            curl -s "http://localhost:8000/api/deployments/$id/timeline" | python3 -m json.tool || true
+            echo
+          done < "$log_file"
       - name: Dump container logs on failure
         if: failure()
         run: docker compose logs

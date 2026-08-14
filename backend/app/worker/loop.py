@@ -93,11 +93,26 @@ async def process_deployment(
 
 
 async def run_once(client: WorkerClient, default_window_seconds: int) -> None:
-    """One sweep over every currently-active deployment. Stateless: the active list
-    is re-fetched from the control plane every time, so nothing here survives - or
-    needs to survive - a restart."""
+    """One sweep over every currently-active, automation-unpaused deployment.
+    Stateless: the active list is re-fetched from the control plane every time, so
+    nothing here survives - or needs to survive - a restart.
+
+    Deployments with automation_paused=True are filtered out here, before
+    /evaluate is ever called - not inside process_deployment - so a paused
+    deployment produces zero worker-originated API calls for it at all, not just
+    a skipped action. There's no per-deployment "have I already logged this skip"
+    bookkeeping here on purpose: the "automation paused" DeploymentEvent is
+    written once, synchronously, by whatever set automation_paused=True (see
+    control_plane/service.py's pause_automation and create_deployment) - not by
+    the worker's own (stateless, restart-safe) observation of that flag on some
+    later sweep. See docs/DESIGN_NOTES.md#manual-automation-hold.
+    """
     deployments = await client.list_deployments()
-    active_ids = [d["id"] for d in deployments if d["status"] in ACTIVE_STATUSES]
+    active_ids = [
+        d["id"]
+        for d in deployments
+        if d["status"] in ACTIVE_STATUSES and not d.get("automation_paused")
+    ]
 
     for deployment_id in active_ids:
         try:

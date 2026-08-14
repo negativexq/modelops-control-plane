@@ -4,6 +4,7 @@ import Link from "next/link";
 import { listDeployments } from "@/lib/api";
 import { useAsync } from "@/lib/useAsync";
 import { AsyncBoundary } from "@/components/AsyncBoundary";
+import { AutomationPausedBadge } from "@/components/AutomationPausedBadge";
 import { BenchmarkBadge } from "@/components/BenchmarkBadge";
 import { Card } from "@/components/Card";
 import { DeploymentActions } from "@/components/DeploymentActions";
@@ -56,6 +57,7 @@ export default function DeploymentsPage() {
                               {deployment.model_name}
                             </Link>
                             {deployment.is_benchmark ? <BenchmarkBadge /> : null}
+                            {deployment.automation_paused ? <AutomationPausedBadge /> : null}
                           </div>
                         </td>
                         <td className="py-3 pr-4">{deployment.stable_version}</td>

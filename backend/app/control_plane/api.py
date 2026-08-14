@@ -20,6 +20,7 @@ from app.control_plane.service import (
     ConcurrentUpdateError,
     DeploymentNotActiveError,
     DeploymentNotFoundError,
+    DeploymentTerminalError,
 )
 from app.control_plane.state_machine import InvalidTransitionError
 from app.control_plane.timeline import build_timeline
@@ -57,6 +58,7 @@ async def create_deployment(
             canary_weight=payload.canary_weight,
             idempotency_key=idempotency_key,
             policy_config=payload.policy_config,
+            automation_paused=payload.automation_paused,
         )
     except ActiveDeploymentExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -134,6 +136,50 @@ async def rollback_deployment(
             db, router_gateway, deployment, triggered_by=triggered_by
         )
     except InvalidTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ConcurrentUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return DeploymentOut.model_validate(deployment)
+
+
+@router.post("/{deployment_id}/pause-automation")
+def pause_automation(
+    deployment_id: str, db: DbDep, triggered_by: TriggeredByDep = "manual"
+) -> DeploymentOut:
+    """Stops the automated worker from touching this deployment - see
+    Deployment.automation_paused and docs/DESIGN_NOTES.md#manual-automation-hold.
+    Manual /evaluate, /promote, /rollback are unaffected. 409 if the deployment is
+    already terminal (nothing left to pause)."""
+    try:
+        deployment = service.get_deployment(db, deployment_id)
+    except DeploymentNotFoundError as exc:
+        raise _not_found(deployment_id) from exc
+
+    try:
+        deployment = service.pause_automation(db, deployment, triggered_by=triggered_by)
+    except DeploymentTerminalError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ConcurrentUpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return DeploymentOut.model_validate(deployment)
+
+
+@router.post("/{deployment_id}/resume-automation")
+def resume_automation(
+    deployment_id: str, db: DbDep, triggered_by: TriggeredByDep = "manual"
+) -> DeploymentOut:
+    """Lets the automated worker act on this deployment again. 409 if the
+    deployment is already terminal."""
+    try:
+        deployment = service.get_deployment(db, deployment_id)
+    except DeploymentNotFoundError as exc:
+        raise _not_found(deployment_id) from exc
+
+    try:
+        deployment = service.resume_automation(db, deployment, triggered_by=triggered_by)
+    except DeploymentTerminalError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

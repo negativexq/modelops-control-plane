@@ -3,7 +3,19 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -86,6 +98,16 @@ class Deployment(Base):
     # move the deployment out of the loop that increments this). Persisted (not
     # in-memory) so a worker restart doesn't forget how many retries have happened.
     inconclusive_retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Manual automation hold - Kubernetes' spec.paused / Argo Rollouts' manual pause,
+    # for the same reason: a real control plane needs a way to say "don't let the
+    # automated worker touch this one" that doesn't depend on timing. Without it, the
+    # only way to keep the worker off a deployment is to race it - see
+    # docs/DESIGN_NOTES.md#manual-automation-hold for how that race actually surfaced
+    # (a genuine, reproducible CI flake, not a hypothetical). The worker's own sweep
+    # (app/worker/loop.py's run_once) filters this out before it ever calls
+    # /evaluate; manual /evaluate, /promote, /rollback are completely unaffected -
+    # this only ever stops the *automated* actor, never the operator.
+    automation_paused: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=_utcnow
     )

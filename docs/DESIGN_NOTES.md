@@ -348,6 +348,81 @@ corrupt - what the winner just wrote. The worker treats any 409 (stale-status or
 concurrent-update) as "someone else already handled this," logs it, and moves on
 to the next deployment.
 
+## Manual automation hold
+
+`Deployment.automation_paused` (a plain boolean, default `False`) is Kubernetes'
+`spec.paused` / Argo Rollouts' manual pause, for the same reason: a real control
+plane needs a way to say "don't let the automated actor touch this one" that
+doesn't depend on timing. `app/worker/loop.py`'s `run_once` filters paused
+deployments out of `active_ids` before anything else runs - a paused deployment
+produces **zero** worker-originated API calls, not just a skipped action.
+`POST /api/deployments/{id}/pause-automation` / `/resume-automation` flip the
+flag (409 on an already-terminal deployment, same guard as everywhere else);
+`POST /api/deployments` also accepts `automation_paused: true` at creation time,
+for a caller that wants to drive a deployment purely manually from the start
+without a create-then-pause round trip that would leave a real window for the
+worker to already have acted.
+
+**This was not a speculative feature - it's what closed a real, reproducible CI
+bug.** `scripts/ci_smoke_test.py`'s scenario 1 ("manual create -> evaluate ->
+promote") is a purely manual flow by design: it calls `/evaluate` and
+`/promote` itself, deliberately not waiting on the worker, using the
+platform's default (non-generous) `latency_p95_increase` threshold (20%) since
+proving the manual CRUD surface works isn't about latency at all. But the
+worker sweeps **every** `CANARY_RUNNING`/`EVALUATING` deployment on every poll
+cycle, regardless of which test scenario created it - there was no way to tell
+it "leave this one alone." On three separate, otherwise-unrelated commits (none
+of which touched this scenario's code - confirmed by diffing across them), the
+GitHub Actions runner's real inference-latency noise between `v1`/`v2-good`
+occasionally crossed that 20% threshold before the scenario's own manual
+`/evaluate` call ran, so the worker's own first sweep saw a genuine
+`latency_p95_increase` FAIL, called `/rollback` itself, and the scenario's
+manual `/evaluate` then 409'd against an already-`ROLLED_BACK` deployment. Five
+days of the exact same test code passing, then failing identically across
+unrelated commits, is what a missing control-plane primitive looks like, not a
+flaky test - the fix is a feature the worker's design was always missing, not a
+longer sleep or a loosened threshold. Scenario 1 now creates its deployment
+with `automation_paused=True`, which both fixes the race and is itself a live
+proof the hold works: the scenario asserts an `automation_paused`
+`DeploymentEvent` appears on the deployment's timeline.
+
+**Why the "automation paused" `DeploymentEvent` is written once, at the moment
+the flag flips - not by the worker noticing it on some later sweep.** The
+worker is deliberately stateless (see above: no in-memory rollout state,
+everything re-derived every cycle) - giving it "have I already logged a skip
+for this one" bookkeeping would mean either a new API call on every skipped
+sweep (event-log spam - the flag doesn't change between sweeps, there's nothing
+new to say) or genuine in-memory state the design elsewhere goes out of its way
+not to need. Instead, `pause_automation`/`resume_automation` and
+`create_deployment` (when `automation_paused=True`) write the event themselves,
+synchronously, in the same transaction that flips the flag - exactly once, no
+matter how many sweeps later the worker happens to notice. `pause_automation`/
+`resume_automation` are also idempotent (a repeat call on an
+already-paused/already-resumed deployment is a silent no-op, not a duplicate
+event or an error) for the same reason: a double-click or a retried request
+must not spam the timeline.
+
+Manual `/evaluate`, `/promote`, `/rollback` are completely unaffected by the
+hold - it only ever stops the *automated* actor. An operator can always act,
+paused or not; the hold exists so a human inspecting a deployment doesn't have
+the worker pull the rug out from under them mid-review, and so a script that
+wants to drive a deployment by hand doesn't have to win a race against the
+worker to do it.
+
+**Scenarios 2-4 don't need the hold - they still race the worker on purpose.**
+Scenario 2 injects a real +400ms fault against the platform default 20%
+threshold (400ms is far beyond any inference-time noise this project has
+observed) - a genuine, tight latency check is exactly what that scenario is
+testing. Scenario 3 and 4 set the latency threshold high enough to disable the
+latency check in practice (`latency_p95_increase: 2000%`, chosen specifically
+during this investigation - the largest real latency variance observed
+anywhere in this project, per `scripts/benchmarks/scenarios.py`'s own notes on
+this exact false-positive class, was under 5x), so the promote/rollback
+decision in those two scenarios rests solely on the quality signal
+(`minimum_recall`), not on latency at all. Latency-driven rollback is covered
+separately, and for real, by scenario 2 - scenarios 3/4 have nothing further
+to prove there and would only add CI flakiness by trying.
+
 ## Benchmark suite
 
 Locust was chosen over k6 because it's Python, so the load definition
