@@ -177,26 +177,35 @@ part of the contract, not an afterthought: submitting the same
 than a silent overwrite — ground truth shouldn't quietly change underneath an
 already-computed metric.
 
-**Why `PendingLabel` exists.** Metric writes are deliberately fire-and-forget
-(`asyncio.create_task`, see [Metrics](#metrics)) and label ingestion is a fully
-independent HTTP call — nothing orders one before the other. A label can
-therefore legitimately arrive at the control plane *before* the
-`PredictionMetric` row it belongs to has been written. Rather than reject or
-poll-retry that case, `POST /api/labels` parks it as a `PendingLabel` (keyed on
-`prediction_id`) and returns `202`. The match itself happens exactly once, at
-the one point a match can first become possible: inside
-`metrics_service.record_metric`'s existing transaction — after building the new
-`PredictionMetric` row, it checks for a matching `PendingLabel` and, if found,
-copies the label onto the metric and deletes the pending row, all in the same
-commit. No separate background task or poller was added for this; metric write
-is already the only place the two sides meet.
+**`GroundTruthLabel`: always written, never coordinated at write time.**
+Metric writes are deliberately fire-and-forget (`asyncio.create_task`, see
+[Metrics](#metrics)) and label ingestion is a fully independent HTTP call —
+nothing orders one before the other, and a label can legitimately arrive at
+the control plane *before* the `PredictionMetric` row it belongs to has been
+written. An earlier design (Sprint 12, retired in Sprint 14) parked an
+early-arriving label in a separate `PendingLabel` table, consumed the moment
+`metrics_service.record_metric` next saw a matching `prediction_id` — a
+check-then-act coordination between two independent writers that turned out
+to have a real, reproducible race (see [Desired/observed
+reconciliation](#desiredobserved-reconciliation) for the exact interleaving
+and the concurrency test that proves it's closed). `POST /api/labels` now
+writes to `GroundTruthLabel` unconditionally, regardless of whether a
+matching `PredictionMetric` exists yet — `record_metric` doesn't check
+anything either, it's a plain `INSERT`. The two are only ever linked by a
+read (`metrics_service.compute_version_summary`'s `PredictionMetric OUTER
+JOIN GroundTruthLabel`), computed fresh on every quality-metrics read rather
+than cached onto either row at write time. `202` from `POST /api/labels`
+means "recorded, no matching metric yet" — advisory only, since nothing
+polls or retries on the label's behalf; the next read that joins the two
+tables picks it up whenever the metric lands.
 
 `occurred_at` (label input, when the ground truth was actually observed) and
 `ingested_at` (server timestamp, when the platform received it) are kept
-distinct — `label_ingested_at - PredictionMetric.created_at` is what
-`label_delay_p50_seconds`/`label_delay_p95_seconds` measure: how long the
-platform's *pipeline* takes to learn a label, independent of how the label
-producer chooses to report `occurred_at`.
+distinct on `GroundTruthLabel` — `ingested_at - PredictionMetric.created_at`
+is what `label_delay_p50_seconds`/`label_delay_p95_seconds` measure: how long
+the platform's *pipeline* takes to learn a label, independent of how the
+label producer chooses to report `occurred_at`. Both are persisted the
+moment the row is created, regardless of arrival order.
 
 ## Policy engine
 
@@ -463,36 +472,44 @@ already-durable pieces of state and re-pushes when they disagree, exactly like
 a Kubernetes controller diffs a resource's `spec` against its live status
 rather than replaying a log of past intents.
 
-**Revision scope: per-deployment, not per-model.** `TrafficAllocation.revision`
-increments once per `targets` change, scoped to the one deployment row it lives
-on - not a single counter shared across every deployment a model has ever had.
-A model-scoped counter would need somewhere to live: there's no `Model` table
-in this system (models are plain strings), so it would mean adding one just to
-hold an integer, for a guarantee the per-deployment scope already provides for
-free. `uq_deployments_active_per_model` (see [Control plane & deployment
+**Revision scope: model-scoped as of Sprint 14, not per-deployment.**
+`TrafficAllocation.revision` originally (Sprint 13) incremented once per
+`targets` change, scoped to the one deployment row it lives on - reasoned as
+follows: `uq_deployments_active_per_model` (see [Control plane & deployment
 lifecycle](#control-plane--deployment-lifecycle)) guarantees at most one
-non-terminal deployment per model at any time, and the router only ever needs
-to answer one question - "have I already applied this exact (deployment_id,
-revision) or newer?" - which a per-deployment counter answers completely: a
-different deployment_id is definitionally a different rollout (the previous one
-is terminal) and always wins outright, regardless of what revision number it
-starts from; the same deployment_id needs simple monotonicity, which the
-existing optimistic-locked commit already guarantees for free.
+non-terminal deployment per model at any time, so a different `deployment_id`
+is definitionally a different rollout and can just always win outright,
+regardless of what revision number it starts from - no need for a model-scoped
+counter, which would've meant adding a table this project otherwise had no use
+for (models are plain strings, no `Model` table). That reasoning quietly broke
+the moment a *terminal* deployment's allocation could stay authoritative (see
+"Terminal-state reconciliation" below): once "a different deployment_id always
+wins" is the rule, a push delayed enough to arrive after a *newer* deployment
+had already superseded it - a late reconcile tick, a slow network path, a
+retried request - could silently resurrect stale traffic, since nothing
+compared it against what the model's current deployment actually was.
+Sprint 14 fixes this at the root: `RoutingGeneration` (one row per
+`model_name`, `service._next_routing_generation`) is a genuine model-scoped
+monotonic counter now, and `TrafficAllocation.revision` is stamped from it on
+every write, regardless of which deployment_id is writing. The table this
+avoided in Sprint 13 turned out to be necessary after all, once the feature it
+was avoided for (authoritative-after-terminal) existed - not a mistake in the
+original call, just a call whose premise changed.
 
 **A stale-revision 409 is coordination working, not a failure.** `app/router/
-main.py`'s `put_config` rejects a push for the same `deployment_id` whose
-revision isn't strictly greater than what it already has - see
-`StaleRevisionError`. This fires constantly in entirely healthy operation: the
-losing side of a race, or a reconcile tick that lost a footrace against a
-concurrent promote/rollback that had already landed the same or a newer
-revision by the time the reconciler's own push arrived. `service.
-_push_best_effort` catches it and logs at `info`, not `warning` or `error`, and
-never touches the deployment's status - see the next paragraph for why a plain
-`RouterUpdateError` (the router being genuinely unreachable) is treated the
-same way for a different reason. Both are deliberately distinct exception
-types, though, because they mean different things to a human reading logs: one
-says "someone else's write already won," the other says "the router didn't
-respond at all."
+main.py`'s `put_config` rejects a push for the same *model* (not
+`deployment_id` - see the revision-scope note above) whose revision isn't
+strictly greater than what it already has - see `StaleRevisionError`. This
+fires constantly in entirely healthy operation: the losing side of a race, or
+a reconcile tick that lost a footrace against a concurrent promote/rollback
+that had already landed the same or a newer revision by the time the
+reconciler's own push arrived. `service._push_best_effort` catches it and logs
+at `info`, not `warning` or `error`, and never touches the deployment's status
+- see the next paragraph for why a plain `RouterUpdateError` (the router being
+genuinely unreachable) is treated the same way for a different reason. Both
+are deliberately distinct exception types, though, because they mean different
+things to a human reading logs: one says "someone else's write already won,"
+the other says "the router didn't respond at all."
 
 **Why a router push failure no longer marks a deployment FAILED.** Before this
 sprint, an unreachable router during promote/rollback/advance/create
@@ -522,6 +539,91 @@ reachable-but-never-configured one (e.g. right after a restart) both report
 `deployment_id: None`, so without `reachable` the dashboard couldn't tell a
 serious outage apart from a harmless one-tick-old boot state - which would
 make the drift warning disappear exactly when it matters most.
+
+**Terminal-state reconciliation (Sprint 14).** The reconciler and the
+router's startup sync (`GET /api/router-config/{model_name}`) both used to
+compare only against `service.get_active_deployment`
+(`CANARY_RUNNING`/`EVALUATING`) - itself a direct consequence of "commit
+desired state first," which was designed around a rollout still being *in
+flight* when the push after it fails. The gap: `promote_deployment`/
+`rollback_deployment`'s commit moves the deployment to `PROMOTED`/
+`ROLLED_BACK` in that same commit, so by the time a router push after it can
+fail, the deployment has already left `ACTIVE_STATUSES` - and
+`get_active_deployment` then finds nothing at all. A router restart, or a
+push failure, at exactly that moment left the drift permanent instead of
+closing on the next reconcile tick, and README's own "even after the router
+restarts" claim was quietly false for this one case. `service.
+get_authoritative_allocation` is the fix: it returns the active deployment
+if one is in flight (identical to `get_active_deployment` in that case), and
+otherwise the most recent `PROMOTED`/`ROLLED_BACK` deployment's *final*
+allocation - which is still the correct desired state, just no longer
+"active" in the narrower sense.
+
+**Why `get_authoritative_allocation` is a separate function, not a widened
+`get_active_deployment`.** `get_active_deployment` backs two things whose
+correctness depends on its exact, narrow scope: the exclusivity pre-check in
+`create_deployment` (a new deployment is blocked only while one is genuinely
+in flight - blocking on a terminal deployment too would make the model
+permanently unstartable) and the automation hold's `require_active` guard.
+Widening what "active" means for one caller's sake would silently widen it
+for both of those too. Two functions, two questions - "is a rollout in
+flight" vs. "what should the router be serving" - kept answerable
+independently.
+
+**Why `FAILED` is excluded from the authoritative fallback.** A deployment
+that reaches `FAILED` never completed a legitimate rollout decision - unlike
+`PROMOTED`/`ROLLED_BACK`, its `TrafficAllocation` doesn't represent something
+the platform actually decided was correct, just whatever traffic split
+happened to exist at the moment something broke. Treating it as authoritative
+would mean a router restart could sync to an accidental, half-finished split
+rather than the *last deployment that actually reached a real outcome* (or,
+if none exists yet, the router's own bootstrap default) - falling further
+back is more honest than trusting a failure's leftover state.
+
+**Durable ground-truth labels (Sprint 14).** Label ingestion
+(`label_service.ingest_label`, via `POST /api/labels`) and metric ingestion
+(`metrics_service.record_metric`, via the router's fire-and-forget metric
+push) used to be two independent check-then-act writers coordinating through
+a third table, `PendingLabel`: a label arriving before its metric parked
+itself there, consumed the moment `record_metric` next saw a matching
+`prediction_id`. That "moment" was the bug - a real, reproducible race: label
+transaction checks for the metric (not found, since the metric transaction
+hasn't committed), metric transaction inserts the metric, label transaction
+checks `PendingLabel` for itself (not found, first time), inserts a
+`PendingLabel` row, metric transaction checks `PendingLabel` for a match (not
+found - the label transaction's insert isn't committed yet), both commit.
+Result: a `PredictionMetric` with no label, and a `PendingLabel` row nothing
+would ever consume again, since the one and only place that checked for a
+match (`record_metric`) had already run. Sequential arrival-order tests
+(label-then-metric, metric-then-label) can't catch this - neither exercises a
+genuinely uncommitted overlap between the two transactions.
+
+The fix removes the coordination problem instead of trying to out-time it:
+`GroundTruthLabel` is written unconditionally on every ingestion, with no
+check against `PredictionMetric` at all - `record_metric` doesn't check
+anything either now, it's a plain `INSERT`. The two are only ever linked by a
+read, `metrics_service.compute_version_summary`'s `PredictionMetric OUTER
+JOIN GroundTruthLabel ON prediction_id`, computed fresh every time quality
+metrics are read rather than cached onto either row at write time. Since
+neither write depends on the other's existence, there is no interleaving that
+can leave them unlinked - correctness holds by construction, not by winning a
+timing race, which is also why the concurrency test proving this
+(`test_concurrent_label_and_metric_writes_always_end_up_joined`) can
+deliberately reconstruct the exact interleaving that broke the old design and
+still expect it to pass. `occurred_at` is now always persisted regardless of
+arrival order too, for the same reason: it lives on `GroundTruthLabel` from
+the moment that row is created, not copied onto `PredictionMetric` only when
+convenient.
+
+`POST /api/labels` returning `202` no longer means "parked, waiting to be
+matched" - it means "recorded, no matching `PredictionMetric` yet," which is
+purely advisory (nothing polls or retries on the label's behalf; the next
+read that joins the two tables picks it up whenever the metric lands, with no
+special handling required). The idempotency/conflict semantics
+(same-value-twice is a no-op, different-value is a `409` + audit event when a
+deployment is known) are unchanged in meaning, just re-anchored to
+`GroundTruthLabel`'s own unique constraint on `prediction_id` instead of two
+separate tables' worth of checks.
 
 ## Benchmark suite
 

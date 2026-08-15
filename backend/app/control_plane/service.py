@@ -11,6 +11,7 @@ from app.control_plane.models import (
     Deployment,
     DeploymentEvent,
     DeploymentStatus,
+    RoutingGeneration,
     TrafficAllocation,
 )
 from app.control_plane.router_gateway import RouterGateway, RouterUpdateError, StaleRevisionError
@@ -119,13 +120,64 @@ class ActiveDeploymentExistsError(Exception):
 
 def get_active_deployment(db: Session, model_name: str) -> Deployment | None:
     """The one deployment (if any) whose traffic allocation is currently live for
-    this model. Used by both the router-config sync endpoint and anything else that
-    needs "what's actually running now" rather than "the most recent record".
+    this model. Used by exclusivity checks (create_deployment) and the automation
+    hold - both need this narrower question ("is there a live rollout right now"),
+    not "what should the router be serving" - see get_authoritative_allocation for
+    that broader question and why the two are kept deliberately separate.
     """
     stmt = (
         select(Deployment)
         .where(Deployment.model_name == model_name, Deployment.status.in_(ACTIVE_STATUSES))
         .order_by(Deployment.created_at.desc())
+    )
+    return db.execute(stmt).scalars().first()
+
+
+# Terminal statuses whose final TrafficAllocation remains the router's desired
+# state once the rollout that produced it ends - see get_authoritative_allocation.
+# Deliberately narrower than TERMINAL_STATUSES: FAILED is excluded on purpose.
+_AUTHORITATIVE_TERMINAL_STATUSES = (DeploymentStatus.PROMOTED, DeploymentStatus.ROLLED_BACK)
+
+
+def get_authoritative_allocation(db: Session, model_name: str) -> Deployment | None:
+    """The deployment whose TrafficAllocation the router should currently be
+    serving for this model - "what should the router be serving right now",
+    not "is there a live rollout right now" (see get_active_deployment for that
+    narrower, load-bearing question - exclusivity checks and the automation
+    hold depend on its exact scope, so this is a separate function rather than
+    a widened get_active_deployment; widening that one would widen those too).
+
+    While a rollout is in flight (CANARY_RUNNING/EVALUATING), that's the same
+    deployment get_active_deployment would return. The difference is what
+    happens once it reaches a genuine terminal outcome: promote_deployment/
+    rollback_deployment's own commit already made that deployment's *final*
+    TrafficAllocation the correct, durable desired state (see
+    docs/DESIGN_NOTES.md#desired-observed-reconciliation) - it doesn't stop
+    being authoritative just because the deployment itself is no longer
+    "active". Before this function existed, the reconciler and the router's
+    startup sync only ever looked at ACTIVE_STATUSES, so a router push failure
+    (or restart) *after* a successful promote/rollback had nothing left to
+    reconcile against - the drift became permanent instead of closing on the
+    next tick. This is the fix for that gap.
+
+    FAILED is deliberately excluded (see _AUTHORITATIVE_TERMINAL_STATUSES): a
+    FAILED deployment never reached a legitimate PROMOTED/ROLLED_BACK outcome,
+    so its incomplete traffic split has no claim to being authoritative -
+    falling back to the most recent genuinely-terminal deployment (or, if none
+    exists, the router's own bootstrap default) is more correct. See
+    docs/DESIGN_NOTES.md for the full reasoning.
+    """
+    active = get_active_deployment(db, model_name)
+    if active is not None:
+        return active
+    stmt = (
+        select(Deployment)
+        .where(
+            Deployment.model_name == model_name,
+            Deployment.status.in_(_AUTHORITATIVE_TERMINAL_STATUSES),
+        )
+        .order_by(Deployment.completed_at.desc(), Deployment.created_at.desc())
+        .limit(1)
     )
     return db.execute(stmt).scalars().first()
 
@@ -149,23 +201,46 @@ def _transition(
     _log_event(db, deployment, "status_changed", f"{previous.value} -> {target.value}: {message}")
 
 
+def _next_routing_generation(db: Session, model_name: str) -> int:
+    """Bumps and returns this model's routing generation counter (see
+    RoutingGeneration) - the monotonic source TrafficAllocation.revision is now
+    assigned from. Always called from inside the same transaction as the
+    Deployment/TrafficAllocation write it's stamping, so it commits atomically
+    with them - there's nothing else that ever bumps this row concurrently for
+    the same model (uq_deployments_active_per_model already guarantees at most
+    one non-terminal deployment per model, and the reconciler only ever
+    re-pushes an existing revision, never mints a new one).
+    """
+    row = db.get(RoutingGeneration, model_name)
+    if row is None:
+        row = RoutingGeneration(model_name=model_name, generation=1)
+        db.add(row)
+        return 1
+    row.generation += 1
+    return row.generation
+
+
 def _set_traffic_allocation(
     db: Session, deployment: Deployment, targets: list[dict[str, float | str]]
 ) -> int:
-    """Writes `targets` as this deployment's desired TrafficAllocation and bumps
-    its revision - in the same transaction as whatever else the caller is doing
-    (a Deployment.status transition, an event log write), so both land in one
+    """Writes `targets` as this deployment's desired TrafficAllocation, stamped
+    with the model's next routing generation (see _next_routing_generation) -
+    in the same transaction as whatever else the caller is doing (a
+    Deployment.status transition, an event log write), so both land in one
     commit together. Returns the new revision, for the caller to pass to the
     router push that follows the commit - see docs/DESIGN_NOTES.md
     #desired-observed-reconciliation.
     """
+    generation = _next_routing_generation(db, deployment.model_name)
     if deployment.traffic_allocation is not None:
         deployment.traffic_allocation.targets = targets
-        deployment.traffic_allocation.revision += 1
-        return deployment.traffic_allocation.revision
-    allocation = TrafficAllocation(deployment_id=deployment.id, targets=targets, revision=1)
+        deployment.traffic_allocation.revision = generation
+        return generation
+    allocation = TrafficAllocation(
+        deployment_id=deployment.id, targets=targets, revision=generation
+    )
     db.add(allocation)
-    return allocation.revision
+    return generation
 
 
 def require_active(deployment: Deployment) -> None:

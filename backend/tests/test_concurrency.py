@@ -14,6 +14,7 @@ to mean anything.
 """
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,21 +23,24 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.control_plane import service
-from app.control_plane.models import Deployment, DeploymentStatus
+from app.control_plane import label_service, metrics_service, service
+from app.control_plane.models import Deployment, DeploymentStatus, GroundTruthLabel
+from app.control_plane.schemas import MetricIn
 from app.db import Base
 
 
 class FakeRouterGateway:
-    """Router-shaped fake: tracks observed (deployment_id, revision, targets) and
-    rejects a same-deployment push whose revision isn't strictly greater, exactly
-    like app/router/main.py's real staleness check - see StaleRevisionError.
+    """Router-shaped fake: tracks observed (model_name, deployment_id, revision,
+    targets) and rejects a same-model push whose revision isn't strictly
+    greater, exactly like app/router/main.py's real staleness check (Sprint
+    14: model-scoped generation, not per-deployment) - see StaleRevisionError.
     A single instance is meant to be shared across "both sides" of a race in
     these tests, since in reality there's only ever one router.
     """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, int, list[dict[str, Any]]]] = []
+        self.observed_model_name: str | None = None
         self.observed_deployment_id: str | None = None
         self.observed_revision: int = 0
         self.observed_targets: list[dict[str, Any]] | None = None
@@ -46,9 +50,10 @@ class FakeRouterGateway:
     ) -> None:
         from app.control_plane.router_gateway import StaleRevisionError
 
-        same_deployment = deployment_id == self.observed_deployment_id
-        if same_deployment and revision <= self.observed_revision:
+        same_model = model_name == self.observed_model_name
+        if same_model and revision <= self.observed_revision:
             raise StaleRevisionError(f"stale revision {revision} for {deployment_id}")
+        self.observed_model_name = model_name
         self.observed_deployment_id = deployment_id
         self.observed_revision = revision
         self.observed_targets = targets
@@ -468,3 +473,143 @@ def test_idempotency_key_collision_is_not_reported_as_active_deployment_conflict
         )
     assert not isinstance(exc_info.value, service.ActiveDeploymentExistsError)
     assert "idempotency_key" in str(exc_info.value.orig)
+
+
+# --- Real concurrent ground-truth label + metric writes (Sprint 14) --------------
+#
+# The bug this section exists to close: the pre-Sprint-14 design (label
+# ingestion checking for a matching PredictionMetric, metric ingestion
+# checking for a matching PendingLabel - both check-then-act) had a real race.
+# Two sequential-arrival-order tests (label-before-metric, metric-before-label)
+# aren't a concurrency test - they never let one transaction's check run while
+# the other's write is still uncommitted. The test below reproduces that exact
+# interleaving, using two genuinely independent file-based connections (see
+# file_session_factory above and its docstring on why StaticPool can't prove
+# this).
+
+
+def test_concurrent_label_and_metric_writes_always_end_up_joined(
+    file_session_factory: sessionmaker[Session], file_deployment_id: str
+) -> None:
+    """Reproduces the exact interleaving that broke the old PendingLabel
+    design (see label_service.py's module docstring): the label side's own
+    existence check runs while the metric side's write is still uncommitted
+    and invisible to it, and the label side's own write only completes
+    *after* the metric side has already committed - the worst-case ordering
+    for any design that tries to link the two together at write time.
+
+    Sprint 14's design has no check-then-act left to race: metrics_service.
+    record_metric no longer looks anything up (a plain INSERT), and
+    label_service.ingest_label's own SELECT only matters for idempotency, not
+    for finding the metric - the two rows are only ever joined later, by a
+    read (metrics_service.compute_version_summary). So this must hold
+    regardless of interleaving, which is exactly what this test proves rather
+    than assumes.
+    """
+    prediction_id = "concurrent-race-pred-1"
+    session_label = file_session_factory()
+    session_metric = file_session_factory()
+    try:
+        # 1. Label side's own "does this already exist" check - nothing
+        #    committed from either side yet.
+        existing = session_label.execute(
+            select(GroundTruthLabel).where(GroundTruthLabel.prediction_id == prediction_id)
+        ).scalar_one_or_none()
+        assert existing is None
+
+        # 2. Metric side writes and commits *first*, on a completely
+        #    independent connection - the label side's session above has
+        #    already run its check and can't see this.
+        metrics_service.record_metric(
+            session_metric,
+            file_deployment_id,
+            MetricIn(
+                model_version="v2-good",
+                latency_ms=12.5,
+                status_code=200,
+                prediction=1,
+                prediction_id=prediction_id,
+            ),
+        )
+
+        # 3. Label side's write completes and commits *after* the metric already
+        #    landed - under the old design this exact ordering (check ran
+        #    before the metric existed, write happened after) is what left a
+        #    PendingLabel row that nothing would ever consume.
+        session_label.add(
+            GroundTruthLabel(
+                prediction_id=prediction_id,
+                actual_label=1,
+                occurred_at=datetime.now(UTC),
+            )
+        )
+        session_label.commit()
+    finally:
+        session_label.close()
+        session_metric.close()
+
+    verify_session = file_session_factory()
+    try:
+        summary = metrics_service.compute_version_summary(
+            verify_session, file_deployment_id, "v2-good", 3600
+        )
+    finally:
+        verify_session.close()
+
+    assert summary.sample_count == 1
+    assert summary.labeled_sample_count == 1
+    assert summary.positive_label_count == 1
+
+
+def test_concurrent_duplicate_label_writes_do_not_both_apply(
+    file_session_factory: sessionmaker[Session],
+) -> None:
+    """Two independent connections racing to be the *first* GroundTruthLabel
+    row for the same prediction_id - the unique constraint on prediction_id
+    is what actually makes this race-safe (see label_service.ingest_label's
+    IntegrityError handling), not the SELECT-then-INSERT ordering, which two
+    real connections can't serialize on their own."""
+    prediction_id = "concurrent-duplicate-pred-1"
+    session_a = file_session_factory()
+    session_b = file_session_factory()
+    try:
+        # Both read "not found" before either has committed anything.
+        assert (
+            session_a.execute(
+                select(GroundTruthLabel).where(GroundTruthLabel.prediction_id == prediction_id)
+            ).scalar_one_or_none()
+            is None
+        )
+        assert (
+            session_b.execute(
+                select(GroundTruthLabel).where(GroundTruthLabel.prediction_id == prediction_id)
+            ).scalar_one_or_none()
+            is None
+        )
+
+        occurred_at = datetime.now(UTC)
+        outcome_a = label_service.ingest_label(session_a, prediction_id, 1, occurred_at)
+        # session_b's INSERT loses the race against session_a's already-committed
+        # row - label_service.ingest_label must catch the IntegrityError and
+        # resolve it as a no-op (same value) rather than letting it propagate.
+        outcome_b = label_service.ingest_label(session_b, prediction_id, 1, occurred_at)
+    finally:
+        session_a.close()
+        session_b.close()
+
+    assert outcome_a == label_service.LabelIngestOutcome.PENDING
+    assert outcome_b == label_service.LabelIngestOutcome.NO_OP
+
+    verify_session = file_session_factory()
+    try:
+        rows = list(
+            verify_session.execute(
+                select(GroundTruthLabel).where(GroundTruthLabel.prediction_id == prediction_id)
+            )
+            .scalars()
+            .all()
+        )
+    finally:
+        verify_session.close()
+    assert len(rows) == 1
+    assert rows[0].actual_label == 1

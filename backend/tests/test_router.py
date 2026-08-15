@@ -182,6 +182,7 @@ def test_put_config_updates_weights_without_restart(artifacts_dir: Path) -> None
         {"version": "v1", "weight": 0.0},
         {"version": "v2-good", "weight": 1.0},
     ]
+    new_config["revision"] = 1
     put_response = client.put("/router/config", json=new_config)
     assert put_response.status_code == 200
     weights = {t["version"]: t["weight"] for t in put_response.json()["targets"]}
@@ -201,11 +202,11 @@ def test_put_config_rejects_target_with_unknown_version(artifacts_dir: Path) -> 
     assert response.status_code == 400
 
 
-def test_put_config_rejects_stale_revision_for_same_deployment(artifacts_dir: Path) -> None:
+def test_put_config_rejects_stale_revision_for_same_model(artifacts_dir: Path) -> None:
     """See app/control_plane/models.py's TrafficAllocation.revision and
     docs/DESIGN_NOTES.md#desired-observed-reconciliation - a push for the same
-    deployment_id at an equal-or-lower revision than what's already applied is
-    the losing side of a race (or stale reconciler data) and must be rejected,
+    model at an equal-or-lower revision than what's already applied is the
+    losing side of a race (or stale reconciler data) and must be rejected,
     not silently accepted."""
     client = _router_client(artifacts_dir)
     config = client.get("/router/config").json()
@@ -226,7 +227,7 @@ def test_put_config_rejects_stale_revision_for_same_deployment(artifacts_dir: Pa
     assert current["revision"] == 2
 
 
-def test_put_config_accepts_higher_revision_for_same_deployment(artifacts_dir: Path) -> None:
+def test_put_config_accepts_higher_revision_for_same_model(artifacts_dir: Path) -> None:
     client = _router_client(artifacts_dir)
     config = client.get("/router/config").json()
     config["deployment_id"] = "dep-1"
@@ -243,20 +244,51 @@ def test_put_config_accepts_higher_revision_for_same_deployment(artifacts_dir: P
     assert {t["version"]: t["weight"] for t in current["targets"]}["v2-good"] == 1.0
 
 
-def test_put_config_accepts_new_deployment_regardless_of_revision(artifacts_dir: Path) -> None:
-    """A different deployment_id is a genuinely different rollout - revision is
-    scoped per-deployment (see TrafficAllocation.revision), so a brand-new
-    deployment_id always wins outright, even at revision 1 after the router
-    already saw a much higher revision from a *previous* (now terminal)
-    deployment for the same model."""
+def test_put_config_rejects_stale_revision_from_a_different_deployment_id(
+    artifacts_dir: Path,
+) -> None:
+    """Revision is a model-scoped routing generation (Sprint 14 - see
+    TrafficAllocation.revision and docs/DESIGN_NOTES.md
+    #desired-observed-reconciliation), not a per-deployment counter: a
+    different deployment_id no longer automatically wins. A delayed push from
+    an old, already-superseded deployment must still be rejected if a newer
+    deployment (or a later push from the same one) already landed a higher
+    generation for this model - otherwise a late-arriving push from a
+    terminal deployment could silently resurrect stale traffic."""
+    client = _router_client(artifacts_dir)
+    config = client.get("/router/config").json()
+    config["deployment_id"] = "dep-new"
+    config["revision"] = 5
+    accepted = client.put("/router/config", json=config)
+    assert accepted.status_code == 200
+
+    # A delayed push from an *older* deployment, at a lower generation, must
+    # still be rejected even though its deployment_id differs.
+    config["deployment_id"] = "dep-old"
+    config["revision"] = 1
+    response = client.put("/router/config", json=config)
+    assert response.status_code == 409
+
+    current = client.get("/router/config").json()
+    assert current["deployment_id"] == "dep-new"
+    assert current["revision"] == 5
+
+
+def test_put_config_accepts_new_deployment_with_a_genuinely_higher_generation(
+    artifacts_dir: Path,
+) -> None:
+    """A new deployment for the same model is still accepted outright, as
+    long as its generation is genuinely higher - the normal case, since
+    service._next_routing_generation always mints a value greater than
+    whatever the model's counter last reached."""
     client = _router_client(artifacts_dir)
     config = client.get("/router/config").json()
     config["deployment_id"] = "dep-old"
-    config["revision"] = 99
+    config["revision"] = 3
     client.put("/router/config", json=config)
 
     config["deployment_id"] = "dep-new"
-    config["revision"] = 1
+    config["revision"] = 4
     response = client.put("/router/config", json=config)
     assert response.status_code == 200
     assert response.json()["deployment_id"] == "dep-new"
@@ -424,6 +456,7 @@ def _router_client_with_control_plane(
     # attribute metrics to (bypasses the lifespan startup-sync path entirely).
     config = test_client.get("/router/config").json()
     config["deployment_id"] = "dep-123"
+    config["revision"] = 1
     put_response = test_client.put("/router/config", json=config)
     assert put_response.status_code == 200
 

@@ -39,8 +39,10 @@ class FakeRouterGateway:
 
         if self.should_fail:
             raise RouterUpdateError("simulated router failure")
-        same_deployment = deployment_id == self.observed_deployment_id
-        if same_deployment and revision <= self.observed_revision:
+        # Model-scoped generation (Sprint 14), not per-deployment - see
+        # app/router/main.py's put_config.
+        same_model = model_name == self.observed_model_name
+        if same_model and revision <= self.observed_revision:
             raise StaleRevisionError(f"stale revision {revision} for {deployment_id}")
         self.observed_model_name = model_name
         self.observed_deployment_id = deployment_id
@@ -411,14 +413,67 @@ def test_reconcile_endpoint_is_a_noop_when_already_in_sync(client: TestClient) -
     assert body["reason"] == "already in sync"
 
 
-def test_router_config_endpoint_ignores_rolled_back_deployment(client: TestClient) -> None:
+def test_router_config_endpoint_serves_final_allocation_after_rollback(
+    client: TestClient,
+) -> None:
+    """Sprint 14: the only deployment for this model is now ROLLED_BACK (a
+    terminal state), but its final TrafficAllocation is still authoritative
+    (see service.get_authoritative_allocation) - a router restarting after a
+    successful rollback must sync to 100% stable, not fall all the way back
+    to the router's own bootstrap default. See
+    docs/DESIGN_NOTES.md#desired-observed-reconciliation."""
     deployment_id = _create_deployment(client).json()["id"]
     client.post(f"/api/deployments/{deployment_id}/rollback")
 
-    # The only deployment for this model is now ROLLED_BACK (a terminal state), so
-    # there's no "active" allocation left - the router-config endpoint should not
-    # fall back to serving stale history from a rolled-back deployment.
     response = client.get("/api/router-config/fraud-model")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["deployment_id"] == deployment_id
+    assert body["targets"] == [{"version": "v1", "weight": 1.0}]
+
+
+def test_router_config_endpoint_serves_final_allocation_after_promote(
+    client: TestClient,
+) -> None:
+    """Same fix as the rollback test above, for the PROMOTED path specifically
+    (Section 1's acceptance test #3) - before Sprint 14 this fell all the way
+    back to the router's own bootstrap default (README's "even after the
+    router restarts" claim was false for exactly this case)."""
+    deployment_id = _create_deployment(client).json()["id"]
+    client.post(f"/api/deployments/{deployment_id}/promote")
+
+    response = client.get("/api/router-config/fraud-model")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["deployment_id"] == deployment_id
+    assert body["targets"] == [{"version": "v2-good", "weight": 1.0}]
+
+
+def test_router_config_endpoint_404_when_only_deployment_is_failed(
+    client: TestClient, db_session: Session
+) -> None:
+    """FAILED is deliberately excluded from the authoritative fallback (see
+    service.get_authoritative_allocation) - a deployment that never reached a
+    legitimate PROMOTED/ROLLED_BACK outcome has no traffic split worth
+    restoring, so the router-config endpoint must still 404, leaving the
+    router on its own bootstrap default."""
+    only_deployment = Deployment(
+        model_name="only-failed-model",
+        stable_version="v1",
+        canary_version="v2-good",
+        status=DeploymentStatus.FAILED,
+    )
+    db_session.add(only_deployment)
+    db_session.flush()
+    db_session.add(
+        TrafficAllocation(
+            deployment_id=only_deployment.id,
+            targets=[{"version": "v1", "weight": 0.5}, {"version": "v2-good", "weight": 0.5}],
+        )
+    )
+    db_session.commit()
+
+    response = client.get("/api/router-config/only-failed-model")
     assert response.status_code == 404
 
 

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.control_plane.models import (
     Deployment,
     DeploymentStatus,
-    PendingLabel,
+    GroundTruthLabel,
     PredictionMetric,
 )
 from app.db import get_db
@@ -65,21 +65,27 @@ def _label_payload(prediction_id: str, actual_label: int) -> dict[str, object]:
     }
 
 
+def _get_label(db_session: Session, prediction_id: str) -> GroundTruthLabel | None:
+    return (
+        db_session.query(GroundTruthLabel).filter_by(prediction_id=prediction_id).one_or_none()
+    )
+
+
 # --- POST /api/labels: idempotency table -----------------------------------------
 
 
 def test_label_applied_to_existing_metric_returns_201(
     client: TestClient, db_session: Session, deployment: Deployment
 ) -> None:
-    metric = _add_metric(db_session, deployment.id, "pred-1")
+    _add_metric(db_session, deployment.id, "pred-1")
 
     response = client.post("/api/labels", json=_label_payload("pred-1", 1))
     assert response.status_code == 201
     assert response.json() == {"prediction_id": "pred-1", "status": "applied", "detail": None}
 
-    db_session.refresh(metric)
-    assert metric.actual_label == 1
-    assert metric.label_ingested_at is not None
+    label = _get_label(db_session, "pred-1")
+    assert label is not None
+    assert label.actual_label == 1
 
 
 def test_same_label_twice_is_idempotent_no_op(
@@ -114,16 +120,26 @@ def test_conflicting_label_returns_409_and_logs_audit_event(
     assert len(conflict_events) == 1
     assert "pred-3" in conflict_events[0]["message"]
 
+    # The rejected value must not have overwritten the original.
+    label = _get_label(db_session, "pred-3")
+    assert label is not None
+    assert label.actual_label == 1
 
-def test_unknown_prediction_id_is_parked_as_pending(
+
+def test_unknown_prediction_id_is_recorded_durably_and_returns_202(
     client: TestClient, db_session: Session
 ) -> None:
+    """No PendingLabel to "park" in anymore - the label is written to
+    GroundTruthLabel unconditionally, regardless of whether a matching
+    PredictionMetric exists yet (see label_service.py). 202 just means "no
+    matching metric yet", not "not yet durably recorded"."""
     response = client.post("/api/labels", json=_label_payload("pred-unknown", 1))
     assert response.status_code == 202
     assert response.json()["status"] == "pending"
 
-    pending = db_session.query(PendingLabel).filter_by(prediction_id="pred-unknown").one()
-    assert pending.actual_label == 1
+    label = _get_label(db_session, "pred-unknown")
+    assert label is not None
+    assert label.actual_label == 1
 
 
 def test_conflicting_pending_label_is_still_a_409_without_a_deployment_event(
@@ -139,10 +155,10 @@ def test_conflicting_pending_label_is_still_a_409_without_a_deployment_event(
     assert response.json()["status"] == "conflict"
 
 
-# --- PendingLabel <-> PredictionMetric matching order-independence ----------------
+# --- GroundTruthLabel <-> PredictionMetric join order-independence ----------------
 
 
-def test_label_arriving_before_metric_is_matched_when_metric_is_recorded(
+def test_label_arriving_before_metric_is_joined_when_metric_is_recorded(
     client: TestClient, db_session: Session, deployment: Deployment
 ) -> None:
     label_response = client.post("/api/labels", json=_label_payload("pred-early", 1))
@@ -160,12 +176,18 @@ def test_label_arriving_before_metric_is_matched_when_metric_is_recorded(
     )
     assert metric_response.status_code == 202
 
-    metric = (
-        db_session.query(PredictionMetric).filter_by(prediction_id="pred-early").one()
-    )
-    assert metric.actual_label == 1
-    assert metric.label_ingested_at is not None
-    assert db_session.query(PendingLabel).filter_by(prediction_id="pred-early").first() is None
+    # The metric write itself never touches the label - it's still there, and
+    # the two are only ever linked by a read-time JOIN on prediction_id (see
+    # metrics_service.compute_version_summary).
+    label = _get_label(db_session, "pred-early")
+    assert label is not None
+    assert label.actual_label == 1
+    metric = db_session.query(PredictionMetric).filter_by(prediction_id="pred-early").one()
+    assert metric.prediction_id == label.prediction_id
+
+    metrics = client.get(f"/api/deployments/{deployment.id}/metrics").json()
+    assert metrics["canary"]["labeled_sample_count"] == 1
+    assert metrics["canary"]["positive_label_count"] == 1
 
 
 def test_metric_arriving_before_label_is_labeled_normally(
@@ -186,8 +208,9 @@ def test_metric_arriving_before_label_is_labeled_normally(
     label_response = client.post("/api/labels", json=_label_payload("pred-late", 0))
     assert label_response.status_code == 201
 
-    metric = db_session.query(PredictionMetric).filter_by(prediction_id="pred-late").one()
-    assert metric.actual_label == 0
+    label = _get_label(db_session, "pred-late")
+    assert label is not None
+    assert label.actual_label == 0
 
 
 # --- POST /api/labels/batch -------------------------------------------------------
@@ -226,15 +249,16 @@ def test_label_for_terminal_deployment_prediction_is_still_accepted(
     stop its historical predictions from being labeled later (no data loss), even
     though a new PolicyEvaluation could never be triggered for it (see the /evaluate
     active-only guard, unrelated to this endpoint)."""
-    metric = _add_metric(db_session, deployment.id, "pred-terminal")
+    _add_metric(db_session, deployment.id, "pred-terminal")
     deployment.status = DeploymentStatus.PROMOTED
     db_session.commit()
 
     response = client.post("/api/labels", json=_label_payload("pred-terminal", 1))
     assert response.status_code == 201
 
-    db_session.refresh(metric)
-    assert metric.actual_label == 1
+    label = _get_label(db_session, "pred-terminal")
+    assert label is not None
+    assert label.actual_label == 1
 
     evaluations = client.get(f"/api/deployments/{deployment.id}/policy-evaluations").json()
     assert evaluations == []

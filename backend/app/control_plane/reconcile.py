@@ -36,18 +36,6 @@ class ReconcileResult:
     to_revision: int | None = None
 
 
-def _find_active_deployment_for_model(db: Session, model_name: str) -> Deployment | None:
-    stmt = (
-        select(Deployment)
-        .where(
-            Deployment.model_name == model_name,
-            Deployment.status.in_(service.ACTIVE_STATUSES),
-        )
-        .order_by(Deployment.created_at.desc())
-    )
-    return db.execute(stmt).scalars().first()
-
-
 def _all_active_deployments(db: Session) -> list[Deployment]:
     """Used only when the router is fully unreachable (GET itself failed), so
     there's no observed model_name to look up a specific deployment by -
@@ -60,13 +48,22 @@ def _all_active_deployments(db: Session) -> list[Deployment]:
 
 async def reconcile_router_state(db: Session, router_gateway: RouterGateway) -> ReconcileResult:
     """Compares the router's observed (model_name, deployment_id, revision) against
-    the DB's desired state for that model's currently-active deployment, and
-    re-pushes if they differ.
+    the DB's authoritative desired state for that model (see
+    service.get_authoritative_allocation - the active rollout if one is in
+    flight, otherwise the most recent PROMOTED/ROLLED_BACK deployment's final
+    allocation), and re-pushes if they differ.
+
+    Using the authoritative allocation rather than only the active deployment is
+    what makes this still work *after* a rollout finishes: a router push that
+    fails right after a promote/rollback commit (or a router restart after one)
+    used to have nothing left to reconcile against once that deployment left
+    CANARY_RUNNING/EVALUATING - the drift became permanent instead of closing
+    on the next tick. See docs/DESIGN_NOTES.md#desired-observed-reconciliation.
 
     No-op (no push, no DeploymentEvent) when they already match, or when there's
-    nothing to compare against (router unreachable, or no active deployment for
-    the router's model) - reconciliation should be silent when there's nothing
-    to reconcile, not spam the timeline every tick just for checking.
+    nothing to compare against (router unreachable, or no deployment at all yet
+    for the router's model) - reconciliation should be silent when there's
+    nothing to reconcile, not spam the timeline every tick just for checking.
     """
     observed = await router_gateway.get_observed_config()
     if observed is None:
@@ -78,9 +75,9 @@ async def reconcile_router_state(db: Session, router_gateway: RouterGateway) -> 
     if not model_name:
         return ReconcileResult(reconciled=False, reason="router reported no model_name")
 
-    desired_deployment = _find_active_deployment_for_model(db, model_name)
+    desired_deployment = service.get_authoritative_allocation(db, model_name)
     if desired_deployment is None or desired_deployment.traffic_allocation is None:
-        return ReconcileResult(reconciled=False, reason="no active deployment")
+        return ReconcileResult(reconciled=False, reason="no authoritative allocation")
 
     # The GET above succeeded, so the router answered - it's reachable, even if
     # the push below then fails (that's recorded separately as a fresh

@@ -9,7 +9,7 @@ control loop.
 
 What it actually does:
 
-- Ramps a candidate model into real production traffic gradually, not all at once.
+- Ramps a candidate model into live routed traffic gradually, not all at once.
 - Ingests delayed ground truth through a real API surface, not a synthetic backfill.
 - Judges a canary on both reliability (latency, error rate) *and* model quality
   (precision/recall over labeled outcomes), not just "is it up."
@@ -472,9 +472,9 @@ reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for the
 full story, including how this was actually found (three separate,
 unrelated-looking CI runs failing the identical way).
 
-- `TrafficAllocation.revision` (per-deployment, monotonic) plus `POST
-  /router/config` on the router itself now rejecting an equal-or-stale
-  revision for the same `deployment_id` with `409` - not silently accepting it.
+- `TrafficAllocation.revision` (monotonic; model-scoped as of Sprint 14 - see
+  below) plus `POST /router/config` on the router itself now rejecting an
+  equal-or-stale revision with `409` - not silently accepting it.
 - Desired state (the DB) commits *first*; the router push happens after and is
   now best-effort - neither a stale-revision `409` nor a genuinely unreachable
   router marks a deployment `FAILED` anymore, since the desired state is
@@ -494,11 +494,60 @@ unrelated-looking CI runs failing the identical way).
   the worker's own reconcile tick - not a human, not a replay - to catch it
   back up.
 
+### Authoritative routing state & durable ground-truth labels (Sprint 14)
+
+A closing correctness pass, driven by a real review of Sprint 13's own work.
+Two independent fixes:
+
+```bash
+curl localhost:8000/api/router-config/fraud-model   # now finds a PROMOTED/
+                                                     # ROLLED_BACK deployment's
+                                                     # final allocation too
+```
+
+- **Terminal-state reconciliation.** The reconciler and the router's startup
+  sync only ever compared against `get_active_deployment`
+  (`CANARY_RUNNING`/`EVALUATING`) - which had nothing left to find the moment
+  a rollout actually finished. A router push failing right after a
+  promote/rollback commit (or a router restart afterward) used to leave that
+  drift permanent instead of closing on the next tick, silently contradicting
+  this README's own "even after the router restarts" claim.
+  `service.get_authoritative_allocation` closes the gap: a `PROMOTED`/
+  `ROLLED_BACK` deployment's final `TrafficAllocation` stays authoritative for
+  its model - deliberately excluding `FAILED`, which never reached a
+  legitimate outcome - see [Desired/observed
+  reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for why
+  it's a separate function from `get_active_deployment` rather than a widened
+  version of it.
+- **Model-scoped routing generation.** `TrafficAllocation.revision` used to
+  reset to 1 for every new deployment, so the router's staleness check only
+  ever compared revisions for the *same* `deployment_id` - a delayed push from
+  an old, already-superseded deployment could still land and silently
+  resurrect stale traffic, since a different `deployment_id` always won
+  outright. Revision is now a monotonic counter scoped to the *model*
+  (`RoutingGeneration`), and the router rejects an equal-or-stale push for the
+  same model regardless of `deployment_id`.
+- **Durable ground-truth labels.** Label ingestion and metric ingestion used
+  to be two independent check-then-act writers (a label parked in
+  `PendingLabel` until a matching `PredictionMetric` showed up) - a real,
+  reproducible race could interleave the two so each side's "does the other
+  exist yet" check missed the other's uncommitted row, leaving a label
+  permanently unlinked from its metric. `GroundTruthLabel` is now written
+  unconditionally on ingestion, regardless of arrival order; quality
+  aggregation joins it against `PredictionMetric` at *read* time instead - see
+  [Desired/observed
+  reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for the
+  full race and why a read-time join removes it rather than out-timing it.
+- CI scenario 6 is the terminal-state fix's own proof: manually promotes a
+  deployment, restarts the router, and confirms startup sync alone (no
+  reconcile tick needed - this one is deterministic, not best-effort) restores
+  the promoted split instead of the router's bootstrap default.
+
 ## Development
 
 ```bash
 make dev             # bring up the whole stack via docker compose
-make test            # backend tests (pytest) - 266 tests, ~91% statement coverage
+make test            # backend tests (pytest) - 276 tests, ~91% statement coverage
 make coverage        # same, plus an HTML report at backend/htmlcov/index.html
 make lint            # backend (ruff, mypy) + frontend (eslint, tsc) lint/type-check
 make ci-smoke-test   # the same real-stack check CI runs - needs `make dev` running
@@ -510,11 +559,11 @@ every push/PR:
 
 | Job | What it checks | Runtime |
 |---|---|---|
-| `backend` | `ruff`, `mypy --strict`, `pytest` (266 tests, mocked collaborators) | seconds |
+| `backend` | `ruff`, `mypy --strict`, `pytest` (276 tests, mocked collaborators) | seconds |
 | `frontend` | `eslint`, `tsc --noEmit` | seconds |
-| `integration` | Builds and boots the **real** 9-container stack (8 HTTP-exposed services + the worker, which has no HTTP surface), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s five scenarios - gated on the two jobs above passing first | a few minutes |
+| `integration` | Builds and boots the **real** 9-container stack (8 HTTP-exposed services + the worker, which has no HTTP surface), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s six scenarios - gated on the two jobs above passing first | a few minutes |
 
-The `integration` job's five scenarios, in order: **(1)** a fast manual create →
+The `integration` job's six scenarios, in order: **(1)** a fast manual create →
 evaluate → promote path, created with `automation_paused=True` so the always-on
 worker can't race the scenario's own manual `/evaluate` call - see
 [Manual automation hold](docs/DESIGN_NOTES.md#manual-automation-hold), added
@@ -528,12 +577,18 @@ delayed label flow as (3), rolled back automatically on a genuine
 `minimum_recall` FAIL; **(5)** a real `docker compose restart router` mid-rollout
 - the router genuinely loses its config, and the worker's own reconcile tick
 (not a human, not a replay) pushes it back to the DB's desired revision on its
-own - see [Desired/observed
-reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation). Scenarios
-2-5 only finish in reasonable CI time because the worker's poll interval is
-turned down to 2s for this job specifically
+own; **(6)** manually promotes the deployment scenario 5 leaves running, then
+restarts the router *again* - this time confirming its startup sync alone
+restores the promoted split, proving the terminal-state reconciliation fix
+(scenario 5 only ever restarts the router mid-rollout, never after a rollout
+has finished) - see [Desired/observed
+reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for both.
+Scenarios 2-5 only finish in reasonable CI time because the worker's poll
+interval is turned down to 2s for this job specifically
 (`WORKER_POLL_INTERVAL_SECONDS` in the workflow file - defaults to 15s for real use
-and for local `make dev`, unaffected unless that env var is set).
+and for local `make dev`, unaffected unless that env var is set); scenario 6
+doesn't depend on it at all, since it only needs the router's own startup
+sync, not a reconcile tick.
 
 The `integration` job exists because every real bug found in this project (see
 [Troubleshooting](#troubleshooting)) was found by running the actual stack, not by
@@ -567,9 +622,10 @@ loses hot reload, which is why `make dev` uses `next dev`.
 
 ## Known limitations
 
-Etiketler platformun gerçek ingestion yüzeyinden (`POST /api/labels`) gecikmeli
-olarak akar. Etiketlerin kaynağı hâlâ sentetik veri setinin bilinen
-etiketleridir; bu gerçek bir üretim geri besleme akışı değildir.
+Labels flow delayed through the platform's real ingestion surface (`POST
+/api/labels`). Their source is still the synthetic dataset's known labels,
+though - this is not a real production feedback loop (see the
+`benchmark-success` bullet below for exactly how that's kept honest).
 
 - The `minimum_recall` policy check can genuinely resolve to `PASS` or `FAIL` now,
   once the quality data-sufficiency gate (`minimum_labeled_samples` +
@@ -624,6 +680,24 @@ etiketleridir; bu gerçek bir üretim geri besleme akışı değildir.
   reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for why
   that visibility matters once router push failures stopped marking a
   deployment `FAILED`.
+- The router's desired-state lookup (reconciler and startup sync alike) is
+  authoritative for a model even once its rollout has finished -
+  `PROMOTED`/`ROLLED_BACK`'s final `TrafficAllocation` stays the router's
+  desired state, not just the in-flight `CANARY_RUNNING`/`EVALUATING` one -
+  except `FAILED`, which never reaches a legitimate outcome and is
+  deliberately excluded from that fallback. See [Desired/observed
+  reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for why
+  that distinction exists and what a router restart does when *no* deployment
+  for a model has ever reached one of those states (the router's own
+  bootstrap default, unchanged).
+- Ground-truth labels are written unconditionally to their own table
+  (`GroundTruthLabel`) the moment they're ingested, regardless of whether a
+  matching `PredictionMetric` exists yet - quality metrics are computed by
+  joining the two at read time, not by copying a value across at write time.
+  `POST /api/labels` returning `202` means "no matching metric yet", not "not
+  yet durably recorded" - the label is already safely stored either way. See
+  [Desired/observed reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation)
+  for the write-time race this closes.
 
 Beyond that specific gap, a number of features were deliberately left out of scope
 for this project rather than half-built - see [docs/DESIGN_NOTES.md's Future

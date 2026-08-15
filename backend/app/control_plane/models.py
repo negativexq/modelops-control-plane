@@ -166,23 +166,51 @@ class TrafficAllocation(Base):
     )
     # [{"version": "v1", "weight": 0.9}, {"version": "v2-good", "weight": 0.1}, ...]
     targets: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
-    # Desired-state revision for this deployment's traffic split - bumped by 1 in
-    # the same transaction as every `targets` change (see service._set_traffic_
-    # allocation). Scoped per-deployment, not per-model: only one deployment is
-    # ever active for a given model at a time (uq_deployments_active_per_model),
-    # so the router only ever needs to compare (deployment_id, revision) against
-    # what it last applied - see docs/DESIGN_NOTES.md#desired-observed-reconciliation
-    # for why a model-scoped counter would need a table this project doesn't
-    # otherwise have. The router (app/router/main.py's put_config) rejects a push
-    # for the same deployment_id whose revision isn't strictly greater than what
-    # it already has - this is what makes a losing concurrent writer's stale push
-    # harmless instead of silently corrupting observed state.
+    # Desired-state revision for this deployment's traffic split - stamped from
+    # this model's RoutingGeneration counter in the same transaction as every
+    # `targets` change (see service._set_traffic_allocation/_next_routing_
+    # generation). Model-scoped, not deployment-scoped (changed in Sprint 14 -
+    # see docs/DESIGN_NOTES.md#desired-observed-reconciliation): a deployment-
+    # scoped counter that restarts at 1 for every new deployment can't guarantee
+    # a later deployment's revision is always greater than an earlier, terminal
+    # deployment's, which matters once a terminal deployment's allocation can
+    # stay authoritative (see service.get_authoritative_allocation). The router
+    # (app/router/main.py's put_config) rejects a push for the same model_name
+    # whose revision isn't strictly greater than what it already has, regardless
+    # of deployment_id - this is what makes a stale push (a losing concurrent
+    # writer, or one delayed enough to arrive after a newer deployment's own
+    # push) harmless instead of silently corrupting observed state.
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=_utcnow, onupdate=_utcnow
     )
 
     deployment: Mapped["Deployment"] = relationship(back_populates="traffic_allocation")
+
+
+class RoutingGeneration(Base):
+    """The monotonic counter TrafficAllocation.revision is assigned from,
+    scoped to a model_name rather than to any one deployment - see
+    service._next_routing_generation.
+
+    Exists because "authoritative allocation" (service.get_authoritative_
+    allocation) is itself model-scoped, not deployment-scoped: once a
+    deployment reaches a terminal outcome, its final TrafficAllocation stays
+    the router's desired state until a *new* deployment for the same model
+    produces one. A per-deployment counter that restarts at 1 for every new
+    deployment can't guarantee that later allocation's revision is always
+    greater than an earlier, terminal deployment's - which is exactly what
+    the router needs to reject a stale, delayed push from an old
+    deployment_id (see app/router/main.py's put_config and
+    docs/DESIGN_NOTES.md#desired-observed-reconciliation). One row per
+    model_name, created lazily on first traffic-allocation write for that
+    model.
+    """
+
+    __tablename__ = "routing_generations"
+
+    model_name: Mapped[str] = mapped_column(String(200), primary_key=True)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class DeploymentEvent(Base):
@@ -325,55 +353,56 @@ class PredictionMetric(Base):
     latency_ms: Mapped[float] = mapped_column(Float, nullable=False)
     status_code: Mapped[int] = mapped_column(Integer, nullable=False)
     prediction: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    actual_label: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Born exactly once, in app/serving/ (a UUID4 minted per /predict call, returned
     # in the response body) - the control plane and router never generate one, they
     # only ever carry it through. This is the join key a delayed ground-truth label
-    # (POST /api/labels, see app/control_plane/labels_api.py) uses to find its way
-    # back to the specific prediction it's labeling - see docs/DESIGN_NOTES.md for
-    # why the id has to be born at the point of prediction and not, say, assigned by
-    # the router or the control plane on ingest. Nullable because rows written
-    # before this column existed have none; unique because it's a join key, not a
-    # descriptive attribute - two rows can never legitimately share one.
+    # (POST /api/labels, see app/control_plane/labels_api.py, stored in
+    # GroundTruthLabel below) uses to find its way back to the specific prediction
+    # it's labeling - see docs/DESIGN_NOTES.md for why the id has to be born at the
+    # point of prediction and not, say, assigned by the router or the control plane
+    # on ingest. Nullable because rows written before this column existed have
+    # none; unique because it's a join key, not a descriptive attribute - two rows
+    # can never legitimately share one.
     prediction_id: Mapped[str | None] = mapped_column(
         String(36), nullable=True, unique=True, index=True
-    )
-    # When actual_label was actually populated (whichever of the two paths got
-    # there first - see metrics_service.record_metric and labels_api.py). Distinct
-    # from `created_at` (when the *prediction* happened): the gap between them is
-    # exactly the real, measurable label delay this sprint exists to make visible
-    # (see metrics_service.compute_version_summary's label_delay_p50/p95_seconds).
-    label_ingested_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=_utcnow, index=True
     )
 
 
-class PendingLabel(Base):
-    """A ground-truth label that arrived (POST /api/labels) *before* the
-    PredictionMetric row it belongs to did - possible because the router publishes
-    metrics fire-and-forget (see docs/DESIGN_NOTES.md#metrics) while a label feeder
-    reports ground truth independently and asynchronously; there's no ordering
-    guarantee between the two. Matched and consumed the moment a PredictionMetric
-    with the same prediction_id is actually written (metrics_service.record_metric)
-    - never by a separate polling/background task, since that write is already the
-    one and only place a match becomes possible. A row that's never claimed just
-    sits here harmlessly (see Known limitations: no retention policy in this
-    sprint).
+class GroundTruthLabel(Base):
+    """One row per prediction_id ever labeled (POST /api/labels[, /batch] - see
+    label_service.py), independent of whether a matching PredictionMetric has
+    been written yet. Always written here first, regardless of arrival order -
+    label ingestion and metric ingestion are two completely independent writers
+    (the router publishes metrics fire-and-forget; a label feeder reports ground
+    truth on its own delayed schedule - see docs/DESIGN_NOTES.md), so there is no
+    write this table's insert needs to coordinate with or wait on.
+
+    Quality aggregation (metrics_service.compute_version_summary) reads this via
+    a JOIN against PredictionMetric on prediction_id, at query time - not by
+    copying actual_label onto PredictionMetric the moment a match becomes
+    possible (the pre-Sprint-14 PendingLabel design). That two-step
+    check-then-act approach had a real race: a label arriving and a metric
+    being written for the same prediction_id, interleaved so each transaction's
+    "does the other side exist yet" check missed the other's not-yet-committed
+    row, left the label and the metric permanently unlinked. Storing the label
+    unconditionally removes the write-time coordination problem entirely - see
+    docs/DESIGN_NOTES.md#desired-observed-reconciliation.
     """
 
-    __tablename__ = "pending_labels"
+    __tablename__ = "ground_truth_labels"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
     prediction_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True, index=True)
     actual_label: Mapped[int] = mapped_column(Integer, nullable=False)
     # When the label actually happened in the real world, per whoever's reporting it
     # (a label feeder that just picked a known-answer row knows this exactly) -
-    # distinct from `ingested_at` (when *this server* received it). Only the latter
-    # feeds the label-delay metric (see PredictionMetric.label_ingested_at); this is
-    # kept for audit/debugging, not computed against anywhere yet.
+    # distinct from `ingested_at` (when *this server* received it, what the
+    # label-delay metric is actually computed from - see
+    # metrics_service.compute_version_summary's label_delay_p50/p95_seconds).
+    # Always persisted, regardless of which arrival order this label took.
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=_utcnow

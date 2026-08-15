@@ -11,15 +11,16 @@ by running the actual stack, not by a unit test with mocked collaborators. Unit
 tests keep verifying logic in isolation; this catches the wiring between services -
 see README's "Troubleshooting" section.
 
-Four scenarios, run in sequence (the router holds a single active traffic split -
+Six scenarios, run in sequence (the router holds a single active traffic split -
 see docs/DESIGN_NOTES.md#benchmark-suite - so these can't run concurrently, and
-each fully completes before the next one starts). Each scenario now uses its own
-model_name (SCENARIO_MODEL_NAMES below), not a shared "fraud-model": the
+each fully completes before the next one starts). Scenarios 1-4 each use their
+own model_name (SCENARIO_MODEL_NAMES below), not a shared "fraud-model": the
 active-deployment-per-model DB invariant (see
 docs/DESIGN_NOTES.md#control-plane--deployment-lifecycle) then points at
 exactly which scenario left something behind if one ever does, instead of every
 scenario racing a single ambiguous name. `_assert_no_orphaned_deployments`
-checks this explicitly before scenario 1 even starts.
+checks this explicitly before scenario 1 even starts. Scenarios 5 and 6 both
+deliberately use "fraud-model" instead - see scenario 5's own docstring for why.
 
 1. `run_manual_smoke_scenario` - the fast path: create (already
    automation_paused=True - see docs/DESIGN_NOTES.md#manual-automation-hold for
@@ -52,6 +53,17 @@ checks this explicitly before scenario 1 even starts.
    see the scenario function's own docstring for why that's the realistic
    case, and why `revision` (not `deployment_id`) is what actually proves the
    reconciler, specifically, did the healing.
+6. `run_promote_then_router_restart_scenario` - Sprint 14's terminal-state
+   reconciliation fix, proven for real: manually promotes the deployment
+   scenario 5 leaves running, `docker compose restart`s the router *again*,
+   and confirms the router's own startup sync (not a reconcile tick this
+   time - see the scenario function's docstring for why this one is
+   deterministic, unlike scenario 5's revision recovery) comes back showing
+   the *promoted* split, not the router's bootstrap default. Before this
+   fix, get_active_deployment (CANARY_RUNNING/EVALUATING only) had nothing
+   left to find once the deployment reached PROMOTED, and a restart at that
+   point silently lost most of the promoted model's traffic - see
+   docs/DESIGN_NOTES.md#desired-observed-reconciliation.
 
 Scenarios 3 and 4 use a *stratified* request stream (QUALITY_SCENARIO_POSITIVE_
 RATIO, default 0.5 - see _BackgroundTraffic/locustfile.py's _sample_row), not
@@ -390,7 +402,7 @@ def run_manual_smoke_scenario() -> None:
     separate pause-automation call after - closes that race entirely rather than
     narrowing it.
     """
-    print("\n### scenario 1/4: manual create -> evaluate -> promote ###")
+    print("\n### scenario 1/6: manual create -> evaluate -> promote ###")
     deployment = _create_deployment(
         model_name="ci-smoke-manual",
         canary_version="v2-good",
@@ -470,7 +482,7 @@ def run_automatic_rollback_scenario() -> None:
     versions of this script called /evaluate then manually /promoted, which never
     exercised the worker's poll loop or its FAIL-detection at all.
     """
-    print("\n### scenario 2/4: automatic rollback (worker-driven, not manual) ###")
+    print("\n### scenario 2/6: automatic rollback (worker-driven, not manual) ###")
     try:
         _set_fault_injection(LATENCY_FAULT_URL, latency_ms=400, error_rate=0.0)
         print("[ok] injected +400ms latency into model-serving-v2-good-latency-fault")
@@ -545,7 +557,7 @@ def run_automatic_quality_promote_scenario() -> None:
     rather than a coin flip - see minimum_positive_labels below and
     app/policy/engine.py.
     """
-    print("\n### scenario 3/4: automatic quality-based promote (worker-driven) ###")
+    print("\n### scenario 3/6: automatic quality-based promote (worker-driven) ###")
     stable_version = "v1"
     canary_version = "v2-good"
     deployment = _create_deployment(
@@ -643,7 +655,7 @@ def run_automatic_quality_rollback_scenario() -> None:
     actually resolve to FAIL (not just stay perpetually INCONCLUSIVE) and drive a
     real automatic rollback.
     """
-    print("\n### scenario 4/4: automatic quality-based rollback (worker-driven) ###")
+    print("\n### scenario 4/6: automatic quality-based rollback (worker-driven) ###")
     stable_version = "v1"
     canary_version = "v2-quality-bad"
     deployment = _create_deployment(
@@ -750,7 +762,7 @@ def run_router_restart_reconcile_scenario() -> None:
     scenario is entirely about the router's *config* state, not routing
     decisions.
     """
-    print("\n### scenario 5/5: router restart -> automatic reconcile ###")
+    print("\n### scenario 5/6: router restart -> automatic reconcile ###")
     deployment = _create_deployment(
         model_name="fraud-model",
         canary_version="v2-good",
@@ -829,6 +841,71 @@ def run_router_restart_reconcile_scenario() -> None:
     print("[ok] timeline shows the automatic router_reconciled event")
 
 
+def run_promote_then_router_restart_scenario() -> None:
+    """See the module docstring's item 6. Manually promotes the deployment
+    scenario 5 above leaves running (CANARY_RUNNING, automation_paused,
+    policy_config never evaluates) - reusing it rather than creating a new
+    "fraud-model" deployment sidesteps uq_deployments_active_per_model (a
+    second active deployment for the same model_name is rejected outright),
+    and it's the deployment already sitting in the one slot this router
+    serves anyway.
+
+    Unlike scenario 5, this one is NOT a race against the reconciler: the
+    router's own lifespan startup sync (app/router/main.py) runs to
+    completion *before* /router/health ever starts responding "ok" - so by
+    the time `_wait_for` returns, `GET /router/config` already reflects
+    whatever service.get_authoritative_allocation found for "fraud-model" at
+    that moment. Before Sprint 14, that lookup only ever considered
+    CANARY_RUNNING/EVALUATING deployments, so a restart after a successful
+    promote found nothing and fell back to the router's own bootstrap
+    default (90/10 v1/v2-good) - silently serving the *wrong* traffic split
+    to a model that had already been promoted to 100%. This scenario's whole
+    point is proving that regression is closed, deterministically, not
+    best-effort.
+    """
+    print("\n### scenario 6/6: promote -> router restart -> final allocation restored ###")
+    active = [
+        d
+        for d in httpx.get(f"{BACKEND_URL}/api/deployments", timeout=10).json()
+        if d["model_name"] == "fraud-model" and d["status"] in ("CANARY_RUNNING", "EVALUATING")
+    ]
+    if len(active) != 1:
+        raise SmokeTestFailure(
+            f"[FAIL] expected exactly one active fraud-model deployment (left "
+            f"running by scenario 5) to promote, found {len(active)}: {active}"
+        )
+    deployment_id = active[0]["id"]
+    _record_deployment_id("scenario6-promote-then-restart", deployment_id)
+
+    response = httpx.post(f"{BACKEND_URL}/api/deployments/{deployment_id}/promote", timeout=10)
+    response.raise_for_status()
+    promoted = response.json()
+    if promoted["status"] != "PROMOTED":
+        raise SmokeTestFailure(f"[FAIL] manual promote didn't reach PROMOTED: {promoted}")
+    canary_version = promoted["canary_version"]
+    print(f"[ok] deployment {deployment_id} manually promoted to 100% {canary_version}")
+
+    subprocess.run(
+        ["docker", "compose", "restart", "router"], check=True, cwd=REPO_ROOT, timeout=60
+    )
+    _wait_for("router", f"{ROUTER_URL}/router/health", timeout_seconds=60)
+
+    after_restart = httpx.get(f"{ROUTER_URL}/router/config", timeout=10).json()
+    weights = {t["version"]: t["weight"] for t in after_restart.get("targets", [])}
+    if after_restart.get("deployment_id") != deployment_id or (
+        abs(weights.get(canary_version, 0.0) - 1.0) > 1e-6
+    ):
+        raise SmokeTestFailure(
+            "[FAIL] router did not restore the promoted deployment's final "
+            "allocation via startup sync - the terminal-state reconciliation "
+            f"fix appears to have regressed: {after_restart}"
+        )
+    print(
+        f"[ok] router restarted and immediately synced to the promoted deployment "
+        f"{deployment_id} at 100% {canary_version} - not the bootstrap default"
+    )
+
+
 SCENARIO_MODEL_NAMES = (
     "ci-smoke-manual",
     "ci-smoke-latency-rollback",
@@ -852,6 +929,7 @@ def main() -> None:
     run_automatic_quality_promote_scenario()
     run_automatic_quality_rollback_scenario()
     run_router_restart_reconcile_scenario()
+    run_promote_then_router_restart_scenario()
 
     print("\nAll integration checks passed.")
 

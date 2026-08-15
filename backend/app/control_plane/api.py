@@ -294,15 +294,20 @@ def get_deployment_comparison(
 
 @router_config_router.get("/{model_name}")
 def get_router_config(model_name: str, db: DbDep) -> dict[str, Any]:
-    """The router's startup-sync source: the currently-active traffic allocation for
-    this model (status CANARY_RUNNING or EVALUATING - see
-    service.get_active_deployment), so a restarted router doesn't boot with a stale
-    default split.
+    """The router's startup-sync source: the authoritative traffic allocation for
+    this model (see service.get_authoritative_allocation - the active rollout if
+    one is in flight, otherwise the most recent PROMOTED/ROLLED_BACK deployment's
+    final allocation), so a restarted router doesn't boot with a stale default
+    split - including after a rollout has already *finished*: before Sprint 14
+    this only ever looked at the active deployment, so a router restarted after a
+    successful promote/rollback (no in-flight rollout left to find) fell all the
+    way back to the bootstrap default instead of the promoted/rolled-back split -
+    see docs/DESIGN_NOTES.md#desired-observed-reconciliation.
 
     Deliberately minimal - a plain GET, no push/webhook, no polling loop. The control
     plane remains the source of truth; the router just reads it once at startup.
     """
-    deployment = service.get_active_deployment(db, model_name)
+    deployment = service.get_authoritative_allocation(db, model_name)
     if deployment is None or deployment.traffic_allocation is None:
         raise HTTPException(
             status_code=404, detail=f"No active traffic allocation on record for '{model_name}'"

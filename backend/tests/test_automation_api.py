@@ -19,6 +19,7 @@ class FakeRouterGateway:
     def __init__(self, should_fail: bool = False) -> None:
         self.should_fail = should_fail
         self.calls: list[tuple[str, str, int, list[dict[str, Any]]]] = []
+        self.observed_model_name: str | None = None
         self.observed_deployment_id: str | None = None
         self.observed_revision: int = 0
 
@@ -29,9 +30,12 @@ class FakeRouterGateway:
 
         if self.should_fail:
             raise RouterUpdateError("simulated router failure")
-        same_deployment = deployment_id == self.observed_deployment_id
-        if same_deployment and revision <= self.observed_revision:
+        # Model-scoped generation (Sprint 14), not per-deployment - see
+        # app/router/main.py's put_config.
+        same_model = model_name == self.observed_model_name
+        if same_model and revision <= self.observed_revision:
             raise StaleRevisionError(f"stale revision {revision} for {deployment_id}")
+        self.observed_model_name = model_name
         self.observed_deployment_id = deployment_id
         self.observed_revision = revision
         self.calls.append((model_name, deployment_id, revision, targets))

@@ -142,10 +142,11 @@ class MetricIn(BaseModel):
     hot path.
 
     Deliberately has no `actual_label` field: ground truth is never known at
-    prediction time, so this endpoint must never accept it directly from a caller
-    - see metrics_service.record_metric, which is the ONLY place a
-    PredictionMetric's actual_label gets populated, and only by matching a
-    PendingLabel created through POST /api/labels. See docs/DESIGN_NOTES.md.
+    prediction time, so this endpoint must never accept it directly from a
+    caller - it's only ever written to GroundTruthLabel, via POST /api/labels
+    (see label_service.ingest_label) and joined against PredictionMetric at
+    read time (see metrics_service.compute_version_summary). See
+    docs/DESIGN_NOTES.md.
     """
 
     model_version: str
@@ -187,22 +188,22 @@ class MetricsSummary(BaseModel):
     # minimum_positive_labels gate and docs/DESIGN_NOTES.md.
     positive_label_count: int
     # Wall-clock delay between a prediction happening and its label actually
-    # arriving (label_ingested_at - created_at, see PredictionMetric), summarized
-    # across whatever's labeled in this window. None when nothing in the window is
-    # labeled yet.
+    # arriving (GroundTruthLabel.ingested_at - PredictionMetric.created_at),
+    # summarized across whatever's labeled in this window. None when nothing in
+    # the window is labeled yet.
     label_delay_p50_seconds: float | None
     label_delay_p95_seconds: float | None
 
 
 class LabelIn(BaseModel):
     """One ground-truth label - what a label feeder POSTs to /api/labels[/batch].
-    `prediction_id` is the join key back to a specific PredictionMetric (or, if it
-    hasn't landed yet, a PendingLabel - see label_service.py)."""
+    `prediction_id` is the join key back to a specific PredictionMetric - see
+    GroundTruthLabel and label_service.py."""
 
     prediction_id: str
     actual_label: int = Field(ge=0, le=1)
     # When the label actually happened in the real world, per the feeder - distinct
-    # from `ingested_at` (server-assigned, see PendingLabel), which is what the
+    # from `ingested_at` (server-assigned, see GroundTruthLabel), which is what the
     # label-delay metric is actually computed from.
     occurred_at: datetime
 

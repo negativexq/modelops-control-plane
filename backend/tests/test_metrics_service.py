@@ -1,10 +1,16 @@
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.orm import Session
 
 from app.control_plane import metrics_service
-from app.control_plane.models import Deployment, DeploymentStatus, PredictionMetric
+from app.control_plane.models import (
+    Deployment,
+    DeploymentStatus,
+    GroundTruthLabel,
+    PredictionMetric,
+)
 from app.control_plane.schemas import MetricsSummary
 
 
@@ -33,7 +39,13 @@ def _add_metric(
     age_seconds: float = 0,
     label_delay_seconds: float | None = None,
 ) -> None:
+    """Writes a PredictionMetric and, if `actual_label` is given, a matching
+    GroundTruthLabel row joined on a freshly-minted prediction_id - see
+    metrics_service.compute_version_summary, which now computes everything
+    label-related via a JOIN rather than reading PredictionMetric.actual_label
+    directly (removed - see GroundTruthLabel's docstring)."""
     created_at = datetime.now(UTC) - timedelta(seconds=age_seconds)
+    prediction_id = str(uuid.uuid4()) if actual_label is not None else None
     db_session.add(
         PredictionMetric(
             deployment_id=deployment_id,
@@ -41,15 +53,25 @@ def _add_metric(
             latency_ms=latency_ms,
             status_code=status_code,
             prediction=prediction,
-            actual_label=actual_label,
+            prediction_id=prediction_id,
             created_at=created_at,
-            label_ingested_at=(
-                created_at + timedelta(seconds=label_delay_seconds)
-                if label_delay_seconds is not None
-                else None
-            ),
         )
     )
+    if actual_label is not None:
+        assert prediction_id is not None
+        ingested_at = (
+            created_at + timedelta(seconds=label_delay_seconds)
+            if label_delay_seconds is not None
+            else created_at
+        )
+        db_session.add(
+            GroundTruthLabel(
+                prediction_id=prediction_id,
+                actual_label=actual_label,
+                occurred_at=created_at,
+                ingested_at=ingested_at,
+            )
+        )
     db_session.commit()
 
 

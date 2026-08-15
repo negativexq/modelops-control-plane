@@ -35,8 +35,10 @@ class FakeRouterGateway:
     ) -> None:
         if self.should_fail:
             raise RouterUpdateError("simulated router failure")
-        same_deployment = deployment_id == self.observed_deployment_id
-        if same_deployment and revision <= self.observed_revision:
+        # Model-scoped generation (Sprint 14), not per-deployment - see
+        # app/router/main.py's put_config.
+        same_model = model_name == self.observed_model_name
+        if same_model and revision <= self.observed_revision:
             raise StaleRevisionError(f"stale revision {revision} for {deployment_id}")
         self.observed_model_name = model_name
         self.observed_deployment_id = deployment_id
@@ -195,18 +197,18 @@ def test_reconcile_writes_exactly_one_recovered_event_after_outage(db_session: S
     assert len([e for e in deployment.events if e.event_type == "router_unreachable"]) == 1
 
 
-def test_reconcile_noop_when_no_active_deployment_for_model(db_session: Session) -> None:
+def test_reconcile_noop_when_no_deployment_at_all_for_model(db_session: Session) -> None:
     router = FakeRouterGateway()
     # A non-None deployment_id so get_observed_config() returns a real payload
     # (not "router unreachable") - the model_name it reports simply has no
-    # active deployment in the DB at all.
+    # deployment of any kind (active or terminal) in the DB at all.
     router.desync(deployment_id="some-stale-deployment-id", revision=1)
     router.observed_model_name = "no-such-model"
 
     result = run(reconcile_router_state(db_session, router))
 
     assert result.reconciled is False
-    assert result.reason == "no active deployment"
+    assert result.reason == "no authoritative allocation"
 
 
 def test_post_commit_push_failure_is_corrected_by_a_later_reconcile_tick(
@@ -243,3 +245,96 @@ def test_post_commit_push_failure_is_corrected_by_a_later_reconcile_tick(
     assert result.reconciled is True
     assert router.observed_deployment_id == deployment.id
     assert router.observed_revision == 1
+
+
+def test_reconcile_recovers_promoted_deployment_after_post_commit_push_failure(
+    db_session: Session,
+) -> None:
+    """Section 1's core scenario: promote_deployment's own commit already made
+    the deployment PROMOTED with a 100% canary TrafficAllocation *before* the
+    router push happens - a router push failure right after that commit used
+    to leave the drift permanent, because the reconciler only ever looked at
+    get_active_deployment (CANARY_RUNNING/EVALUATING only), which has nothing
+    left to find once a deployment reaches PROMOTED. The reconciler now uses
+    get_authoritative_allocation instead, which still finds a PROMOTED
+    deployment's final allocation - see
+    docs/DESIGN_NOTES.md#desired-observed-reconciliation.
+    """
+    router = FakeRouterGateway(model_name="promote-recovery-model")
+    deployment, _ = run(
+        service.create_deployment(
+            db_session,
+            router,
+            model_name="promote-recovery-model",
+            stable_version="v1",
+            canary_version="v2-good",
+            canary_weight=0.1,
+            idempotency_key=None,
+        )
+    )
+    assert router.observed_revision == 1  # create's own push landed fine
+
+    router.should_fail = True
+    promoted = run(
+        service.promote_deployment(db_session, router, deployment, triggered_by="manual")
+    )
+    assert promoted.status == DeploymentStatus.PROMOTED
+    assert promoted.traffic_allocation is not None
+    assert promoted.traffic_allocation.targets == [{"version": "v2-good", "weight": 1.0}]
+
+    # The router never got the promote push - still stuck at the original 90/10
+    # split from create_deployment.
+    assert router.observed_revision == 1
+    assert router.observed_targets == [
+        {"version": "v1", "weight": 0.9},
+        {"version": "v2-good", "weight": 0.1},
+    ]
+
+    router.should_fail = False
+    result = run(reconcile_router_state(db_session, router))
+
+    assert result.reconciled is True
+    assert router.observed_deployment_id == deployment.id
+    assert router.observed_targets == [{"version": "v2-good", "weight": 1.0}]
+
+
+def test_reconcile_recovers_rolled_back_deployment_after_post_commit_push_failure(
+    db_session: Session,
+) -> None:
+    """Same scenario as the PROMOTED test above, for ROLLED_BACK - both are
+    terminal statuses get_authoritative_allocation must treat as authoritative
+    (unlike FAILED - see service._AUTHORITATIVE_TERMINAL_STATUSES)."""
+    router = FakeRouterGateway(model_name="rollback-recovery-model")
+    deployment, _ = run(
+        service.create_deployment(
+            db_session,
+            router,
+            model_name="rollback-recovery-model",
+            stable_version="v1",
+            canary_version="v2-good",
+            canary_weight=0.1,
+            idempotency_key=None,
+        )
+    )
+    assert router.observed_revision == 1
+
+    router.should_fail = True
+    rolled_back = run(
+        service.rollback_deployment(db_session, router, deployment, triggered_by="automatic")
+    )
+    assert rolled_back.status == DeploymentStatus.ROLLED_BACK
+    assert rolled_back.traffic_allocation is not None
+    assert rolled_back.traffic_allocation.targets == [{"version": "v1", "weight": 1.0}]
+
+    assert router.observed_revision == 1
+    assert router.observed_targets == [
+        {"version": "v1", "weight": 0.9},
+        {"version": "v2-good", "weight": 0.1},
+    ]
+
+    router.should_fail = False
+    result = run(reconcile_router_state(db_session, router))
+
+    assert result.reconciled is True
+    assert router.observed_deployment_id == deployment.id
+    assert router.observed_targets == [{"version": "v1", "weight": 1.0}]

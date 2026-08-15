@@ -6,7 +6,7 @@ matching/idempotency logic this just wraps in HTTP status codes.
 | Matching PredictionMetric exists, label seen for the first time | 201 |
 | Same prediction_id, same actual_label | 200 (idempotent no-op) |
 | Same prediction_id, different actual_label | 409 (+ audit event, if a deployment is known) |
-| prediction_id not known yet | 202 (parked in PendingLabel) |
+| No matching PredictionMetric yet | 202 (label is durably recorded regardless) |
 
 Both endpoints always return a LabelReportItem (or a list of them) - even the 409
 case - rather than FastAPI's default error envelope, so a caller (in particular

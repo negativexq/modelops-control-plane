@@ -4,20 +4,16 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.control_plane.models import PendingLabel, PredictionMetric
+from app.control_plane.models import GroundTruthLabel, PredictionMetric
 from app.control_plane.schemas import MetricIn, MetricsDeltas, MetricsSummary
 
 
 def record_metric(db: Session, deployment_id: str, payload: MetricIn) -> None:
-    """Writes one PredictionMetric row and, in the same transaction, checks for a
-    ground-truth label that arrived *before* this metric did (see PendingLabel's
-    docstring for why that ordering is possible and why this is the only place
-    that needs to check for it - not a separate background task).
-
-    `actual_label` is never taken from `payload` - MetricIn has no such field.
-    It's populated here, if at all, only from a matching PendingLabel, which
-    itself can only have been created by POST /api/labels. This is the sole
-    place a PredictionMetric's actual_label is ever set.
+    """Writes one PredictionMetric row. Nothing else: ground truth is a
+    completely independent write (see label_service.ingest_label and
+    GroundTruthLabel's docstring) that this function no longer needs to check
+    for - compute_version_summary below joins the two tables together at read
+    time instead, which is what makes label arrival order irrelevant.
     """
     metric = PredictionMetric(
         deployment_id=deployment_id,
@@ -28,16 +24,6 @@ def record_metric(db: Session, deployment_id: str, payload: MetricIn) -> None:
         prediction_id=payload.prediction_id,
     )
     db.add(metric)
-
-    if payload.prediction_id is not None:
-        pending = db.execute(
-            select(PendingLabel).where(PendingLabel.prediction_id == payload.prediction_id)
-        ).scalar_one_or_none()
-        if pending is not None:
-            metric.actual_label = pending.actual_label
-            metric.label_ingested_at = pending.ingested_at
-            db.delete(pending)
-
     db.commit()
 
 
@@ -63,7 +49,12 @@ def compute_version_summary(
     *,
     window_end_offset_seconds: int = 0,
 ) -> MetricsSummary:
-    """Summarizes PredictionMetric rows in [now - offset - window, now - offset].
+    """Summarizes PredictionMetric rows in [now - offset - window, now - offset],
+    joined against GroundTruthLabel on prediction_id for anything quality-related
+    (labeled_sample_count, label_coverage, positive_label_count, precision,
+    recall, false_positive_rate, label delay) - see GroundTruthLabel's docstring
+    for why this is a read-time JOIN rather than a value copied onto
+    PredictionMetric at write time.
 
     `window_end_offset_seconds` (default 0, i.e. the window ends *now*) is what
     lets the policy engine read two genuinely different windows from the same
@@ -74,13 +65,19 @@ def compute_version_summary(
     """
     window_end = datetime.now(UTC) - timedelta(seconds=window_end_offset_seconds)
     window_start = window_end - timedelta(seconds=window_seconds)
-    stmt = select(PredictionMetric).where(
-        PredictionMetric.deployment_id == deployment_id,
-        PredictionMetric.model_version == version,
-        PredictionMetric.created_at >= window_start,
-        PredictionMetric.created_at <= window_end,
+    stmt = (
+        select(PredictionMetric, GroundTruthLabel)
+        .outerjoin(
+            GroundTruthLabel, GroundTruthLabel.prediction_id == PredictionMetric.prediction_id
+        )
+        .where(
+            PredictionMetric.deployment_id == deployment_id,
+            PredictionMetric.model_version == version,
+            PredictionMetric.created_at >= window_start,
+            PredictionMetric.created_at <= window_end,
+        )
     )
-    rows = list(db.execute(stmt).scalars().all())
+    rows = list(db.execute(stmt).all())
 
     sample_count = len(rows)
     if sample_count == 0:
@@ -101,25 +98,23 @@ def compute_version_summary(
             label_delay_p95_seconds=None,
         )
 
-    latencies = sorted(row.latency_ms for row in rows)
-    error_count = sum(1 for row in rows if row.status_code >= 400)
+    latencies = sorted(metric.latency_ms for metric, _label in rows)
+    error_count = sum(1 for metric, _label in rows if metric.status_code >= 400)
 
-    labeled_rows = [row for row in rows if row.actual_label is not None]
+    labeled_rows = [(metric, label) for metric, label in rows if label is not None]
     labeled_sample_count = len(labeled_rows)
     label_coverage = labeled_sample_count / sample_count
 
     label_delays = sorted(
-        (row.label_ingested_at - row.created_at).total_seconds()
-        for row in rows
-        if row.label_ingested_at is not None
+        (label.ingested_at - metric.created_at).total_seconds() for metric, label in labeled_rows
     )
     label_delay_p50 = _percentile(label_delays, 50) if label_delays else None
     label_delay_p95 = _percentile(label_delays, 95) if label_delays else None
 
     labeled = [
-        (row.prediction, row.actual_label)
-        for row in rows
-        if row.prediction is not None and row.actual_label is not None
+        (metric.prediction, label.actual_label)
+        for metric, label in labeled_rows
+        if metric.prediction is not None
     ]
     precision = recall = false_positive_rate = None
     positive_label_count = 0

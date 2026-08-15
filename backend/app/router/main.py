@@ -144,23 +144,24 @@ def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None
             )
 
         current = store.get()
-        # Only compare revisions when this push is for the *same* deployment the
-        # router already has applied - a different (or first-ever) deployment_id
-        # always wins outright, since revision is scoped per-deployment, not
-        # globally (see TrafficAllocation.revision). A losing side of a
-        # concurrent promote/rollback (same deployment_id, an equal-or-older
-        # revision) is rejected outright rather than silently accepted - this is
-        # what stops a stale desired-state write from corrupting observed state.
-        # See docs/DESIGN_NOTES.md#desired-observed-reconciliation.
-        same_deployment = (
-            config.deployment_id is not None and config.deployment_id == current.deployment_id
-        )
-        if same_deployment and config.revision <= current.revision:
+        # Compare revisions per model_name, not per deployment_id (changed in
+        # Sprint 14 - see TrafficAllocation.revision and
+        # docs/DESIGN_NOTES.md#desired-observed-reconciliation): revision is now
+        # a monotonic routing generation scoped to the model, so a push from a
+        # *different* deployment_id no longer automatically wins - a delayed
+        # push from an old, already-terminal deployment must still be rejected
+        # if a newer deployment (or a later push from the same one) already
+        # landed a higher generation for this model. Only a config for a
+        # genuinely different model_name (this router serves exactly one at a
+        # time, but the field exists) always wins outright, same as a first-ever
+        # push.
+        same_model = config.model_name == current.model_name
+        if same_model and config.revision <= current.revision:
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    f"stale revision {config.revision} for deployment "
-                    f"{config.deployment_id} - router already has revision "
+                    f"stale revision {config.revision} for model "
+                    f"{config.model_name} - router already has revision "
                     f"{current.revision} applied"
                 ),
             )

@@ -1,3 +1,4 @@
+import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
@@ -5,7 +6,12 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.control_plane.models import Deployment, DeploymentStatus, PredictionMetric
+from app.control_plane.models import (
+    Deployment,
+    DeploymentStatus,
+    GroundTruthLabel,
+    PredictionMetric,
+)
 from app.db import get_db
 from app.main import app
 
@@ -34,10 +40,15 @@ def _add_metrics(
     recall_labels: tuple[int, int] | None = None,
 ) -> None:
     """Insert `count` metric rows. If recall_labels=(prediction, actual_label), every
-    row gets that same (prediction, actual_label) pair - just enough to make recall
-    computable for tests that need it."""
+    row gets that same (prediction, actual_label) pair - via a matching
+    GroundTruthLabel joined on a freshly-minted prediction_id (see
+    metrics_service.compute_version_summary, which computes everything
+    label-related via a JOIN now) - just enough to make recall computable for
+    tests that need it."""
     prediction, actual_label = recall_labels if recall_labels else (None, None)
     for _ in range(count):
+        created_at = datetime.now(UTC) - timedelta(seconds=1)
+        prediction_id = str(uuid.uuid4()) if actual_label is not None else None
         db_session.add(
             PredictionMetric(
                 deployment_id=deployment_id,
@@ -45,10 +56,20 @@ def _add_metrics(
                 latency_ms=latency_ms,
                 status_code=status_code,
                 prediction=prediction,
-                actual_label=actual_label,
-                created_at=datetime.now(UTC) - timedelta(seconds=1),
+                prediction_id=prediction_id,
+                created_at=created_at,
             )
         )
+        if actual_label is not None:
+            assert prediction_id is not None
+            db_session.add(
+                GroundTruthLabel(
+                    prediction_id=prediction_id,
+                    actual_label=actual_label,
+                    occurred_at=created_at,
+                    ingested_at=created_at,
+                )
+            )
     db_session.commit()
 
 
