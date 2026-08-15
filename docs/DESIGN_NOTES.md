@@ -553,32 +553,63 @@ fail, the deployment has already left `ACTIVE_STATUSES` - and
 push failure, at exactly that moment left the drift permanent instead of
 closing on the next reconcile tick, and README's own "even after the router
 restarts" claim was quietly false for this one case. `service.
-get_authoritative_allocation` is the fix: it returns the active deployment
-if one is in flight (identical to `get_active_deployment` in that case), and
-otherwise the most recent `PROMOTED`/`ROLLED_BACK` deployment's *final*
-allocation - which is still the correct desired state, just no longer
-"active" in the narrower sense.
+get_authoritative_allocation` is the fix: it checks, in order, (1) an
+in-flight rollout, or a rollout `record_inconclusive` has frozen into
+`INCONCLUSIVE` - grouped together because both leave the deployment's
+`TrafficAllocation` as the correct desired routing state, and
+`uq_deployments_active_per_model` already guarantees at most one of the two
+exists per model at a time - and (2) otherwise, the most recent `PROMOTED`/
+`ROLLED_BACK` deployment's *final* allocation. `INCONCLUSIVE` was added to
+step 1 in a follow-up fix after the first version of this function shipped
+without it: `record_inconclusive`'s own contract is "freeze the traffic
+split for manual review", and a deployment leaving `CANARY_RUNNING`/
+`EVALUATING` into `INCONCLUSIVE` is exactly the same kind of "no longer
+active but still authoritative" transition `PROMOTED`/`ROLLED_BACK` already
+were - a reconcile tick that only knew about the terminal pair could still
+silently revert a frozen rollout's traffic back to whatever the *previous*
+deployment had running, which is precisely the kind of drift this feature
+exists to prevent.
 
 **Why `get_authoritative_allocation` is a separate function, not a widened
 `get_active_deployment`.** `get_active_deployment` backs two things whose
 correctness depends on its exact, narrow scope: the exclusivity pre-check in
 `create_deployment` (a new deployment is blocked only while one is genuinely
-in flight - blocking on a terminal deployment too would make the model
-permanently unstartable) and the automation hold's `require_active` guard.
-Widening what "active" means for one caller's sake would silently widen it
-for both of those too. Two functions, two questions - "is a rollout in
-flight" vs. "what should the router be serving" - kept answerable
-independently.
+in flight - blocking on a terminal or frozen deployment too would make the
+model permanently unstartable) and the automation hold's `require_active`
+guard. Widening what "active" means for one caller's sake would silently
+widen it for both of those too. Two functions, two questions -
+`get_active_deployment` asks "is this deployment active from automation's
+point of view", `get_authoritative_allocation` asks "what should the router
+be serving" - kept answerable independently.
 
 **Why `FAILED` is excluded from the authoritative fallback.** A deployment
 that reaches `FAILED` never completed a legitimate rollout decision - unlike
-`PROMOTED`/`ROLLED_BACK`, its `TrafficAllocation` doesn't represent something
-the platform actually decided was correct, just whatever traffic split
-happened to exist at the moment something broke. Treating it as authoritative
-would mean a router restart could sync to an accidental, half-finished split
-rather than the *last deployment that actually reached a real outcome* (or,
-if none exists yet, the router's own bootstrap default) - falling further
-back is more honest than trusting a failure's leftover state.
+`PROMOTED`/`ROLLED_BACK`/`INCONCLUSIVE`, its `TrafficAllocation` doesn't
+represent something the platform actually decided was correct, just whatever
+traffic split happened to exist at the moment something broke. Treating it
+as authoritative would mean a router restart could sync to an accidental,
+half-finished split rather than the *last deployment that actually reached a
+real outcome* (or, if none exists yet, the router's own bootstrap default) -
+falling further back is more honest than trusting a failure's leftover
+state.
+
+**Reachability events belong to whichever deployment owns the routing
+state.** `service.record_router_reachability_change`'s caller always
+supplies a `deployment_id` directly, but there are two places that first
+have to *pick* one on their own: `reconcile.py`'s router-unreachable branch
+(the `GET` itself failed, so there's no observed `model_name` to look a
+specific deployment up by) had used a plain "every currently-active
+deployment" query - the same `ACTIVE_STATUSES`-only gap `get_authoritative_
+allocation` was created to close for routing state itself, just recreated
+independently for reachability events. A router outage while the
+authoritative deployment for a model was terminal or frozen `INCONCLUSIVE`
+produced no visible event at all on that deployment's timeline, even though
+the outage affected exactly the traffic split it owns. Fixed by routing
+`_all_authoritative_deployments` through `get_authoritative_allocation`
+itself (once per distinct `model_name`) instead of maintaining a second,
+narrower definition of "which deployment does this router state belong to" -
+one function answers that question everywhere it's asked. The one-event-
+per-transition rule is unchanged.
 
 **Durable ground-truth labels (Sprint 14).** Label ingestion
 (`label_service.ingest_label`, via `POST /api/labels`) and metric ingestion

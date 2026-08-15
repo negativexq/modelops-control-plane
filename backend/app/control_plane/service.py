@@ -142,34 +142,55 @@ _AUTHORITATIVE_TERMINAL_STATUSES = (DeploymentStatus.PROMOTED, DeploymentStatus.
 def get_authoritative_allocation(db: Session, model_name: str) -> Deployment | None:
     """The deployment whose TrafficAllocation the router should currently be
     serving for this model - "what should the router be serving right now",
-    not "is there a live rollout right now" (see get_active_deployment for that
-    narrower, load-bearing question - exclusivity checks and the automation
-    hold depend on its exact scope, so this is a separate function rather than
-    a widened get_active_deployment; widening that one would widen those too).
+    not "is this deployment active from automation's point of view" (see
+    get_active_deployment for that narrower, load-bearing question -
+    exclusivity checks and the automation hold depend on its exact scope, so
+    this is a separate function rather than a widened get_active_deployment;
+    widening that one would widen those too).
 
-    While a rollout is in flight (CANARY_RUNNING/EVALUATING), that's the same
-    deployment get_active_deployment would return. The difference is what
-    happens once it reaches a genuine terminal outcome: promote_deployment/
-    rollback_deployment's own commit already made that deployment's *final*
-    TrafficAllocation the correct, durable desired state (see
-    docs/DESIGN_NOTES.md#desired-observed-reconciliation) - it doesn't stop
-    being authoritative just because the deployment itself is no longer
-    "active". Before this function existed, the reconciler and the router's
-    startup sync only ever looked at ACTIVE_STATUSES, so a router push failure
-    (or restart) *after* a successful promote/rollback had nothing left to
-    reconcile against - the drift became permanent instead of closing on the
-    next tick. This is the fix for that gap.
+    Checks, in order:
 
-    FAILED is deliberately excluded (see _AUTHORITATIVE_TERMINAL_STATUSES): a
-    FAILED deployment never reached a legitimate PROMOTED/ROLLED_BACK outcome,
-    so its incomplete traffic split has no claim to being authoritative -
-    falling back to the most recent genuinely-terminal deployment (or, if none
-    exists, the router's own bootstrap default) is more correct. See
-    docs/DESIGN_NOTES.md for the full reasoning.
+    1. An in-flight rollout (CANARY_RUNNING/EVALUATING) or a frozen one
+       (INCONCLUSIVE) - all three leave the deployment's TrafficAllocation as
+       the correct desired routing state, just for different reasons (a live
+       rollout vs. record_inconclusive's own "freeze the traffic split for
+       manual review" contract - see that function's docstring). Grouped
+       together (not ACTIVE_STATUSES) because uq_deployments_active_per_model
+       already guarantees at most one of these three exists per model at a
+       time, so there's nothing to prefer between them.
+    2. Otherwise, the most recent PROMOTED/ROLLED_BACK deployment's *final*
+       allocation - promote_deployment/rollback_deployment's own commit
+       already made it the correct, durable desired state (see
+       docs/DESIGN_NOTES.md#desired-observed-reconciliation), and it doesn't
+       stop being authoritative just because the deployment is no longer
+       "active" or "frozen".
+
+    Before this function existed, the reconciler and the router's startup
+    sync only ever looked at ACTIVE_STATUSES, so a router push failure (or
+    restart) after a successful promote/rollback - or after a rollout froze
+    into INCONCLUSIVE - had nothing left to reconcile against: the drift
+    became permanent instead of closing on the next tick. This is the fix for
+    that gap.
+
+    FAILED is deliberately excluded from both steps: a FAILED deployment
+    never reached a legitimate outcome, so its incomplete traffic split has
+    no claim to being authoritative - falling back further (to the most
+    recent genuinely-terminal deployment, or the router's own bootstrap
+    default if none exists) is more correct. See docs/DESIGN_NOTES.md for the
+    full reasoning.
     """
-    active = get_active_deployment(db, model_name)
-    if active is not None:
-        return active
+    routing = db.execute(
+        select(Deployment)
+        .where(
+            Deployment.model_name == model_name,
+            Deployment.status.in_(
+                (*ACTIVE_STATUSES, DeploymentStatus.INCONCLUSIVE),
+            ),
+        )
+        .order_by(Deployment.created_at.desc())
+    ).scalars().first()
+    if routing is not None:
+        return routing
     stmt = (
         select(Deployment)
         .where(

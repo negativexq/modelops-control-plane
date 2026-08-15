@@ -36,14 +36,28 @@ class ReconcileResult:
     to_revision: int | None = None
 
 
-def _all_active_deployments(db: Session) -> list[Deployment]:
+def _all_authoritative_deployments(db: Session) -> list[Deployment]:
     """Used only when the router is fully unreachable (GET itself failed), so
-    there's no observed model_name to look up a specific deployment by -
-    marks every currently-active deployment unreachable instead. Under this
-    project's single-router-instance assumption (see docs/DESIGN_NOTES.md
-    #desired-observed-reconciliation) there's realistically at most one."""
-    stmt = select(Deployment).where(Deployment.status.in_(service.ACTIVE_STATUSES))
-    return list(db.execute(stmt).scalars().all())
+    there's no observed model_name to look up a single one by - marks every
+    model's currently-authoritative deployment (see
+    service.get_authoritative_allocation) unreachable instead, whatever its
+    status (in-flight, frozen INCONCLUSIVE, or a terminal PROMOTED/
+    ROLLED_BACK still holding the router's desired state). Deliberately the
+    same definition reachability events use everywhere else in this module -
+    a router outage must be visible on whichever deployment's routing state
+    it's actually affecting, not just the ones still CANARY_RUNNING/
+    EVALUATING. Under this project's single-router-instance assumption (see
+    docs/DESIGN_NOTES.md#desired-observed-reconciliation) there's
+    realistically at most one distinct model_name in play, but this doesn't
+    assume that.
+    """
+    model_names = db.execute(select(Deployment.model_name).distinct()).scalars().all()
+    deployments = []
+    for model_name in model_names:
+        deployment = service.get_authoritative_allocation(db, model_name)
+        if deployment is not None:
+            deployments.append(deployment)
+    return deployments
 
 
 async def reconcile_router_state(db: Session, router_gateway: RouterGateway) -> ReconcileResult:
@@ -67,7 +81,7 @@ async def reconcile_router_state(db: Session, router_gateway: RouterGateway) -> 
     """
     observed = await router_gateway.get_observed_config()
     if observed is None:
-        for deployment in _all_active_deployments(db):
+        for deployment in _all_authoritative_deployments(db):
             service.record_router_reachability_change(db, deployment.id, reachable=False)
         return ReconcileResult(reconciled=False, reason="router unreachable")
 

@@ -547,7 +547,7 @@ curl localhost:8000/api/router-config/fraud-model   # now finds a PROMOTED/
 
 ```bash
 make dev             # bring up the whole stack via docker compose
-make test            # backend tests (pytest) - 276 tests, ~91% statement coverage
+make test            # backend tests (pytest) - 279 tests, ~91% statement coverage
 make coverage        # same, plus an HTML report at backend/htmlcov/index.html
 make lint            # backend (ruff, mypy) + frontend (eslint, tsc) lint/type-check
 make ci-smoke-test   # the same real-stack check CI runs - needs `make dev` running
@@ -559,7 +559,7 @@ every push/PR:
 
 | Job | What it checks | Runtime |
 |---|---|---|
-| `backend` | `ruff`, `mypy --strict`, `pytest` (276 tests, mocked collaborators) | seconds |
+| `backend` | `ruff`, `mypy --strict`, `pytest` (279 tests, mocked collaborators) | seconds |
 | `frontend` | `eslint`, `tsc --noEmit` | seconds |
 | `integration` | Builds and boots the **real** 9-container stack (8 HTTP-exposed services + the worker, which has no HTTP surface), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s six scenarios - gated on the two jobs above passing first | a few minutes |
 
@@ -681,11 +681,12 @@ though - this is not a real production feedback loop (see the
   that visibility matters once router push failures stopped marking a
   deployment `FAILED`.
 - The router's desired-state lookup (reconciler and startup sync alike) is
-  authoritative for a model even once its rollout has finished -
-  `PROMOTED`/`ROLLED_BACK`'s final `TrafficAllocation` stays the router's
-  desired state, not just the in-flight `CANARY_RUNNING`/`EVALUATING` one -
-  except `FAILED`, which never reaches a legitimate outcome and is
-  deliberately excluded from that fallback. See [Desired/observed
+  authoritative for a model even once its rollout has finished or frozen -
+  `PROMOTED`/`ROLLED_BACK`'s final `TrafficAllocation`, and an `INCONCLUSIVE`
+  deployment's frozen one, all stay the router's desired state, not just the
+  in-flight `CANARY_RUNNING`/`EVALUATING` case - except `FAILED`, which never
+  reaches a legitimate outcome and is deliberately excluded from that
+  fallback. See [Desired/observed
   reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for why
   that distinction exists and what a router restart does when *no* deployment
   for a model has ever reached one of those states (the router's own

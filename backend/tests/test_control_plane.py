@@ -449,6 +449,32 @@ def test_router_config_endpoint_serves_final_allocation_after_promote(
     assert body["targets"] == [{"version": "v2-good", "weight": 1.0}]
 
 
+def test_router_config_endpoint_serves_frozen_inconclusive_allocation(
+    client: TestClient,
+) -> None:
+    """INCONCLUSIVE is authoritative too (Section 1 of the follow-up fix -
+    record_inconclusive freezes the traffic split for manual review, it
+    doesn't change it), so a router restarting while a deployment is frozen
+    must sync to that frozen split, not fall back to the bootstrap default."""
+    deployment = _create_deployment(
+        client, policy_config={"max_inconclusive_retries": 1}
+    ).json()
+    deployment_id = deployment["id"]
+
+    client.post(f"/api/deployments/{deployment_id}/record-inconclusive")  # attempt 1/1
+    frozen = client.post(f"/api/deployments/{deployment_id}/record-inconclusive").json()
+    assert frozen["status"] == "INCONCLUSIVE"
+
+    response = client.get("/api/router-config/fraud-model")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["deployment_id"] == deployment_id
+    assert body["targets"] == [
+        {"version": "v1", "weight": 0.9},
+        {"version": "v2-good", "weight": 0.1},
+    ]
+
+
 def test_router_config_endpoint_404_when_only_deployment_is_failed(
     client: TestClient, db_session: Session
 ) -> None:

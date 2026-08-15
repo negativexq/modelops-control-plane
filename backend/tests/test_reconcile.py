@@ -338,3 +338,98 @@ def test_reconcile_recovers_rolled_back_deployment_after_post_commit_push_failur
     assert result.reconciled is True
     assert router.observed_deployment_id == deployment.id
     assert router.observed_targets == [{"version": "v1", "weight": 1.0}]
+
+
+# --- INCONCLUSIVE as authoritative routing state ----------------------------------
+
+
+def test_reconcile_serves_frozen_inconclusive_allocation_not_prior_promoted(
+    db_session: Session,
+) -> None:
+    """The exact scenario this fix closes: D1 is PROMOTED (100% v2-good), D2
+    is a later rollout for the same model that gets frozen INCONCLUSIVE at
+    75/25 - record_inconclusive's own contract is "freeze the traffic split
+    for manual review", not "revert to whatever came before". A reconcile
+    tick must keep the router on D2's frozen split, never fall back to D1's
+    just because D2 left ACTIVE_STATUSES.
+    """
+    router = FakeRouterGateway(model_name="inconclusive-model")
+    d1, _ = run(
+        service.create_deployment(
+            db_session,
+            router,
+            model_name="inconclusive-model",
+            stable_version="v1",
+            canary_version="v2-good",
+            canary_weight=0.1,
+            idempotency_key=None,
+        )
+    )
+    run(service.promote_deployment(db_session, router, d1, triggered_by="manual"))
+    assert router.observed_targets == [{"version": "v2-good", "weight": 1.0}]
+
+    d2, _ = run(
+        service.create_deployment(
+            db_session,
+            router,
+            model_name="inconclusive-model",
+            stable_version="v1",
+            canary_version="v2-good",
+            canary_weight=0.25,
+            idempotency_key=None,
+        )
+    )
+    service.record_inconclusive(db_session, d2, max_retries=0)
+    db_session.refresh(d2)
+    assert d2.status == DeploymentStatus.INCONCLUSIVE
+    assert d2.traffic_allocation is not None
+    assert d2.traffic_allocation.targets == [
+        {"version": "v1", "weight": 0.75},
+        {"version": "v2-good", "weight": 0.25},
+    ]
+
+    # Simulate the router losing D2's config (e.g. a restart) without
+    # touching the DB - the desired state (D2's frozen split) is unchanged.
+    router.desync(deployment_id=None, revision=0)
+
+    result = run(reconcile_router_state(db_session, router))
+
+    assert result.reconciled is True
+    assert result.deployment_id == d2.id
+    assert router.observed_deployment_id == d2.id
+    assert router.observed_targets == [
+        {"version": "v1", "weight": 0.75},
+        {"version": "v2-good", "weight": 0.25},
+    ]
+
+
+def test_reconcile_handles_router_unreachable_when_authoritative_deployment_is_terminal(
+    db_session: Session,
+) -> None:
+    """The router-unreachable branch (GET itself fails) must mark reachability
+    on whatever deployment is currently authoritative - including a terminal
+    PROMOTED one - not just ACTIVE_STATUSES ones, and only once per outage."""
+    healthy = FakeRouterGateway(model_name="terminal-outage-model")
+    deployment, _ = run(
+        service.create_deployment(
+            db_session,
+            healthy,
+            model_name="terminal-outage-model",
+            stable_version="v1",
+            canary_version="v2-good",
+            canary_weight=0.1,
+            idempotency_key=None,
+        )
+    )
+    run(service.promote_deployment(db_session, healthy, deployment, triggered_by="manual"))
+    db_session.refresh(deployment)
+    assert deployment.status == DeploymentStatus.PROMOTED
+
+    failing = FakeRouterGateway(should_fail=True)
+    for _ in range(3):
+        result = run(reconcile_router_state(db_session, failing))
+        assert result.reason == "router unreachable"
+
+    db_session.refresh(deployment)
+    unreachable_events = [e for e in deployment.events if e.event_type == "router_unreachable"]
+    assert len(unreachable_events) == 1
