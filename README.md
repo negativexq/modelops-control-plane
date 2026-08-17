@@ -40,7 +40,7 @@ to actually run at scale.
 - [Known limitations](#known-limitations)
 - [Production evolution](#production-evolution)
 - [Troubleshooting](#troubleshooting)
-
+ 
 ## Architecture
 
 | Layer | Tech |
