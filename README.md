@@ -5,7 +5,7 @@
 A control plane that decides whether a new model version earns production
 traffic - and keeps that decision honest by continuously reconciling it against
 what the router is actually doing. Not a deployment tool; a policy-driven
-control loop.
+control loop. 
 
 What it actually does:
 
