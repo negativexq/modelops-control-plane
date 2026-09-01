@@ -34,7 +34,7 @@ to actually run at scale.
 - [Screenshots](#screenshots)
 - [Demo walkthrough](#demo-walkthrough)
 - [Project layout](#project-layout)
-- [Components](#components)
+- [Capabilities](#capabilities)
 - [Development](#development)
 - [Resource footprint](#resource-footprint)
 - [Known limitations](#known-limitations)
@@ -229,14 +229,14 @@ docs/
   DESIGN_NOTES.md      the "why" behind each design decision
 ```
 
-## Components
+## Capabilities
 
-Each ran as its own sprint; the tag is there for history, not because the numbering
-matters day to day. Every section links to its deep dive in
-[docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) for the reasoning behind the choices
-below - this file only covers what exists and how to use it.
+The platform is organized around the decisions it makes at runtime. The detailed
+design rationale for these boundaries lives in
+[docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md); this section summarizes the product
+surface and the engineering signals it demonstrates.
 
-### Model registry (Sprint 1)
+### Model lifecycle
 
 ```bash
 make prepare-models   # generate-data + train-models + evaluate-models
@@ -245,7 +245,7 @@ make prepare-models   # generate-data + train-models + evaluate-models
 - `GET /api/models`, `GET /api/models/{name}/versions`,
   `GET /api/models/{name}/versions/{version}[/evaluation]`
 
-### Model serving (Sprint 2)
+### Model serving
 
 One process per model version (`app.serving.main:app`), selected via
 `MODEL_NAME`/`MODEL_VERSION`.
@@ -255,7 +255,7 @@ One process per model version (`app.serving.main:app`), selected via
   (`403` in production); this is what the benchmark suite uses to simulate a
   regression without restarting a container.
 
-### Traffic router (Sprint 3)
+### Progressive delivery and routing
 
 ```bash
 curl -X POST localhost:8080/router/predict -d '{...}' -H 'content-type: application/json'
@@ -268,7 +268,7 @@ curl -X POST localhost:8080/router/predict -d '{...}' -H 'content-type: applicat
 - A target that's unhealthy or unreachable returns **503**, never a silent
   fallback to another target ([why](docs/DESIGN_NOTES.md#traffic-router)).
 
-### Control plane & deployment lifecycle (Sprint 4)
+### Deployment lifecycle
 
 ```bash
 curl -X POST localhost:8000/api/deployments -H 'Idempotency-Key: <uuid>' -d '{...}'
@@ -287,7 +287,7 @@ curl -X POST localhost:8000/api/deployments -H 'Idempotency-Key: <uuid>' -d '{..
 
 - Every transition is recorded as a `DeploymentEvent` (the audit trail).
 
-### Metrics (Sprint 5)
+### Reliability and quality metrics
 
 - `POST /api/deployments/{id}/metrics` — the router calls this after every forward.
 - `GET /api/deployments/{id}/metrics?window_seconds=300` — p50/p95/p99 latency,
@@ -302,7 +302,7 @@ curl -X POST localhost:8000/api/deployments -H 'Idempotency-Key: <uuid>' -d '{..
   ingestion](docs/DESIGN_NOTES.md#label-ingestion) and [Known
   limitations](#known-limitations).
 
-### Dashboard (Sprint 6)
+### Operator dashboard
 
 Next.js Client Components calling the control plane directly
 (`NEXT_PUBLIC_API_URL`, CORS via `MODELOPS_CORS_ALLOW_ORIGINS`).
@@ -310,7 +310,7 @@ Next.js Client Components calling the control plane directly
 - **Overview** (`/`), **Models** (`/models`), **Deployments** (`/deployments`,
   `/deployments/[id]` with Canary Analysis charts), **Benchmarks** (`/benchmarks`).
 
-### Policy engine (Sprint 7)
+### Evidence-based policy engine
 
 ```bash
 curl -X POST localhost:8000/api/deployments/<id>/evaluate
@@ -327,7 +327,7 @@ curl localhost:8000/api/deployments/<id>/policy-evaluations
   ([why](docs/DESIGN_NOTES.md#policy-engine)).
 - Records what the policies found - a human still calls `/promote`/`/rollback`.
 
-### Automated promotion & rollback (Sprint 8)
+### Autonomous promotion and rollback
 
 ```bash
 docker compose up backend router model-serving-v1 model-serving-v2-good worker
@@ -351,7 +351,7 @@ through the control plane's own REST API - the same endpoints a human would call
   why this exists - it closed a real, reproducible CI race, not a
   hypothetical one.
 
-### Benchmark suite (Sprint 9)
+### Repeatable benchmark suite
 
 ```bash
 make benchmark-baseline        # or: benchmark-latency-failure, benchmark-error-failure,
@@ -381,7 +381,7 @@ from `/benchmarks` (`POST /api/benchmarks/run`, polls `GET
 returns **409** while another run is active, and the UI disables every scenario's
 button proactively rather than just reacting to that.
 
-### Incident timeline & explainable policy UI (Sprint 10)
+### Explainable incident timeline
 
 Every deployment's `DeploymentEvent` (state transitions, worker actions) and
 `PolicyEvaluation` (per-check results) rows, merged into one chronological story.
@@ -406,16 +406,14 @@ curl localhost:8000/api/deployments/<id>/timeline
   Promote/Rollback buttons show a warning while the deployment is in a status the
   automated worker also acts on.
 
-### Stabilization & documentation (Sprint 11)
+### Engineering quality and feedback
 
-No new API surface - this sprint made the platform demoable and trustworthy
-instead of adding features: the CI `integration` job (see
-[Development](#development)), this README pass (architecture diagram, demo
-walkthrough, real measured [resource footprint](#resource-footprint), and the
-[troubleshooting](#troubleshooting) log above), and
-[docs/DESIGN_NOTES.md's Future vision](docs/DESIGN_NOTES.md#future-vision).
+The project is intentionally demoable end to end: the architecture, API behavior,
+resource footprint, troubleshooting notes, and real-stack CI are documented here,
+while the trade-offs are captured in [the design notes](docs/DESIGN_NOTES.md).
 
-### Delayed ground-truth label ingestion (Sprint 12)
+Delayed ground-truth labels arrive through the same API a production feedback
+source would use:
 
 ```bash
 curl -X POST localhost:8000/api/labels \
@@ -433,7 +431,7 @@ resolve to `PASS` or `FAIL`, not just `INCONCLUSIVE` forever.
   ground-truth ingestion surface. Idempotent (`200` on a repeated identical
   label), conflict-detecting (`409` + an audit event on a genuinely different
   label for the same `prediction_id`), and tolerant of arriving before its
-  metric (`202`, parked as a `PendingLabel` and matched at metric-write time) -
+  metric (`202`, stored durably and joined when the metric arrives) -
   see [Label ingestion](docs/DESIGN_NOTES.md#label-ingestion).
 - The policy engine now evaluates quality checks (`minimum_labeled_samples`,
   `minimum_label_coverage`, `minimum_positive_labels`, `minimum_recall`)
@@ -442,8 +440,7 @@ resolve to `PASS` or `FAIL`, not just `INCONCLUSIVE` forever.
   `minimum_positive_labels` exists because `minimum_labeled_samples`/
   `minimum_label_coverage` alone aren't enough: recall's real denominator is
   *positive-class* examples, and a low-positive-rate dataset can clear both of
-  those checks while the window still holds only 1-3 positives - found and
-  closed during this sprint's own live verification, see [Known
+  those checks while the window still holds only 1-3 positives - see [Known
   limitations](#known-limitations).
 - The benchmark suite's Locust load definition now generates real labels
   itself (sampled from the same test dataset the models were evaluated on) and
@@ -456,24 +453,21 @@ resolve to `PASS` or `FAIL`, not just `INCONCLUSIVE` forever.
   [Known limitations](#known-limitations) for why the stratification is
   necessary and what it does and doesn't claim.
 
-### Desired/observed reconciliation (Sprint 13)
+### Desired state, observed state, and reconciliation
 
 ```bash
 curl -X POST localhost:8000/api/router/reconcile   # what the worker calls every poll cycle
 curl localhost:8000/api/router/observed            # read-only, never pushes anything
 ```
 
-The platform's last remaining structural honesty gap: promote/rollback used to
-push the router's new config *before* committing the decision to the DB, so a
-losing side of a concurrent write could leave the router serving traffic the
-DB no longer agreed to - and a router restart lost its config with nothing to
-notice or fix it. See [Desired/observed
-reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for the
-full story, including how this was actually found (three separate,
-unrelated-looking CI runs failing the identical way).
+The database commits the desired allocation first; the router then receives a
+best-effort update. A periodic reconcile repairs drift after a failed push or
+router restart, while stale routing generations are rejected. See
+[Desired/observed reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation)
+for the full boundary and its trade-offs.
 
-- `TrafficAllocation.revision` (monotonic; model-scoped as of Sprint 14 - see
-  below) plus `POST /router/config` on the router itself now rejecting an
+- `TrafficAllocation.revision` is monotonic and model-scoped; `POST /router/config`
+  on the router rejects an
   equal-or-stale revision with `409` - not silently accepting it.
 - Desired state (the DB) commits *first*; the router push happens after and is
   now best-effort - neither a stale-revision `409` nor a genuinely unreachable
@@ -494,10 +488,9 @@ unrelated-looking CI runs failing the identical way).
   the worker's own reconcile tick - not a human, not a replay - to catch it
   back up.
 
-### Authoritative routing state & durable ground-truth labels (Sprint 14)
+### Correctness guarantees
 
-A closing correctness pass, driven by a real review of Sprint 13's own work.
-Two independent fixes:
+Two details keep the control loop honest across restarts and delayed data:
 
 ```bash
 curl localhost:8000/api/router-config/fraud-model   # now finds a PROMOTED/
@@ -506,12 +499,9 @@ curl localhost:8000/api/router-config/fraud-model   # now finds a PROMOTED/
 ```
 
 - **Terminal-state reconciliation.** The reconciler and the router's startup
-  sync only ever compared against `get_active_deployment`
-  (`CANARY_RUNNING`/`EVALUATING`) - which had nothing left to find the moment
-  a rollout actually finished. A router push failing right after a
-  promote/rollback commit (or a router restart afterward) used to leave that
-  drift permanent instead of closing on the next tick, silently contradicting
-  this README's own "even after the router restarts" claim.
+  sync use the authoritative final allocation for `PROMOTED` and `ROLLED_BACK`
+  deployments, so a restart cannot silently restore a bootstrap split after a
+  rollout has completed.
   `service.get_authoritative_allocation` closes the gap: a `PROMOTED`/
   `ROLLED_BACK` deployment's final `TrafficAllocation` stays authoritative for
   its model - deliberately excluding `FAILED`, which never reached a
@@ -519,29 +509,13 @@ curl localhost:8000/api/router-config/fraud-model   # now finds a PROMOTED/
   reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for why
   it's a separate function from `get_active_deployment` rather than a widened
   version of it.
-- **Model-scoped routing generation.** `TrafficAllocation.revision` used to
-  reset to 1 for every new deployment, so the router's staleness check only
-  ever compared revisions for the *same* `deployment_id` - a delayed push from
-  an old, already-superseded deployment could still land and silently
-  resurrect stale traffic, since a different `deployment_id` always won
-  outright. Revision is now a monotonic counter scoped to the *model*
-  (`RoutingGeneration`), and the router rejects an equal-or-stale push for the
-  same model regardless of `deployment_id`.
-- **Durable ground-truth labels.** Label ingestion and metric ingestion used
-  to be two independent check-then-act writers (a label parked in
-  `PendingLabel` until a matching `PredictionMetric` showed up) - a real,
-  reproducible race could interleave the two so each side's "does the other
-  exist yet" check missed the other's uncommitted row, leaving a label
-  permanently unlinked from its metric. `GroundTruthLabel` is now written
-  unconditionally on ingestion, regardless of arrival order; quality
-  aggregation joins it against `PredictionMetric` at *read* time instead - see
-  [Desired/observed
-  reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for the
-  full race and why a read-time join removes it rather than out-timing it.
-- CI scenario 6 is the terminal-state fix's own proof: manually promotes a
-  deployment, restarts the router, and confirms startup sync alone (no
-  reconcile tick needed - this one is deterministic, not best-effort) restores
-  the promoted split instead of the router's bootstrap default.
+- **Model-scoped routing generation.** `RoutingGeneration` prevents a delayed
+  update from an older deployment from resurrecting stale traffic for the same
+  model, even when the deployment IDs differ.
+- **Durable ground-truth labels.** `GroundTruthLabel` is written on ingestion
+  regardless of metric arrival order; quality aggregation joins it against
+  `PredictionMetric` at read time. Delayed labels are therefore durable without
+  relying on a timing-sensitive write-time handoff.
 
 ## Development
 
@@ -642,8 +616,8 @@ though - this is not a real production feedback loop (see the
   a real measurement, not noise - at the dataset's natural ~2% positive rate, a
   short CI window typically contains only 1-3 positives, and a genuinely
   healthy model can appear to fail recall purely from that sample-size noise
-  (confirmed live during this sprint's own verification, before the
-  `minimum_positive_labels` gate and the stratified stream were added). After
+  (confirmed during live verification before the `minimum_positive_labels` gate
+  and the stratified stream were added). After
   the fix, these two scenarios were verified across 5 consecutive
   scenario-3/scenario-4 pairs (10 outcomes total), all correct - see [Policy
   engine](docs/DESIGN_NOTES.md#policy-engine) for why stratification is sound
@@ -672,8 +646,7 @@ though - this is not a real production feedback loop (see the
   their own (possibly different) observed state to reconcile independently.
   This matches the rest of the project's "one router process" assumption (see
   [Benchmark suite](docs/DESIGN_NOTES.md#benchmark-suite)'s note on why
-  benchmarks can't run concurrently), not a new limitation this sprint
-  introduced.
+  benchmarks can't run concurrently), not a recent regression.
 - A sustained router outage is surfaced (a one-time `router_unreachable`/
   `router_recovered` timeline event, and a `reachable` flag the dashboard
   turns into a visible warning), not silently swallowed - see [Desired/observed

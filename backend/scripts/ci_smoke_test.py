@@ -53,8 +53,8 @@ deliberately use "fraud-model" instead - see scenario 5's own docstring for why.
    see the scenario function's own docstring for why that's the realistic
    case, and why `revision` (not `deployment_id`) is what actually proves the
    reconciler, specifically, did the healing.
-6. `run_promote_then_router_restart_scenario` - Sprint 14's terminal-state
-   reconciliation fix, proven for real: manually promotes the deployment
+6. `run_promote_then_router_restart_scenario` - terminal-state reconciliation,
+   proven for real: manually promotes the deployment
    scenario 5 leaves running, `docker compose restart`s the router *again*,
    and confirms the router's own startup sync (not a reconcile tick this
    time - see the scenario function's docstring for why this one is
@@ -78,7 +78,7 @@ at the dataset's natural, unstratified rate.
 
 Scenarios 2-4 only finish in reasonable CI time because the worker's poll
 interval, and scenarios 3/4's label_maturity_seconds/evaluation_window_seconds,
-are turned way down for this job specifically - see
+are tuned for this job specifically - see
 WORKER_POLL_INTERVAL_SECONDS in .github/workflows/ci.yml and docker-compose.yml
 (defaults to 15s for real/local use, unaffected unless that env var is set).
 """
@@ -106,6 +106,12 @@ LATENCY_FAULT_URL = os.environ.get("CI_LATENCY_FAULT_URL", "http://localhost:800
 # see PolicyConfig.label_maturity_seconds in app/policy/config.py.
 LABEL_DELAY_SECONDS = float(os.environ.get("CI_LABEL_DELAY_SECONDS", "2"))
 LABEL_MATURITY_SECONDS = int(os.environ.get("CI_LABEL_MATURITY_SECONDS", "5"))
+# The quality scenarios keep their normal labeled-data gates. Their worker can
+# evaluate at most once per 30s window, so allow one final post-ramp evaluation
+# after the 240s boundary that previously caused a near-timeout failure.
+QUALITY_SCENARIO_TIMEOUT_SECONDS = int(
+    os.environ.get("CI_QUALITY_SCENARIO_TIMEOUT_SECONDS", "360")
+)
 # Overrides the dataset's natural ~2% positive rate for scenarios 3/4 - see
 # _BackgroundTraffic's docstring and app/policy/engine.py's
 # minimum_positive_labels gate. Deliberately generous margin, not a bare
@@ -573,7 +579,7 @@ def run_automatic_quality_promote_scenario() -> None:
             "minimum_label_coverage": 0.3,
             # See QUALITY_SCENARIO_POSITIVE_RATIO above - at 0.5 positive_ratio,
             # ~30s window, and 10-30% canary weight, the quality window comfortably
-            # clears this with a wide margin (see docstring on _BackgroundTraffic).
+            # clears these gates with a wide margin (see docstring on _BackgroundTraffic).
             "minimum_positive_labels": 20,
             # Generous thresholds: this is a real (non-injected) v2-good instance
             # under CI-runner load, and the point of this scenario is proving the
@@ -605,7 +611,7 @@ def run_automatic_quality_promote_scenario() -> None:
             final = _wait_for_deployment_status(
                 deployment_id,
                 target_statuses={"PROMOTED", "ROLLED_BACK", "INCONCLUSIVE", "FAILED"},
-                timeout_seconds=240,
+                timeout_seconds=QUALITY_SCENARIO_TIMEOUT_SECONDS,
             )
     finally:
         label_feeder.stop()
@@ -671,7 +677,7 @@ def run_automatic_quality_rollback_scenario() -> None:
             "minimum_label_coverage": 0.3,
             # See QUALITY_SCENARIO_POSITIVE_RATIO above - at 0.5 positive_ratio,
             # ~30s window, and 10-30% canary weight, the quality window comfortably
-            # clears this with a wide margin (see docstring on _BackgroundTraffic).
+            # clears these gates with a wide margin (see docstring on _BackgroundTraffic).
             "minimum_positive_labels": 20,
             "latency": {"p95_max_increase_percent": 2000.0},
             "reliability": {"max_error_rate_percent": 20.0},
@@ -698,7 +704,7 @@ def run_automatic_quality_rollback_scenario() -> None:
             final = _wait_for_deployment_status(
                 deployment_id,
                 target_statuses={"PROMOTED", "ROLLED_BACK", "INCONCLUSIVE", "FAILED"},
-                timeout_seconds=240,
+                timeout_seconds=QUALITY_SCENARIO_TIMEOUT_SECONDS,
             )
     finally:
         label_feeder.stop()
@@ -855,8 +861,8 @@ def run_promote_then_router_restart_scenario() -> None:
     completion *before* /router/health ever starts responding "ok" - so by
     the time `_wait_for` returns, `GET /router/config` already reflects
     whatever service.get_authoritative_allocation found for "fraud-model" at
-    that moment. Before Sprint 14, that lookup only ever considered
-    CANARY_RUNNING/EVALUATING deployments, so a restart after a successful
+    that moment. The lookup must include the authoritative terminal allocation,
+    not only CANARY_RUNNING/EVALUATING deployments, so a restart after a successful
     promote found nothing and fell back to the router's own bootstrap
     default (90/10 v1/v2-good) - silently serving the *wrong* traffic split
     to a model that had already been promoted to 100%. This scenario's whole

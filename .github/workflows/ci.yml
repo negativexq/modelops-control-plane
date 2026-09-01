@@ -59,6 +59,10 @@ jobs:
       # job needlessly slow at that cadence. Turned down for this job only; local
       # `make dev` is unaffected since this env var isn't set there.
       WORKER_POLL_INTERVAL_SECONDS: "2"
+      # A quality evaluation can be due every 30s. Give the smoke test enough
+      # headroom for the final post-ramp evaluation without weakening its
+      # labeled-data gates.
+      CI_QUALITY_SCENARIO_TIMEOUT_SECONDS: "360"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
