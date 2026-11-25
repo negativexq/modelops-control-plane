@@ -1,189 +1,191 @@
 "use client";
 
-import { useParams } from "next/navigation";
 import Link from "next/link";
-import { getDeployment, getDeploymentTimeline, getObservedRouterState } from "@/lib/api";
-import { useAsync } from "@/lib/useAsync";
-import { AsyncBoundary } from "@/components/AsyncBoundary";
+import { useParams } from "next/navigation";
+import { ChevronLeft, CircleAlert, CircleCheck, Loader2, Unplug } from "lucide-react";
+import { isLive, useDeployment, useRouterObserved, useTimeline } from "@/lib/queries";
+import { formatDate } from "@/lib/format";
+import type { DeploymentOut } from "@/lib/types";
+import { QueryState } from "@/components/QueryState";
 import { AutomationPausedBadge } from "@/components/AutomationPausedBadge";
 import { BenchmarkBadge } from "@/components/BenchmarkBadge";
-import { Card } from "@/components/Card";
 import { CanaryAnalysis } from "@/components/CanaryAnalysis";
 import { DeploymentActions } from "@/components/DeploymentActions";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Timeline } from "@/components/Timeline";
 import { TrafficBar } from "@/components/TrafficBar";
-import { formatDate } from "@/lib/format";
-import type { DeploymentOut } from "@/lib/types";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 
 const ROUTER_MANAGED_STATUSES = new Set(["CANARY_RUNNING", "EVALUATING"]);
 
-/** Desired (DB) vs. observed (router) revision for this deployment's traffic
- * split - see backend/docs/DESIGN_NOTES.md#desired-observed-reconciliation.
- * Only meaningful for the deployment the router is *currently* supposed to be
- * serving - a terminal/historical deployment's revision is frozen, and the
- * router only ever reports state for whichever deployment is live right now,
- * so comparing an old deployment against it would just be a false alarm, not
- * real drift. */
+/** Desired (DB) vs observed (router) revision for this deployment's traffic split -
+ * see docs/DESIGN_NOTES.md#desired-observed-reconciliation. Only meaningful for the
+ * deployment the router is *currently* supposed to serve: a terminal deployment's
+ * revision is frozen, and the router only reports the live one, so comparing an
+ * old deployment against it would be a false alarm, not real drift. */
 function RouterReconciliationStatus({ deployment }: { deployment: DeploymentOut }) {
-  const { data: observed, loading } = useAsync(() => getObservedRouterState(), [deployment.id]);
+  const managed = ROUTER_MANAGED_STATUSES.has(deployment.status);
+  const { data: observed } = useRouterObserved(managed);
 
   if (!deployment.traffic_allocation) return null;
-  const desiredRevision = deployment.traffic_allocation.revision;
+  const desired = deployment.traffic_allocation.revision;
+  const base = "flex items-center gap-1.5 text-xs";
 
-  if (!ROUTER_MANAGED_STATUSES.has(deployment.status)) {
+  if (!managed) {
     return (
-      <p className="text-xs text-zinc-500 dark:text-zinc-400">
-        Desired revision {desiredRevision} (final - not currently router-managed).
+      <p className={`${base} text-muted-foreground`}>
+        Desired revision <span className="font-mono">{desired}</span> · final, not currently router-managed
       </p>
     );
   }
-
-  if (loading || !observed) {
-    return <p className="text-xs text-zinc-500 dark:text-zinc-400">Checking router state…</p>;
+  if (!observed) {
+    return (
+      <p className={`${base} text-muted-foreground`}>
+        <Loader2 className="size-3.5 animate-spin" /> Checking router state…
+      </p>
+    );
   }
-
   if (!observed.reachable) {
     return (
-      <p className="text-xs font-medium text-red-700 dark:text-red-400">
-        Desired revision {desiredRevision} — router unreachable, actual traffic state unknown.
+      <p className={`${base} font-medium text-danger`}>
+        <Unplug className="size-3.5" /> Desired revision {desired} — router unreachable, actual traffic
+        state unknown.
       </p>
     );
   }
-
   if (observed.deployment_id !== deployment.id) {
     return (
-      <p className="text-xs text-zinc-500 dark:text-zinc-400">
-        Desired revision {desiredRevision} (router not yet synced to this deployment).
+      <p className={`${base} text-muted-foreground`}>
+        Desired revision {desired} · router not yet synced to this deployment
       </p>
     );
   }
-
-  const inSync = observed.revision === desiredRevision;
+  const inSync = observed.revision === desired;
   return (
-    <p
-      className={`text-xs ${
-        inSync
-          ? "text-zinc-500 dark:text-zinc-400"
-          : "font-medium text-amber-700 dark:text-amber-400"
-      }`}
-    >
-      Desired revision {desiredRevision} · Observed revision {observed.revision}
-      {inSync ? "" : " — router has not caught up yet (will self-correct on the next reconcile tick)"}
+    <p className={`${base} ${inSync ? "text-muted-foreground" : "font-medium text-warning"}`}>
+      {inSync ? <CircleCheck className="size-3.5 text-success" /> : <CircleAlert className="size-3.5" />}
+      Desired <span className="font-mono">r{desired}</span> · Observed{" "}
+      <span className="font-mono">r{observed.revision}</span>
+      {inSync ? " · in sync" : " — router behind, self-corrects on next reconcile tick"}
     </p>
   );
 }
 
-function DeploymentDetailContent({
-  deployment,
-  onChanged,
-}: {
-  deployment: DeploymentOut;
-  onChanged: () => void;
-}) {
-  const { data: timeline, error: timelineError, loading: timelineLoading, refetch: refetchTimeline } =
-    useAsync(() => getDeploymentTimeline(deployment.id), [deployment.id]);
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-1">
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className="text-sm">{children}</dd>
+    </div>
+  );
+}
+
+function DeploymentDetail({ deployment }: { deployment: DeploymentOut }) {
+  const live = isLive(deployment.status);
+  const timeline = useTimeline(deployment.id, live);
 
   return (
     <div className="space-y-6">
-      <Card>
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <dl className="grid grid-cols-2 gap-x-8 gap-y-3 text-sm sm:grid-cols-4">
-            <div>
-              <dt className="text-zinc-500 dark:text-zinc-400">Model</dt>
-              <dd className="flex items-center gap-2 font-medium">
-                {deployment.model_name}
-                {deployment.is_benchmark ? <BenchmarkBadge /> : null}
-                {deployment.automation_paused ? <AutomationPausedBadge /> : null}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-zinc-500 dark:text-zinc-400">Stable</dt>
-              <dd className="font-medium">{deployment.stable_version}</dd>
-            </div>
-            <div>
-              <dt className="text-zinc-500 dark:text-zinc-400">Canary</dt>
-              <dd className="font-medium">{deployment.canary_version}</dd>
-            </div>
-            <div>
-              <dt className="text-zinc-500 dark:text-zinc-400">Status</dt>
-              <dd>
-                <StatusBadge status={deployment.status} />
-              </dd>
-            </div>
-            <div>
-              <dt className="text-zinc-500 dark:text-zinc-400">Created</dt>
-              <dd>{formatDate(deployment.created_at)}</dd>
-            </div>
-            <div>
-              <dt className="text-zinc-500 dark:text-zinc-400">Started</dt>
-              <dd>{formatDate(deployment.started_at)}</dd>
-            </div>
-            <div>
-              <dt className="text-zinc-500 dark:text-zinc-400">Completed</dt>
-              <dd>{formatDate(deployment.completed_at)}</dd>
-            </div>
-          </dl>
-          <DeploymentActions deployment={deployment} onChanged={onChanged} />
-        </div>
-      </Card>
-
-      <Card title="Traffic distribution">
-        {deployment.traffic_allocation ? (
-          <div className="space-y-2">
-            <TrafficBar targets={deployment.traffic_allocation.targets} />
-            <RouterReconciliationStatus deployment={deployment} />
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="font-mono text-lg font-semibold tracking-tight">{deployment.model_name}</h1>
+            <StatusBadge status={deployment.status} />
+            {deployment.is_benchmark ? <BenchmarkBadge /> : null}
+            {deployment.automation_paused ? <AutomationPausedBadge /> : null}
           </div>
-        ) : (
-          <p className="text-sm text-zinc-500 dark:text-zinc-400">
-            No traffic allocation recorded.
+          <p className="font-mono text-sm text-muted-foreground">
+            {deployment.stable_version} <span className="text-muted-foreground/50">→</span>{" "}
+            <span className="text-canary">{deployment.canary_version}</span>
           </p>
-        )}
+        </div>
+        <DeploymentActions deployment={deployment} />
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-3">
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>Traffic split</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {deployment.traffic_allocation ? (
+              <>
+                <TrafficBar
+                  stableVersion={deployment.stable_version}
+                  targets={deployment.traffic_allocation.targets}
+                />
+                <RouterReconciliationStatus deployment={deployment} />
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">No traffic allocation recorded.</p>
+            )}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent>
+            <dl className="grid grid-cols-2 gap-4">
+              <Field label="Created">
+                <span className="font-mono text-xs tabular">{formatDate(deployment.created_at)}</span>
+              </Field>
+              <Field label="Started">
+                <span className="font-mono text-xs tabular">{formatDate(deployment.started_at)}</span>
+              </Field>
+              <Field label="Completed">
+                <span className="font-mono text-xs tabular">{formatDate(deployment.completed_at)}</span>
+              </Field>
+              <Field label="ID">
+                <span className="block truncate font-mono text-xs" title={deployment.id}>
+                  {deployment.id.slice(0, 8)}
+                </span>
+              </Field>
+            </dl>
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card>
+        <CardContent>
+          <CanaryAnalysis deploymentId={deployment.id} live={live} />
+        </CardContent>
       </Card>
 
       <Card>
-        <CanaryAnalysis deploymentId={deployment.id} />
-      </Card>
-
-      <Card title="Timeline">
-        <AsyncBoundary
-          data={timeline}
-          error={timelineError}
-          loading={timelineLoading}
-          onRetry={refetchTimeline}
-        >
-          {(items) => <Timeline items={items} />}
-        </AsyncBoundary>
+        <CardHeader>
+          <CardTitle>Timeline</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <QueryState query={timeline}>{(items) => <Timeline items={items} />}</QueryState>
+        </CardContent>
       </Card>
     </div>
   );
 }
 
 export default function DeploymentDetailPage() {
-  const params = useParams<{ id: string }>();
-  const deploymentId = params.id;
-  const { data, error, loading, refetch } = useAsync(
-    () => getDeployment(deploymentId),
-    [deploymentId],
-  );
+  const { id } = useParams<{ id: string }>();
+  const query = useDeployment(id);
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <Link
-          href="/deployments"
-          className="text-sm text-zinc-500 hover:underline dark:text-zinc-400"
-        >
-          ← Deployments
-        </Link>
-      </div>
-      <h1 className="text-xl font-semibold tracking-tight">Deployment detail</h1>
-
-      <AsyncBoundary data={data} error={error} loading={loading} onRetry={refetch}>
-        {(deployment) => (
-          <DeploymentDetailContent deployment={deployment} onChanged={refetch} />
-        )}
-      </AsyncBoundary>
+    <div className="space-y-4">
+      <Link
+        href="/deployments"
+        className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+      >
+        <ChevronLeft className="size-4" /> Deployments
+      </Link>
+      <QueryState
+        query={query}
+        skeleton={
+          <div className="space-y-4">
+            <Skeleton className="h-10 w-72" />
+            <Skeleton className="h-32 w-full" />
+            <Skeleton className="h-72 w-full" />
+          </div>
+        }
+      >
+        {(deployment) => <DeploymentDetail deployment={deployment} />}
+      </QueryState>
     </div>
   );
 }

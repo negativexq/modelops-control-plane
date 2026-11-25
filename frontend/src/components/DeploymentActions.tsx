@@ -1,178 +1,193 @@
 "use client";
 
-import { pauseAutomation, promoteDeployment, resumeAutomation, rollbackDeployment } from "@/lib/api";
-import { useMutation } from "@/lib/useMutation";
+import { useState } from "react";
+import { ArrowUpRight, Loader2, Pause, Play, TriangleAlert, Undo2 } from "lucide-react";
+import { useDeploymentAction } from "@/lib/queries";
 import type { DeploymentOut, DeploymentStatus } from "@/lib/types";
+import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 const ACTIONABLE_STATUSES: DeploymentStatus[] = ["CANARY_RUNNING", "EVALUATING", "INCONCLUSIVE"];
 
 // Mirrors the worker's own ACTIVE_STATUSES (app/worker/loop.py) - the automated
 // worker sweeps and acts on every deployment in one of these statuses on every
-// poll cycle, unconditionally (unless automation_paused - see below).
-// INCONCLUSIVE is deliberately excluded: once a deployment freezes there, the
-// worker has already stopped touching it (see
-// docs/DESIGN_NOTES.md#automated-promotion--rollback), so a manual action there
-// can't race it.
+// poll cycle, unconditionally (unless automation_paused). INCONCLUSIVE is
+// deliberately excluded: once a deployment freezes there, the worker has already
+// stopped touching it (docs/DESIGN_NOTES.md#automated-promotion--rollback), so a
+// manual action there can't race it.
 const WORKER_MANAGED_STATUSES: DeploymentStatus[] = ["CANARY_RUNNING", "EVALUATING"];
 
 // Mirrors backend/app/control_plane/models.py's TERMINAL_STATUSES - pause/resume
 // are rejected (409) once a deployment is done, same guard the backend applies.
 const TERMINAL_STATUSES: DeploymentStatus[] = ["PROMOTED", "ROLLED_BACK", "FAILED"];
 
-interface DeploymentActionsProps {
-  deployment: DeploymentOut;
-  onChanged: () => void;
-  size?: "sm" | "md";
-}
+type Confirm = "promote" | "rollback" | null;
 
 /**
- * Promote/rollback buttons shared by the deployments list and detail pages. Always
- * calls the real API and then `onChanged()` (the caller's refetch) - never mutates
- * local state directly, so what's on screen always matches what the control plane
- * actually persisted.
+ * Promote / rollback / pause-resume, shared by the list and detail pages.
+ * Promote and rollback move 100% of live traffic, so both go through a confirm
+ * dialog that spells out exactly what will happen. Nothing is updated
+ * optimistically: the query cache is invalidated after the control plane answers.
  */
-export function DeploymentActions({ deployment, onChanged, size = "md" }: DeploymentActionsProps) {
-  const promote = useMutation(() => promoteDeployment(deployment.id), "Promoted to 100% canary.");
-  const rollback = useMutation(
-    () => rollbackDeployment(deployment.id),
-    "Rolled back to 100% stable.",
-  );
-  const pause = useMutation(() => pauseAutomation(deployment.id), "Automation paused.");
-  const resume = useMutation(() => resumeAutomation(deployment.id), "Automation resumed.");
+export function DeploymentActions({
+  deployment,
+  size = "md",
+}: {
+  deployment: DeploymentOut;
+  size?: "sm" | "md";
+}) {
+  const promote = useDeploymentAction("promote");
+  const rollback = useDeploymentAction("rollback");
+  const pause = useDeploymentAction("pause");
+  const resume = useDeploymentAction("resume");
+  const [confirm, setConfirm] = useState<Confirm>(null);
 
   const canAct = ACTIONABLE_STATUSES.includes(deployment.status);
   const canPauseOrResume = !TERMINAL_STATUSES.includes(deployment.status);
-  // Only actually racing the worker while it's both in a status the worker
-  // sweeps AND not on hold - a paused deployment in CANARY_RUNNING is not "worker
-  // managed" in the sense this warning means (the worker won't touch it).
+  // Only actually racing the worker while it's in a status the worker sweeps AND
+  // not on hold - a paused CANARY_RUNNING deployment is left alone by the worker.
   const workerManaged =
     WORKER_MANAGED_STATUSES.includes(deployment.status) && !deployment.automation_paused;
-  const busy = promote.submitting || rollback.submitting || pause.submitting || resume.submitting;
-  const padding = size === "sm" ? "px-2.5 py-1 text-xs" : "px-3 py-1.5 text-sm";
+  const busy = promote.isPending || rollback.isPending || pause.isPending || resume.isPending;
+  const buttonSize = size === "sm" ? "xs" : "sm";
 
-  async function handlePromote() {
-    const result = await promote.run();
-    if (result) onChanged();
-  }
-
-  async function handleRollback() {
-    const result = await rollback.run();
-    if (result) onChanged();
-  }
-
-  async function handlePause() {
-    const result = await pause.run();
-    if (result) onChanged();
-  }
-
-  async function handleResume() {
-    const result = await resume.run();
-    if (result) onChanged();
-  }
+  if (!canAct && !canPauseOrResume) return null;
 
   return (
-    <div className="flex flex-col items-end gap-1.5">
-      {workerManaged ? (
-        <p
-          className={`text-right text-amber-700 dark:text-amber-400 ${
-            size === "sm" ? "text-xs" : "max-w-xs text-xs"
-          }`}
-          title="The automated worker polls and may promote, roll back, or advance traffic on this deployment on its own. Pause automation to stop it from acting while you inspect manually."
-        >
-          {size === "sm"
-            ? "⚠ Automated"
-            : "⚠ Automated rollout in progress — manual action may conflict."}
-        </p>
+    <div className={cn("flex items-center gap-1.5", size === "md" && "flex-wrap justify-end")}>
+      {workerManaged && size === "md" ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="mr-1 inline-flex items-center gap-1 text-xs text-warning">
+              <TriangleAlert className="size-3.5" aria-hidden />
+              Automated rollout in progress
+            </span>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-xs">
+            The worker may promote, roll back or advance traffic on its own. Pause automation
+            before acting manually to avoid racing it.
+          </TooltipContent>
+        </Tooltip>
       ) : null}
+
       {canPauseOrResume ? (
-        <button
-          type="button"
-          onClick={deployment.automation_paused ? handleResume : handlePause}
-          disabled={busy}
-          title={
-            deployment.automation_paused
-              ? "Let the automated worker act on this deployment again"
-              : "Stop the automated worker from acting on this deployment"
-          }
-          className={`rounded-md border font-medium disabled:cursor-not-allowed disabled:opacity-40 ${padding} ${
-            deployment.automation_paused
-              ? "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
-              : "border-zinc-300 bg-white text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
-          }`}
-        >
-          {deployment.automation_paused
-            ? resume.submitting
-              ? "Resuming…"
-              : "Resume automation"
-            : pause.submitting
-              ? "Pausing…"
-              : "Pause automation"}
-        </button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="outline"
+              size={buttonSize}
+              disabled={busy}
+              onClick={() =>
+                deployment.automation_paused
+                  ? resume.mutate(deployment.id)
+                  : pause.mutate(deployment.id)
+              }
+              aria-label={deployment.automation_paused ? "Resume automation" : "Pause automation"}
+            >
+              {pause.isPending || resume.isPending ? (
+                <Loader2 className="animate-spin" />
+              ) : deployment.automation_paused ? (
+                <Play />
+              ) : (
+                <Pause />
+              )}
+              {size === "md" ? (deployment.automation_paused ? "Resume" : "Pause") : null}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>
+            {deployment.automation_paused
+              ? "Let the worker act on this deployment again"
+              : "Stop the worker from acting on this deployment"}
+          </TooltipContent>
+        </Tooltip>
       ) : null}
-      <div className="flex gap-2">
-        <button
-          type="button"
-          onClick={handlePromote}
-          disabled={!canAct || busy}
-          title={canAct ? "Promote canary to 100% traffic" : "Only available while running/evaluating"}
-          className={`rounded-md bg-emerald-600 font-medium text-white disabled:cursor-not-allowed disabled:opacity-40 ${padding}`}
-        >
-          {promote.submitting ? "Promoting…" : "Promote"}
-        </button>
-        <button
-          type="button"
-          onClick={handleRollback}
-          disabled={!canAct || busy}
-          title={canAct ? "Roll back all traffic to stable" : "Only available while running/evaluating"}
-          className={`rounded-md bg-red-600 font-medium text-white disabled:cursor-not-allowed disabled:opacity-40 ${padding}`}
-        >
-          {rollback.submitting ? "Rolling back…" : "Rollback"}
-        </button>
-      </div>
-      {promote.result ? (
-        <p
-          className={`text-xs ${
-            promote.result.kind === "success"
-              ? "text-emerald-700 dark:text-emerald-400"
-              : "text-red-600 dark:text-red-400"
-          }`}
-        >
-          {promote.result.message}
-        </p>
+
+      {canAct ? (
+        <>
+          <Button
+            size={buttonSize}
+            variant="outline"
+            disabled={busy}
+            onClick={() => setConfirm("rollback")}
+            className="text-danger hover:bg-danger/10 hover:text-danger"
+          >
+            {rollback.isPending ? <Loader2 className="animate-spin" /> : <Undo2 />}
+            Rollback
+          </Button>
+          <Button
+            size={buttonSize}
+            disabled={busy}
+            onClick={() => setConfirm("promote")}
+            className="bg-success text-background hover:bg-success/85"
+          >
+            {promote.isPending ? <Loader2 className="animate-spin" /> : <ArrowUpRight />}
+            Promote
+          </Button>
+        </>
       ) : null}
-      {rollback.result ? (
-        <p
-          className={`text-xs ${
-            rollback.result.kind === "success"
-              ? "text-emerald-700 dark:text-emerald-400"
-              : "text-red-600 dark:text-red-400"
-          }`}
-        >
-          {rollback.result.message}
-        </p>
-      ) : null}
-      {pause.result ? (
-        <p
-          className={`text-xs ${
-            pause.result.kind === "success"
-              ? "text-emerald-700 dark:text-emerald-400"
-              : "text-red-600 dark:text-red-400"
-          }`}
-        >
-          {pause.result.message}
-        </p>
-      ) : null}
-      {resume.result ? (
-        <p
-          className={`text-xs ${
-            resume.result.kind === "success"
-              ? "text-emerald-700 dark:text-emerald-400"
-              : "text-red-600 dark:text-red-400"
-          }`}
-        >
-          {resume.result.message}
-        </p>
-      ) : null}
+
+      <AlertDialog open={confirm !== null} onOpenChange={(open) => !open && setConfirm(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {confirm === "promote" ? "Promote canary to 100%?" : "Roll back to stable?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-2">
+                <p>
+                  {confirm === "promote" ? (
+                    <>
+                      <span className="font-mono text-foreground">{deployment.canary_version}</span>{" "}
+                      will serve all live traffic for{" "}
+                      <span className="font-mono text-foreground">{deployment.model_name}</span>.
+                    </>
+                  ) : (
+                    <>
+                      All live traffic for{" "}
+                      <span className="font-mono text-foreground">{deployment.model_name}</span>{" "}
+                      returns to{" "}
+                      <span className="font-mono text-foreground">{deployment.stable_version}</span>.
+                    </>
+                  )}{" "}
+                  This ends the rollout and can&apos;t be undone from here.
+                </p>
+                {workerManaged ? (
+                  <p className="text-warning">
+                    The worker is still managing this rollout and may act at the same moment.
+                  </p>
+                ) : null}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className={
+                confirm === "promote"
+                  ? "bg-success text-background hover:bg-success/85"
+                  : "bg-danger text-background hover:bg-danger/85"
+              }
+              onClick={() => {
+                if (confirm === "promote") promote.mutate(deployment.id);
+                if (confirm === "rollback") rollback.mutate(deployment.id);
+              }}
+            >
+              {confirm === "promote" ? "Promote" : "Roll back"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

@@ -1,11 +1,20 @@
 "use client";
 
 import { useState } from "react";
-import { createDeployment, getModelVersions } from "@/lib/api";
-import { useAsync } from "@/lib/useAsync";
-import { useMutation } from "@/lib/useMutation";
-import { ResultBanner } from "@/components/ResultBanner";
+import { Loader2, Rocket } from "lucide-react";
+import { useCreateDeployment, useModelVersions } from "@/lib/queries";
 import type { DeploymentOut } from "@/lib/types";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Slider } from "@/components/ui/slider";
+import { TrafficBar } from "@/components/TrafficBar";
 
 interface NewDeploymentFormProps {
   modelNames: string[];
@@ -14,138 +23,138 @@ interface NewDeploymentFormProps {
 
 export function NewDeploymentForm({ modelNames, onCreated }: NewDeploymentFormProps) {
   const [modelName, setModelName] = useState(modelNames[0] ?? "");
-  // `null` means "no explicit user choice yet - default to the first (stable) /
-  // second (canary) fetched version". Computed during render rather than synced via
-  // an effect, so changing models can't leave stale state from the previous model's
-  // version list hanging around.
+  // `null` = no explicit choice yet; default to the first (stable) / second
+  // (canary) fetched version. Computed during render rather than synced via an
+  // effect, so switching models can't leave the previous model's versions behind.
   const [stableOverride, setStableOverride] = useState<string | null>(null);
   const [canaryOverride, setCanaryOverride] = useState<string | null>(null);
   const [canaryWeightPercent, setCanaryWeightPercent] = useState(10);
 
-  const {
-    data: versions,
-    error: versionsError,
-    loading: versionsLoading,
-  } = useAsync(() => (modelName ? getModelVersions(modelName) : Promise.resolve([])), [modelName]);
+  const versionsQuery = useModelVersions(modelName);
+  const versions = versionsQuery.data;
+  const create = useCreateDeployment();
 
   const stableVersion = stableOverride ?? versions?.[0] ?? "";
   const canaryVersion = canaryOverride ?? versions?.[1] ?? versions?.[0] ?? "";
-
-  function handleModelChange(nextModelName: string) {
-    setModelName(nextModelName);
-    setStableOverride(null);
-    setCanaryOverride(null);
-  }
-
-  const mutation = useMutation(
-    () =>
-      createDeployment(
-        {
-          model_name: modelName,
-          stable_version: stableVersion,
-          canary_version: canaryVersion,
-          canary_weight: canaryWeightPercent / 100,
-        },
-        crypto.randomUUID(),
-      ),
-    "Deployment created.",
-  );
-
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    const deployment = await mutation.run();
-    if (deployment) onCreated(deployment);
-  }
+  const sameVersion = stableVersion !== "" && stableVersion === canaryVersion;
 
   const canSubmit =
     modelName.length > 0 &&
     stableVersion.length > 0 &&
     canaryVersion.length > 0 &&
-    stableVersion !== canaryVersion &&
-    !mutation.submitting;
+    !sameVersion &&
+    !create.isPending;
+
+  function handleSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    create.mutate(
+      {
+        model_name: modelName,
+        stable_version: stableVersion,
+        canary_version: canaryVersion,
+        canary_weight: canaryWeightPercent / 100,
+      },
+      { onSuccess: onCreated },
+    );
+  }
+
+  const versionsDisabled = versionsQuery.isPending || !versions?.length;
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
-      <div className="grid gap-4 sm:grid-cols-2">
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium text-zinc-700 dark:text-zinc-300">Model</span>
-          <select
+    <form onSubmit={handleSubmit} className="space-y-5">
+      <div className="grid gap-4 sm:grid-cols-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="model">Model</Label>
+          <Select
             value={modelName}
-            onChange={(event) => handleModelChange(event.target.value)}
-            className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 dark:border-zinc-700 dark:bg-zinc-900"
+            onValueChange={(next) => {
+              setModelName(next);
+              setStableOverride(null);
+              setCanaryOverride(null);
+            }}
           >
-            {modelNames.map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
-          </select>
-        </label>
+            <SelectTrigger id="model" className="w-full font-mono">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {modelNames.map((name) => (
+                <SelectItem key={name} value={name} className="font-mono">
+                  {name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
 
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium text-zinc-700 dark:text-zinc-300">
-            Canary traffic weight ({canaryWeightPercent}%)
-          </span>
-          <input
-            type="range"
-            min={1}
-            max={50}
-            value={canaryWeightPercent}
-            onChange={(event) => setCanaryWeightPercent(Number(event.target.value))}
-          />
-        </label>
+        <div className="space-y-1.5">
+          <Label htmlFor="stable">Stable version</Label>
+          <Select value={stableVersion} onValueChange={setStableOverride} disabled={versionsDisabled}>
+            <SelectTrigger id="stable" className="w-full font-mono">
+              <SelectValue placeholder="—" />
+            </SelectTrigger>
+            <SelectContent>
+              {(versions ?? []).map((version) => (
+                <SelectItem key={version} value={version} className="font-mono">
+                  {version}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
 
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium text-zinc-700 dark:text-zinc-300">Stable version</span>
-          <select
-            value={stableVersion}
-            onChange={(event) => setStableOverride(event.target.value)}
-            disabled={versionsLoading || !versions?.length}
-            className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 dark:border-zinc-700 dark:bg-zinc-900"
-          >
-            {(versions ?? []).map((version) => (
-              <option key={version} value={version}>
-                {version}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="font-medium text-zinc-700 dark:text-zinc-300">Canary version</span>
-          <select
-            value={canaryVersion}
-            onChange={(event) => setCanaryOverride(event.target.value)}
-            disabled={versionsLoading || !versions?.length}
-            className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 dark:border-zinc-700 dark:bg-zinc-900"
-          >
-            {(versions ?? []).map((version) => (
-              <option key={version} value={version}>
-                {version}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="space-y-1.5">
+          <Label htmlFor="canary">Canary version</Label>
+          <Select value={canaryVersion} onValueChange={setCanaryOverride} disabled={versionsDisabled}>
+            <SelectTrigger id="canary" className="w-full font-mono" aria-invalid={sameVersion}>
+              <SelectValue placeholder="—" />
+            </SelectTrigger>
+            <SelectContent>
+              {(versions ?? []).map((version) => (
+                <SelectItem key={version} value={version} className="font-mono">
+                  {version}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
-      {versionsError ? (
-        <p className="text-sm text-red-600 dark:text-red-400">{versionsError.message}</p>
+      <div className="space-y-3">
+        <div className="flex items-baseline justify-between">
+          <Label htmlFor="weight">Initial canary weight</Label>
+          <span className="font-mono text-sm tabular">{canaryWeightPercent}%</span>
+        </div>
+        <Slider
+          id="weight"
+          min={1}
+          max={50}
+          step={1}
+          value={[canaryWeightPercent]}
+          onValueChange={([value]) => setCanaryWeightPercent(value)}
+        />
+        {stableVersion && canaryVersion ? (
+          <TrafficBar
+            size="sm"
+            stableVersion={stableVersion}
+            targets={[
+              { version: stableVersion, weight: 100 - canaryWeightPercent },
+              ...(sameVersion ? [] : [{ version: canaryVersion, weight: canaryWeightPercent }]),
+            ]}
+          />
+        ) : null}
+      </div>
+
+      {versionsQuery.isError ? (
+        <p className="text-sm text-danger">{versionsQuery.error.message}</p>
       ) : null}
-      {stableVersion && stableVersion === canaryVersion ? (
-        <p className="text-sm text-amber-600 dark:text-amber-400">
-          Stable and canary versions must differ.
-        </p>
+      {sameVersion ? (
+        <p className="text-sm text-warning">Stable and canary versions must differ.</p>
       ) : null}
 
-      <button
-        type="submit"
-        disabled={!canSubmit}
-        className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-black"
-      >
-        {mutation.submitting ? "Starting deployment…" : "Start canary deployment"}
-      </button>
-
-      <ResultBanner result={mutation.result} onDismiss={mutation.clearResult} />
+      <Button type="submit" disabled={!canSubmit}>
+        {create.isPending ? <Loader2 className="animate-spin" /> : <Rocket />}
+        {create.isPending ? "Starting…" : "Start canary rollout"}
+      </Button>
     </form>
   );
 }

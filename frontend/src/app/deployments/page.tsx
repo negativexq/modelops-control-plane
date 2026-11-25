@@ -1,92 +1,113 @@
 "use client";
 
 import Link from "next/link";
-import { listDeployments } from "@/lib/api";
-import { useAsync } from "@/lib/useAsync";
-import { AsyncBoundary } from "@/components/AsyncBoundary";
+import { useRouter } from "next/navigation";
+import { GitBranch } from "lucide-react";
+import { useDeployments } from "@/lib/queries";
+import { formatDate } from "@/lib/format";
+import { PageHeader } from "@/components/PageHeader";
+import { QueryState } from "@/components/QueryState";
 import { AutomationPausedBadge } from "@/components/AutomationPausedBadge";
 import { BenchmarkBadge } from "@/components/BenchmarkBadge";
-import { Card } from "@/components/Card";
 import { DeploymentActions } from "@/components/DeploymentActions";
 import { StatusBadge } from "@/components/StatusBadge";
-import { formatDate } from "@/lib/format";
+import { TrafficBar } from "@/components/TrafficBar";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 export default function DeploymentsPage() {
-  const { data, error, loading, refetch } = useAsync(() => listDeployments());
+  const router = useRouter();
+  const query = useDeployments();
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-semibold tracking-tight">Deployments</h1>
+      <PageHeader title="Deployments" description="Every canary rollout, newest first." />
 
-      <AsyncBoundary data={data} error={error} loading={loading} onRetry={refetch}>
+      <QueryState query={query}>
         {(deployments) =>
           deployments.length === 0 ? (
-            <Card title="No deployments yet">
-              <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                Start one from the{" "}
-                <Link href="/models" className="underline underline-offset-2">
-                  Models
-                </Link>{" "}
-                page.
-              </p>
-            </Card>
+            <Empty className="border">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <GitBranch />
+                </EmptyMedia>
+                <EmptyTitle>No deployments yet</EmptyTitle>
+                <EmptyDescription>Start a canary rollout to see it tracked here.</EmptyDescription>
+              </EmptyHeader>
+              <EmptyContent>
+                <Button asChild size="sm">
+                  <Link href="/models">Start a rollout</Link>
+                </Button>
+              </EmptyContent>
+            </Empty>
           ) : (
-            <Card>
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[820px] text-left text-sm">
-                  <thead>
-                    <tr className="border-b border-zinc-200 text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-                      <th className="py-2 pr-4">Model</th>
-                      <th className="py-2 pr-4">Stable</th>
-                      <th className="py-2 pr-4">Canary</th>
-                      <th className="py-2 pr-4">Status</th>
-                      <th className="py-2 pr-4">Started</th>
-                      <th className="py-2 pr-4">Completed</th>
-                      <th className="py-2 pr-4 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-zinc-100 dark:divide-zinc-900">
-                    {deployments.map((deployment) => (
-                      <tr key={deployment.id}>
-                        <td className="py-3 pr-4">
-                          <div className="flex items-center gap-2">
-                            <Link
-                              href={`/deployments/${deployment.id}`}
-                              className="font-medium text-blue-600 underline-offset-2 hover:underline dark:text-blue-400"
-                            >
-                              {deployment.model_name}
-                            </Link>
-                            {deployment.is_benchmark ? <BenchmarkBadge /> : null}
-                            {deployment.automation_paused ? <AutomationPausedBadge /> : null}
-                          </div>
-                        </td>
-                        <td className="py-3 pr-4">{deployment.stable_version}</td>
-                        <td className="py-3 pr-4">{deployment.canary_version}</td>
-                        <td className="py-3 pr-4">
-                          <StatusBadge status={deployment.status} />
-                        </td>
-                        <td className="py-3 pr-4 whitespace-nowrap text-zinc-600 dark:text-zinc-400">
-                          {formatDate(deployment.started_at)}
-                        </td>
-                        <td className="py-3 pr-4 whitespace-nowrap text-zinc-600 dark:text-zinc-400">
-                          {formatDate(deployment.completed_at)}
-                        </td>
-                        <td className="py-3 pr-4">
-                          <DeploymentActions
-                            deployment={deployment}
-                            onChanged={refetch}
+            <Card className="py-0">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="pl-4">Model</TableHead>
+                    <TableHead>Versions</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="w-40">Traffic</TableHead>
+                    <TableHead>Started</TableHead>
+                    <TableHead className="pr-4 text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {deployments.map((deployment) => (
+                    <TableRow
+                      key={deployment.id}
+                      className="cursor-pointer"
+                      onClick={() => router.push(`/deployments/${deployment.id}`)}
+                    >
+                      <TableCell className="pl-4">
+                        <div className="flex items-center gap-2">
+                          <Link
+                            href={`/deployments/${deployment.id}`}
+                            className="font-mono font-medium hover:underline"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {deployment.model_name}
+                          </Link>
+                          {deployment.is_benchmark ? <BenchmarkBadge /> : null}
+                          {deployment.automation_paused ? <AutomationPausedBadge /> : null}
+                        </div>
+                      </TableCell>
+                      <TableCell className="font-mono text-xs text-muted-foreground">
+                        {deployment.stable_version} <span className="text-muted-foreground/50">→</span>{" "}
+                        <span className="text-foreground">{deployment.canary_version}</span>
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge status={deployment.status} />
+                      </TableCell>
+                      <TableCell>
+                        {deployment.traffic_allocation ? (
+                          <TrafficBar
                             size="sm"
+                            showLegend={false}
+                            stableVersion={deployment.stable_version}
+                            targets={deployment.traffic_allocation.targets}
                           />
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                        ) : null}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs whitespace-nowrap text-muted-foreground tabular">
+                        {formatDate(deployment.started_at)}
+                      </TableCell>
+                      <TableCell className="pr-4" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex justify-end">
+                          <DeploymentActions deployment={deployment} size="sm" />
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
             </Card>
           )
         }
-      </AsyncBoundary>
+      </QueryState>
     </div>
   );
 }

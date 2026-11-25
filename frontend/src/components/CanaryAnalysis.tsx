@@ -1,21 +1,29 @@
 "use client";
 
 import { useState } from "react";
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Legend,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import { getDeploymentComparison } from "@/lib/api";
-import { useAsync } from "@/lib/useAsync";
-import { AsyncBoundary } from "@/components/AsyncBoundary";
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Info } from "lucide-react";
+import { useComparison } from "@/lib/queries";
 import { formatMs, formatNumber, formatPercent } from "@/lib/format";
 import type { ComparisonOut, MetricsSummary } from "@/lib/types";
+import { cn } from "@/lib/utils";
+import { QueryState } from "@/components/QueryState";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 
 const WINDOW_OPTIONS = [
   { label: "Last 1 min", value: 60 },
@@ -25,8 +33,8 @@ const WINDOW_OPTIONS = [
   { label: "Last 24 hours", value: 86400 },
 ];
 
-const STABLE_COLOR = "var(--color-stable, #2563eb)";
-const CANARY_COLOR = "var(--color-canary, #7c3aed)";
+const STABLE_COLOR = "var(--stable)";
+const CANARY_COLOR = "var(--canary)";
 
 function latencyChartData(stable: MetricsSummary, canary: MetricsSummary) {
   return [
@@ -36,216 +44,259 @@ function latencyChartData(stable: MetricsSummary, canary: MetricsSummary) {
   ];
 }
 
-function latencyTooltipFormatter(value: unknown): string {
-  return typeof value === "number" ? formatMs(value) : "N/A";
-}
-
-function percentTooltipFormatter(value: unknown): string {
-  return typeof value === "number" ? `${value.toFixed(2)}%` : "N/A";
-}
-
-function errorRateChartData(stable: MetricsSummary, canary: MetricsSummary) {
-  return [
-    {
-      metric: "error rate",
-      stable: stable.error_rate != null ? stable.error_rate * 100 : null,
-      canary: canary.error_rate != null ? canary.error_rate * 100 : null,
-    },
-  ];
-}
-
-function DeltaCell({ value, higherIsWorse = true }: { value: number | null; higherIsWorse?: boolean }) {
-  if (value == null) {
-    return <span className="text-zinc-400 dark:text-zinc-600">N/A</span>;
-  }
-  const isWorse = higherIsWorse ? value > 0 : value < 0;
-  const isBetter = higherIsWorse ? value < 0 : value > 0;
-  const color = isWorse
-    ? "text-red-600 dark:text-red-400"
-    : isBetter
-      ? "text-emerald-600 dark:text-emerald-400"
-      : "text-zinc-600 dark:text-zinc-400";
-  const sign = value > 0 ? "+" : "";
-  return <span className={color}>{sign}{value.toFixed(2)}</span>;
-}
-
-function ComparisonContent({ comparison }: { comparison: ComparisonOut }) {
-  const { stable, canary, deltas } = comparison;
-
+function ChartTooltip({
+  active,
+  payload,
+  label,
+  format,
+}: {
+  active?: boolean;
+  payload?: Array<{ name: string; value: number | null; color: string }>;
+  label?: string;
+  format: (value: number | null) => string;
+}) {
+  if (!active || !payload?.length) return null;
   return (
-    <div className="space-y-6">
-      <div className="grid gap-4 md:grid-cols-2">
-        <div>
-          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-            Latency (ms)
-          </h3>
-          <div className="h-56 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={latencyChartData(stable, canary)}>
-                <CartesianGrid strokeDasharray="3 3" className="opacity-30" />
-                <XAxis dataKey="metric" fontSize={12} />
-                <YAxis fontSize={12} />
-                <Tooltip formatter={latencyTooltipFormatter} />
-                <Legend />
-                <Bar dataKey="stable" name={`stable (${stable.version})`} fill={STABLE_COLOR} />
-                <Bar dataKey="canary" name={`canary (${canary.version})`} fill={CANARY_COLOR} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
+    <div className="rounded-md border bg-popover px-3 py-2 text-xs shadow-md">
+      <p className="mb-1 font-medium">{label}</p>
+      {payload.map((entry) => (
+        <p key={entry.name} className="flex items-center gap-2 text-muted-foreground">
+          <span className="size-2 rounded-full" style={{ background: entry.color }} />
+          {entry.name}
+          <span className="ml-auto pl-3 font-mono text-foreground tabular">{format(entry.value)}</span>
+        </p>
+      ))}
+    </div>
+  );
+}
 
-        <div>
-          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-            Error rate (%)
-          </h3>
-          <div className="h-56 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={errorRateChartData(stable, canary)}>
-                <CartesianGrid strokeDasharray="3 3" className="opacity-30" />
-                <XAxis dataKey="metric" fontSize={12} />
-                <YAxis fontSize={12} />
-                <Tooltip formatter={percentTooltipFormatter} />
-                <Legend />
-                <Bar dataKey="stable" name={`stable (${stable.version})`} fill={STABLE_COLOR} />
-                <Bar dataKey="canary" name={`canary (${canary.version})`} fill={CANARY_COLOR} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+function MiniBarChart({
+  title,
+  data,
+  stableName,
+  canaryName,
+  format,
+}: {
+  title: string;
+  data: Array<{ metric: string; stable: number | null; canary: number | null }>;
+  stableName: string;
+  canaryName: string;
+  format: (value: number | null) => string;
+}) {
+  return (
+    <div className="rounded-lg border bg-muted/30 p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">{title}</h3>
+        <div className="flex gap-3 text-[11px] text-muted-foreground">
+          <span className="inline-flex items-center gap-1.5">
+            <span className="size-2 rounded-full bg-stable" />
+            <span className="font-mono">{stableName}</span>
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="size-2 rounded-full bg-canary" />
+            <span className="font-mono">{canaryName}</span>
+          </span>
         </div>
       </div>
-
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[640px] text-left text-sm">
-          <thead>
-            <tr className="border-b border-zinc-200 text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-              <th className="py-2 pr-4">Metric</th>
-              <th className="py-2 pr-4">Stable ({stable.version})</th>
-              <th className="py-2 pr-4">Canary ({canary.version})</th>
-              <th className="py-2 pr-4">Δ (canary − stable)</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-zinc-100 dark:divide-zinc-900">
-            <tr>
-              <td className="py-2 pr-4 text-zinc-500 dark:text-zinc-400">Samples</td>
-              <td className="py-2 pr-4">{stable.sample_count}</td>
-              <td className="py-2 pr-4">{canary.sample_count}</td>
-              <td className="py-2 pr-4">—</td>
-            </tr>
-            <tr>
-              <td className="py-2 pr-4 text-zinc-500 dark:text-zinc-400">p50 latency</td>
-              <td className="py-2 pr-4">{formatMs(stable.p50_latency_ms)}</td>
-              <td className="py-2 pr-4">{formatMs(canary.p50_latency_ms)}</td>
-              <td className="py-2 pr-4">—</td>
-            </tr>
-            <tr>
-              <td className="py-2 pr-4 text-zinc-500 dark:text-zinc-400">p95 latency</td>
-              <td className="py-2 pr-4">{formatMs(stable.p95_latency_ms)}</td>
-              <td className="py-2 pr-4">{formatMs(canary.p95_latency_ms)}</td>
-              <td className="py-2 pr-4">
-                <DeltaCell value={deltas.p95_latency_ms} />
-              </td>
-            </tr>
-            <tr>
-              <td className="py-2 pr-4 text-zinc-500 dark:text-zinc-400">p99 latency</td>
-              <td className="py-2 pr-4">{formatMs(stable.p99_latency_ms)}</td>
-              <td className="py-2 pr-4">{formatMs(canary.p99_latency_ms)}</td>
-              <td className="py-2 pr-4">—</td>
-            </tr>
-            <tr>
-              <td className="py-2 pr-4 text-zinc-500 dark:text-zinc-400">Error rate</td>
-              <td className="py-2 pr-4">{formatPercent(stable.error_rate)}</td>
-              <td className="py-2 pr-4">{formatPercent(canary.error_rate)}</td>
-              <td className="py-2 pr-4">
-                <DeltaCell value={deltas.error_rate != null ? deltas.error_rate * 100 : null} />
-              </td>
-            </tr>
-            <tr>
-              <td className="py-2 pr-4 text-zinc-500 dark:text-zinc-400">Labeled samples</td>
-              <td className="py-2 pr-4">{stable.labeled_sample_count}</td>
-              <td className="py-2 pr-4">{canary.labeled_sample_count}</td>
-              <td className="py-2 pr-4">—</td>
-            </tr>
-            <tr>
-              <td className="py-2 pr-4 text-zinc-500 dark:text-zinc-400">Label coverage</td>
-              <td className="py-2 pr-4">{formatPercent(stable.label_coverage)}</td>
-              <td className="py-2 pr-4">{formatPercent(canary.label_coverage)}</td>
-              <td className="py-2 pr-4">—</td>
-            </tr>
-            <tr>
-              <td className="py-2 pr-4 text-zinc-500 dark:text-zinc-400">Positive labels</td>
-              <td className="py-2 pr-4">{stable.positive_label_count}</td>
-              <td className="py-2 pr-4">{canary.positive_label_count}</td>
-              <td className="py-2 pr-4">—</td>
-            </tr>
-            <tr>
-              <td className="py-2 pr-4 text-zinc-500 dark:text-zinc-400">Precision</td>
-              <td className="py-2 pr-4">{formatNumber(stable.precision)}</td>
-              <td className="py-2 pr-4">{formatNumber(canary.precision)}</td>
-              <td className="py-2 pr-4">—</td>
-            </tr>
-            <tr>
-              <td className="py-2 pr-4 text-zinc-500 dark:text-zinc-400">Recall</td>
-              <td className="py-2 pr-4">{formatNumber(stable.recall)}</td>
-              <td className="py-2 pr-4">{formatNumber(canary.recall)}</td>
-              <td className="py-2 pr-4">
-                <DeltaCell
-                  value={deltas.recall}
-                  higherIsWorse={false}
-                />
-              </td>
-            </tr>
-            <tr>
-              <td className="py-2 pr-4 text-zinc-500 dark:text-zinc-400">False positive rate</td>
-              <td className="py-2 pr-4">{formatNumber(stable.false_positive_rate)}</td>
-              <td className="py-2 pr-4">{formatNumber(canary.false_positive_rate)}</td>
-              <td className="py-2 pr-4">—</td>
-            </tr>
-          </tbody>
-        </table>
-        {stable.precision == null && canary.precision == null ? (
-          <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
-            Precision/recall/false-positive-rate show N/A because no ground-truth label has
-            landed yet for this window. Labels arrive delayed through{" "}
-            <code>POST /api/labels</code> - see the Labeled samples / Label coverage rows above.
-          </p>
-        ) : null}
+      <div className="h-48 w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={data} barGap={4} barCategoryGap="28%">
+            <CartesianGrid vertical={false} stroke="var(--border)" />
+            <XAxis
+              dataKey="metric"
+              tickLine={false}
+              axisLine={false}
+              fontSize={11}
+              stroke="var(--muted-foreground)"
+            />
+            <YAxis
+              tickLine={false}
+              axisLine={false}
+              fontSize={11}
+              width={36}
+              stroke="var(--muted-foreground)"
+            />
+            <Tooltip
+              cursor={{ fill: "var(--accent)", opacity: 0.4 }}
+              content={<ChartTooltip format={format} />}
+            />
+            <Bar dataKey="stable" name={stableName} fill={STABLE_COLOR} radius={[3, 3, 0, 0]} />
+            <Bar dataKey="canary" name={canaryName} fill={CANARY_COLOR} radius={[3, 3, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
       </div>
     </div>
   );
 }
 
-export function CanaryAnalysis({ deploymentId }: { deploymentId: string }) {
-  const [windowSeconds, setWindowSeconds] = useState(300);
-  const { data, error, loading, refetch } = useAsync(
-    () => getDeploymentComparison(deploymentId, windowSeconds),
-    [deploymentId, windowSeconds],
+function DeltaCell({ value, higherIsWorse = true }: { value: number | null; higherIsWorse?: boolean }) {
+  if (value == null) return <span className="text-muted-foreground/60">N/A</span>;
+  const isWorse = higherIsWorse ? value > 0 : value < 0;
+  const isBetter = higherIsWorse ? value < 0 : value > 0;
+  const sign = value > 0 ? "+" : "";
+  return (
+    <span className={cn(isWorse && "text-danger", isBetter && "text-success")}>
+      {sign}
+      {value.toFixed(2)}
+    </span>
   );
+}
+
+function ComparisonContent({ comparison }: { comparison: ComparisonOut }) {
+  const { stable, canary, deltas } = comparison;
+
+  const rows: Array<{ label: string; stable: string; canary: string; delta?: React.ReactNode }> = [
+    { label: "Samples", stable: String(stable.sample_count), canary: String(canary.sample_count) },
+    { label: "p50 latency", stable: formatMs(stable.p50_latency_ms), canary: formatMs(canary.p50_latency_ms) },
+    {
+      label: "p95 latency",
+      stable: formatMs(stable.p95_latency_ms),
+      canary: formatMs(canary.p95_latency_ms),
+      delta: <DeltaCell value={deltas.p95_latency_ms} />,
+    },
+    { label: "p99 latency", stable: formatMs(stable.p99_latency_ms), canary: formatMs(canary.p99_latency_ms) },
+    {
+      label: "Error rate",
+      stable: formatPercent(stable.error_rate),
+      canary: formatPercent(canary.error_rate),
+      delta: <DeltaCell value={deltas.error_rate != null ? deltas.error_rate * 100 : null} />,
+    },
+    {
+      label: "Labeled samples",
+      stable: String(stable.labeled_sample_count),
+      canary: String(canary.labeled_sample_count),
+    },
+    {
+      label: "Label coverage",
+      stable: formatPercent(stable.label_coverage),
+      canary: formatPercent(canary.label_coverage),
+    },
+    {
+      label: "Positive labels",
+      stable: String(stable.positive_label_count),
+      canary: String(canary.positive_label_count),
+    },
+    { label: "Precision", stable: formatNumber(stable.precision), canary: formatNumber(canary.precision) },
+    {
+      label: "Recall",
+      stable: formatNumber(stable.recall),
+      canary: formatNumber(canary.recall),
+      delta: <DeltaCell value={deltas.recall} higherIsWorse={false} />,
+    },
+    {
+      label: "False positive rate",
+      stable: formatNumber(stable.false_positive_rate),
+      canary: formatNumber(canary.false_positive_rate),
+    },
+  ];
+
+  return (
+    <div className="space-y-5">
+      <div className="grid gap-4 md:grid-cols-2">
+        <MiniBarChart
+          title="Latency (ms)"
+          data={latencyChartData(stable, canary)}
+          stableName={stable.version}
+          canaryName={canary.version}
+          format={(v) => (v == null ? "N/A" : formatMs(v))}
+        />
+        <MiniBarChart
+          title="Error rate (%)"
+          data={[
+            {
+              metric: "error rate",
+              stable: stable.error_rate != null ? stable.error_rate * 100 : null,
+              canary: canary.error_rate != null ? canary.error_rate * 100 : null,
+            },
+          ]}
+          stableName={stable.version}
+          canaryName={canary.version}
+          format={(v) => (v == null ? "N/A" : `${v.toFixed(2)}%`)}
+        />
+      </div>
+
+      <div className="overflow-hidden rounded-lg border">
+        <Table>
+          <TableHeader>
+            <TableRow className="bg-muted/40 hover:bg-muted/40">
+              <TableHead>Metric</TableHead>
+              <TableHead className="text-right">
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="size-2 rounded-full bg-stable" />
+                  <span className="font-mono">{stable.version}</span>
+                </span>
+              </TableHead>
+              <TableHead className="text-right">
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="size-2 rounded-full bg-canary" />
+                  <span className="font-mono">{canary.version}</span>
+                </span>
+              </TableHead>
+              <TableHead className="text-right">Δ canary − stable</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody className="font-mono text-xs tabular">
+            {rows.map((row) => (
+              <TableRow key={row.label}>
+                <TableCell className="font-sans text-sm text-muted-foreground">{row.label}</TableCell>
+                <TableCell className="text-right">{row.stable}</TableCell>
+                <TableCell className="text-right">{row.canary}</TableCell>
+                <TableCell className="text-right">{row.delta ?? <span className="text-muted-foreground/60">—</span>}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+
+      {stable.precision == null && canary.precision == null ? (
+        <p className="flex items-start gap-2 text-xs text-muted-foreground">
+          <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          <span>
+            Precision, recall and FPR read N/A until a ground-truth label lands for this window.
+            Labels arrive delayed through <code className="font-mono">POST /api/labels</code>.
+          </span>
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+export function CanaryAnalysis({ deploymentId, live }: { deploymentId: string; live: boolean }) {
+  const [windowSeconds, setWindowSeconds] = useState(300);
+  const query = useComparison(deploymentId, windowSeconds, live);
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
-        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-          Canary analysis
-        </h2>
-        <label className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400">
-          Window
-          <select
-            value={windowSeconds}
-            onChange={(event) => setWindowSeconds(Number(event.target.value))}
-            className="rounded-md border border-zinc-300 bg-white px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
-          >
+        <div>
+          <h2 className="text-sm font-semibold">Canary analysis</h2>
+          <p className="text-xs text-muted-foreground">Stable vs canary over the selected window.</p>
+        </div>
+        <Select value={String(windowSeconds)} onValueChange={(value) => setWindowSeconds(Number(value))}>
+          <SelectTrigger size="sm" className="w-36" aria-label="Analysis window">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent align="end">
             {WINDOW_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
+              <SelectItem key={option.value} value={String(option.value)}>
                 {option.label}
-              </option>
+              </SelectItem>
             ))}
-          </select>
-        </label>
+          </SelectContent>
+        </Select>
       </div>
 
-      <AsyncBoundary data={data} error={error} loading={loading} onRetry={refetch}>
+      <QueryState
+        query={query}
+        skeleton={
+          <div className="grid gap-4 md:grid-cols-2">
+            <Skeleton className="h-60" />
+            <Skeleton className="h-60" />
+          </div>
+        }
+      >
         {(comparison) => <ComparisonContent comparison={comparison} />}
-      </AsyncBoundary>
+      </QueryState>
     </div>
   );
 }
