@@ -86,12 +86,15 @@ export interface TrafficPoint {
 }
 
 const ADVANCE_RE = /from (\d+(?:\.\d+)?)% to (\d+(?:\.\d+)?)%/;
+// Rollouts created since the control plane started recording it carry the
+// initial weight on their "-> CANARY_RUNNING" transition.
+const INITIAL_RE = /receiving traffic at (\d+(?:\.\d+)?)%/;
 
 /**
  * Canary-weight progression reconstructed from `traffic_advanced` events and the
  * final decision. Returns null when the history doesn't contain enough to draw
- * it honestly (no advances and not live): the initial weight isn't recorded on
- * the `created` event, so a made-up starting point would be a lie.
+ * it honestly: older rollouts don't record their initial weight, so without an
+ * advance (or a live allocation) a made-up starting point would be a lie.
  */
 export function trafficSeries(deployment: DeploymentOut): TrafficPoint[] | null {
   const advances = deployment.events
@@ -110,7 +113,14 @@ export function trafficSeries(deployment: DeploymentOut): TrafficPoint[] | null 
   if (start == null) return null;
 
   const current = canaryPercent(deployment);
-  const initial = advances.length ? Number(advances[0].m[1]) : OUTCOME_STATUSES.has(deployment.status) ? null : current;
+  const recorded = startEvent ? INITIAL_RE.exec(startEvent.message) : null;
+  const initial = recorded
+    ? Number(recorded[1])
+    : advances.length
+      ? Number(advances[0].m[1])
+      : OUTCOME_STATUSES.has(deployment.status)
+        ? null
+        : current;
   if (initial == null) return null;
 
   const points: TrafficPoint[] = [{ t: start, canary: initial, label: "canary receiving traffic" }];
@@ -139,26 +149,4 @@ export function latestPolicyResults(items: TimelineItem[]): TimelinePolicyItem[]
   }
   const order = { FAIL: 0, INCONCLUSIVE: 1, PASS: 2 } as const;
   return [...byPolicy.values()].sort((a, b) => order[a.result] - order[b.result]);
-}
-
-/** Per-day decision counts over the last `days` days, oldest first. */
-export function dailyOutcomeCounts(deployments: DeploymentOut[], days = 14) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const buckets = Array.from({ length: days }, (_, i) => {
-    const day = new Date(today);
-    day.setDate(today.getDate() - (days - 1 - i));
-    return { day, PROMOTED: 0, ROLLED_BACK: 0, INCONCLUSIVE: 0, FAILED: 0 } as {
-      day: Date;
-    } & Record<Outcome, number>;
-  });
-  for (const d of deployments) {
-    const decision = decisionOf(d);
-    if (!decision?.at) continue;
-    const day = new Date(decision.at);
-    day.setHours(0, 0, 0, 0);
-    const bucket = buckets.find((b) => b.day.getTime() === day.getTime());
-    if (bucket) bucket[decision.outcome] += 1;
-  }
-  return buckets;
 }

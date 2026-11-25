@@ -3,6 +3,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import * as api from "./api";
+import { streamState } from "./live-stream";
+import { keys } from "./query-keys";
 import type { DeploymentOut, DeploymentStatus } from "./types";
 
 /**
@@ -32,21 +34,18 @@ const LIVE_INTERVAL_MS = 3_000;
 // Short even when idle: a rollout started from another tab or the CLI should
 // show up about as fast as the router state (polled every 6s) does.
 const IDLE_INTERVAL_MS = 5_000;
+// While the change stream (live-stream.ts) is open it drives refetches; polling
+// only remains as a safety net in case an event is ever missed.
+const STREAMING_INTERVAL_MS = 30_000;
 
-export const keys = {
-  deployments: ["deployments"] as const,
-  deployment: (id: string) => ["deployments", id] as const,
-  timeline: (id: string) => ["deployments", id, "timeline"] as const,
-  comparison: (id: string, windowSeconds: number) =>
-    ["deployments", id, "comparison", windowSeconds] as const,
-  routerObserved: ["router", "observed"] as const,
-  models: ["models"] as const,
-  modelVersions: (model: string) => ["models", model, "versions"] as const,
-  modelVersionRows: (model: string) => ["models", model, "rows"] as const,
-  scenarios: ["benchmarks", "scenarios"] as const,
-  benchmarkRuns: ["benchmarks", "runs"] as const,
-  benchmarkCurrent: ["benchmarks", "current"] as const,
-};
+/** Poll interval for data the change stream covers (deployments, events,
+ * policy results). Not for metrics or router state: those aren't streamed. */
+function streamedInterval(fastMs: number | false): number | false {
+  if (fastMs === false) return false;
+  return streamState() === "open" ? STREAMING_INTERVAL_MS : fastMs;
+}
+
+export { keys };
 
 // --- Deployments ----------------------------------------------------------------
 
@@ -55,7 +54,15 @@ export function useDeployments() {
     queryKey: keys.deployments,
     queryFn: api.listDeployments,
     refetchInterval: (query) =>
-      query.state.data?.some((d) => isLive(d.status)) ? LIVE_INTERVAL_MS : IDLE_INTERVAL_MS,
+      streamedInterval(query.state.data?.some((d) => isLive(d.status)) ? LIVE_INTERVAL_MS : IDLE_INTERVAL_MS),
+  });
+}
+
+export function useFleetSummary() {
+  return useQuery({
+    queryKey: keys.fleetSummary,
+    queryFn: api.getFleetSummary,
+    refetchInterval: () => streamedInterval(IDLE_INTERVAL_MS),
   });
 }
 
@@ -64,7 +71,7 @@ export function useDeployment(id: string, enabled = true) {
     queryKey: keys.deployment(id),
     queryFn: () => api.getDeployment(id),
     enabled: enabled && id.length > 0,
-    refetchInterval: (query) => (isLive(query.state.data?.status) ? LIVE_INTERVAL_MS : false),
+    refetchInterval: (query) => streamedInterval(isLive(query.state.data?.status) ? LIVE_INTERVAL_MS : false),
   });
 }
 
@@ -72,7 +79,7 @@ export function useTimeline(id: string, live: boolean) {
   return useQuery({
     queryKey: keys.timeline(id),
     queryFn: () => api.getDeploymentTimeline(id),
-    refetchInterval: live ? LIVE_INTERVAL_MS : false,
+    refetchInterval: () => streamedInterval(live ? LIVE_INTERVAL_MS : false),
   });
 }
 
@@ -180,6 +187,7 @@ export function useDeploymentAction(action: DeploymentAction) {
       });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: keys.deployments }),
+        queryClient.invalidateQueries({ queryKey: keys.fleetSummary }),
         queryClient.invalidateQueries({ queryKey: keys.routerObserved }),
       ]);
     },

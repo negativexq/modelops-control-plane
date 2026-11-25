@@ -510,7 +510,14 @@ async def create_deployment(
     # reason: the desired state this deployment now has (CANARY_RUNNING) is
     # correct regardless of whether the router has caught up to it yet.
     revision = _set_traffic_allocation(db, deployment, targets)
-    _transition(db, deployment, DeploymentStatus.CANARY_RUNNING, "canary receiving traffic")
+    _transition(
+        db,
+        deployment,
+        DeploymentStatus.CANARY_RUNNING,
+        # The initial weight is recorded here (and only here) so the traffic
+        # progression of a rollout that never advanced can still be drawn.
+        f"canary receiving traffic at {round(canary_weight * 100, 2):g}%",
+    )
 
     db.commit()
     db.refresh(deployment)

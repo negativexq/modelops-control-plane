@@ -7,6 +7,10 @@ services:
     volumes:
       - ./backend/app:/app/app
       - ./backend/artifacts:/app/artifacts:ro
+      # Dashboard-triggered benchmarks replay rows from data/test.csv (see
+      # scripts/benchmarks/locustfile.py); the image doesn't ship the dataset.
+      - ./backend/data:/app/data:ro
+      - ./backend/scripts:/app/scripts:ro
     environment:
       MODELOPS_ENVIRONMENT: development
       MODELOPS_DATABASE_URL: sqlite:///./modelops.db
@@ -21,7 +25,8 @@ services:
       BENCHMARK_ERROR_FAULT_URL: http://model-serving-v2-good-error-fault:8000
     command: >
       sh -c "alembic upgrade head &&
-             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+             --timeout-graceful-shutdown 3"
     depends_on:
       - model-serving-v2-good-latency-fault
       - model-serving-v2-good-error-fault

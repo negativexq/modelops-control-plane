@@ -36,6 +36,7 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run type-check
+      - run: npm run build
 
   # Brings up the real docker-compose stack (9 containers: 8 HTTP-exposed services
   # + the worker, which has no HTTP surface) and exercises it over HTTP exactly like
@@ -75,6 +76,33 @@ jobs:
       - name: Run the integration smoke test
         run: .venv/bin/python -m scripts.ci_smoke_test
         working-directory: backend
+      # Browser tests against the same live stack, after the smoke test so there's
+      # real rollout history to render. They use their own model name (e2e-ui) and
+      # paused rollouts, so the worker can't race them.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install Playwright
+        working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Run end-to-end tests
+        working-directory: frontend
+        env:
+          CI: "true"
+        run: npx playwright test
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 7
       # `docker compose logs` (below) only ever shows uvicorn access lines
       # ("POST /evaluate 200 OK") - never a response body, so it can't say
       # *which* policy check actually failed. ci_smoke_test.py records every

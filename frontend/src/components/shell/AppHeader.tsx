@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Fragment } from "react";
 import { usePathname } from "next/navigation";
+import { useStreamState } from "@/lib/live-stream";
 import { useIsFetching } from "@tanstack/react-query";
 import { useDeployment } from "@/lib/queries";
 import { cn } from "@/lib/utils";
@@ -43,22 +44,35 @@ function useCrumbs(): Array<{ href: string; label: string; mono?: boolean }> {
 }
 
 /** Tiny "the data on screen is live" signal: pulses while any query is in flight. */
+const STREAM_COPY = {
+  open: { label: "Live", dot: "bg-success", tip: "Streaming changes from the control plane as they happen." },
+  connecting: {
+    label: "Polling",
+    dot: "bg-warning",
+    tip: "Live stream unavailable, reconnecting. Falling back to polling every few seconds.",
+  },
+  closed: { label: "Polling", dot: "bg-warning", tip: "Live stream closed. Falling back to polling every few seconds." },
+} as const;
+
 function SyncIndicator() {
   const fetching = useIsFetching();
+  const stream = useStreamState();
+  const copy = STREAM_COPY[stream];
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+        <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground" data-stream={stream}>
           <span
             className={cn(
               "size-1.5 rounded-full transition-colors",
-              fetching > 0 ? "bg-canary" : "bg-success",
+              fetching > 0 ? "bg-canary" : copy.dot,
+              stream === "open" && "live-dot text-success",
             )}
           />
-          Live
+          {copy.label}
         </span>
       </TooltipTrigger>
-      <TooltipContent>Auto-refreshing. Active rollouts poll every few seconds.</TooltipContent>
+      <TooltipContent>{copy.tip}</TooltipContent>
     </Tooltip>
   );
 }

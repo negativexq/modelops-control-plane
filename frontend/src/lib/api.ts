@@ -3,6 +3,7 @@ import type {
   ComparisonOut,
   CreateDeploymentRequest,
   DeploymentOut,
+  FleetSummary,
   MetricsOut,
   ModelVersionEvaluation,
   ModelVersionMetadata,
@@ -13,6 +14,9 @@ import type {
 } from "./types";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+/** Server-Sent Events feed of DeploymentEvent / PolicyEvaluation rows. */
+export const STREAM_URL = `${API_BASE_URL}/api/stream`;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -132,6 +136,10 @@ export function resumeAutomation(id: string): Promise<DeploymentOut> {
 // Read-only - never triggers a push. See ObservedRouterState.
 export function getObservedRouterState(): Promise<ObservedRouterState> {
   return request<ObservedRouterState>("/api/router/observed");
+}
+
+export function getFleetSummary(): Promise<FleetSummary> {
+  return request<FleetSummary>("/api/fleet/summary");
 }
 
 export function getDeploymentMetrics(

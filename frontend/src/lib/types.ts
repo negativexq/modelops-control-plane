@@ -249,3 +249,41 @@ export interface RunBenchmarkRequest {
   duration_seconds?: number;
   max_wait_seconds?: number;
 }
+
+// --- Live data (GET /api/fleet/summary, GET /api/stream) -----------------------
+
+export type Outcome = "PROMOTED" | "ROLLED_BACK" | "INCONCLUSIVE" | "FAILED";
+
+export interface OutcomeCount {
+  total: number;
+  automatic: number;
+  manual: number;
+  unknown: number;
+}
+
+export interface FleetSummary {
+  generated_at: string;
+  total: number;
+  live: number;
+  by_status: Partial<Record<DeploymentStatus, number>>;
+  outcomes: Record<Outcome, OutcomeCount>;
+  automation_rate: number | null;
+  median_decision_seconds: number | null;
+  daily: Array<{ date: string } & Record<Outcome, number>>;
+}
+
+export type StreamChange =
+  | {
+      kind: "event";
+      deployment_id: string;
+      event_type: string;
+      message: string;
+      at: string;
+    }
+  | {
+      kind: "policy";
+      deployment_id: string;
+      policy_name: string;
+      result: PolicyEvaluationResult;
+      at: string;
+    };

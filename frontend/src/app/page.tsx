@@ -2,8 +2,8 @@
 
 import Link from "next/link";
 import { ArrowRight, ArrowUpRight, CircleHelp, GitBranch, Rocket, Undo2 } from "lucide-react";
-import { isLive, useDeployments, useRouterObserved } from "@/lib/queries";
-import { dailyOutcomeCounts, decisionOf, durationSeconds, formatDuration, relativeTime } from "@/lib/derive";
+import { isLive, useDeployments, useFleetSummary, useRouterObserved } from "@/lib/queries";
+import { decisionOf, formatDuration, relativeTime } from "@/lib/derive";
 import { STATUS_META, TONE_DOT } from "@/lib/status";
 import type { DeploymentOut } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -21,22 +21,24 @@ import { RolloutLanes } from "@/components/viz/RolloutLanes";
 import { RoutingBeam } from "@/components/viz/RoutingBeam";
 import { SparkBars } from "@/components/viz/SparkBars";
 
-function median(values: number[]) {
-  if (!values.length) return null;
-  const s = [...values].sort((a, b) => a - b);
-  const m = Math.floor(s.length / 2);
-  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+function percent(value: number | null) {
+  return value == null ? "—" : `${Math.round(value * 100)}%`;
 }
 
-function Kpis({ deployments }: { deployments: DeploymentOut[] }) {
-  const days = dailyOutcomeCounts(deployments, 14);
-  const decided = deployments.map((d) => ({ d, decision: decisionOf(d) })).filter((x) => x.decision);
-  const count = (o: string) => decided.filter((x) => x.decision?.outcome === o).length;
-  const auto = (o: string) => decided.filter((x) => x.decision?.outcome === o && x.decision.actor === "automatic").length;
-  const live = deployments.filter((d) => isLive(d.status)).length;
-  const medianDecision = median(
-    decided.filter((x) => x.decision?.outcome !== "INCONCLUSIVE").map((x) => durationSeconds(x.d) ?? 0),
-  );
+/** Headline numbers come from GET /api/fleet/summary, computed server-side next to
+ * the code that writes the events they're derived from. */
+function Kpis() {
+  const { data: summary } = useFleetSummary();
+  if (!summary) {
+    return (
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {Array.from({ length: 4 }, (_, i) => (
+          <Skeleton key={i} className="h-[118px]" />
+        ))}
+      </div>
+    );
+  }
+  const { outcomes, daily } = summary;
 
   return (
     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -44,33 +46,33 @@ function Kpis({ deployments }: { deployments: DeploymentOut[] }) {
         label="Live rollouts"
         icon={Rocket}
         tone="text-canary"
-        value={live}
-        emphasis={live > 0}
-        hint={`median time to decision ${formatDuration(medianDecision)}`}
+        value={summary.live}
+        emphasis={summary.live > 0}
+        hint={`median time to decision ${formatDuration(summary.median_decision_seconds)}`}
       />
       <KpiCard
         label="Promoted"
         icon={ArrowUpRight}
         tone="text-success"
-        value={count("PROMOTED")}
-        hint={`${auto("PROMOTED")} by policy engine`}
-        chart={<SparkBars values={days.map((d) => d.PROMOTED)} barClassName="bg-success" title="Promotions, last 14 days" />}
+        value={outcomes.PROMOTED.total}
+        hint={`${outcomes.PROMOTED.automatic} by policy engine`}
+        chart={<SparkBars values={daily.map((d) => d.PROMOTED)} barClassName="bg-success" title="Promotions, last 14 days" />}
       />
       <KpiCard
         label="Rolled back"
         icon={Undo2}
         tone="text-danger"
-        value={count("ROLLED_BACK")}
-        hint={`${auto("ROLLED_BACK")} by policy engine`}
-        chart={<SparkBars values={days.map((d) => d.ROLLED_BACK)} barClassName="bg-danger" title="Rollbacks, last 14 days" />}
+        value={outcomes.ROLLED_BACK.total}
+        hint={`${outcomes.ROLLED_BACK.automatic} by policy engine · ${percent(summary.automation_rate)} of decisions automated`}
+        chart={<SparkBars values={daily.map((d) => d.ROLLED_BACK)} barClassName="bg-danger" title="Rollbacks, last 14 days" />}
       />
       <KpiCard
         label="Inconclusive"
         icon={CircleHelp}
         tone="text-warning"
-        value={count("INCONCLUSIVE")}
+        value={outcomes.INCONCLUSIVE.total}
         hint="frozen, waiting for a human"
-        chart={<SparkBars values={days.map((d) => d.INCONCLUSIVE)} barClassName="bg-warning" title="Inconclusive, last 14 days" />}
+        chart={<SparkBars values={daily.map((d) => d.INCONCLUSIVE)} barClassName="bg-warning" title="Inconclusive, last 14 days" />}
       />
     </div>
   );
@@ -181,7 +183,7 @@ function OverviewContent({ deployments }: { deployments: DeploymentOut[] }) {
 
   return (
     <div className="space-y-6">
-      <Kpis deployments={deployments} />
+      <Kpis />
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
         <div className="min-w-0 space-y-6">
           <LiveRouting deployments={deployments} />

@@ -1,7 +1,7 @@
 .PHONY: dev test lint down backend-install frontend-install \
 	generate-data train-models evaluate-models prepare-models migrate \
 	benchmark-baseline benchmark-latency-failure benchmark-error-failure \
-	benchmark-quality-failure benchmark-success benchmark-all ci-smoke-test coverage
+	benchmark-quality-failure benchmark-success benchmark-all ci-smoke-test e2e coverage
 
 dev:
 	docker compose up --build
@@ -34,6 +34,9 @@ lint: backend-install frontend-install
 # backend/scripts/ci_smoke_test.py for what it actually checks and why.
 ci-smoke-test: backend-install
 	cd backend && .venv/bin/python -m scripts.ci_smoke_test
+
+e2e:
+	cd frontend && npx playwright test
 
 generate-data: backend-install
 	cd backend && .venv/bin/python scripts/generate_dataset.py

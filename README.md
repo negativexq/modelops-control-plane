@@ -309,6 +309,12 @@ Next.js Client Components calling the control plane directly
 
 - **Overview** (`/`), **Models** (`/models`), **Deployments** (`/deployments`,
   `/deployments/[id]` with Canary Analysis charts), **Benchmarks** (`/benchmarks`).
+- **Live updates**: `GET /api/stream` is a Server-Sent Events feed with one `change`
+  event per new deployment event or policy result. The dashboard refetches exactly
+  what changed; polling stays as a fallback and tightens when the stream drops.
+- **Fleet summary**: `GET /api/fleet/summary` returns outcome counts split by who
+  decided (policy engine or operator), the automation rate, median time to decision
+  and per-day history. The Overview KPIs are built from it.
 
 ### Evidence-based policy engine
 
@@ -521,10 +527,11 @@ curl localhost:8000/api/router-config/fraud-model   # now finds a PROMOTED/
 
 ```bash
 make dev             # bring up the whole stack via docker compose
-make test            # backend tests (pytest) - 279 tests, ~91% statement coverage
+make test            # backend tests (pytest) - 286 tests
 make coverage        # same, plus an HTML report at backend/htmlcov/index.html
 make lint            # backend (ruff, mypy) + frontend (eslint, tsc) lint/type-check
 make ci-smoke-test   # the same real-stack check CI runs - needs `make dev` running
+make e2e             # Playwright browser tests against the running stack
 make down            # stop the services
 ```
 
@@ -533,9 +540,9 @@ every push/PR:
 
 | Job | What it checks | Runtime |
 |---|---|---|
-| `backend` | `ruff`, `mypy --strict`, `pytest` (279 tests, mocked collaborators) | seconds |
-| `frontend` | `eslint`, `tsc --noEmit` | seconds |
-| `integration` | Builds and boots the **real** 9-container stack (8 HTTP-exposed services + the worker, which has no HTTP surface), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s six scenarios - gated on the two jobs above passing first | a few minutes |
+| `backend` | `ruff`, `mypy --strict`, `pytest` (286 tests, mocked collaborators) | seconds |
+| `frontend` | `eslint`, `tsc --noEmit`, `next build` | seconds |
+| `integration` | Builds and boots the **real** 9-container stack (8 HTTP-exposed services + the worker, which has no HTTP surface), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s six scenarios followed by the Playwright suite in [`frontend/e2e`](frontend/e2e) - gated on the two jobs above passing first | a few minutes |
 
 The `integration` job's six scenarios, in order: **(1)** a fast manual create →
 evaluate → promote path, created with `automation_paused=True` so the always-on
