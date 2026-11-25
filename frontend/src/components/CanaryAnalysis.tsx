@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Info } from "lucide-react";
 import { useComparison } from "@/lib/queries";
-import { formatMs, formatNumber, formatPercent } from "@/lib/format";
+import { formatMs, formatNumber, formatPercent, parseApiDate } from "@/lib/format";
 import type { ComparisonOut, MetricsSummary } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { QueryState } from "@/components/QueryState";
@@ -261,8 +261,25 @@ function ComparisonContent({ comparison }: { comparison: ComparisonOut }) {
   );
 }
 
-export function CanaryAnalysis({ deploymentId, live }: { deploymentId: string; live: boolean }) {
-  const [windowSeconds, setWindowSeconds] = useState(300);
+/** Smallest window that still reaches back to the rollout's start, so a finished
+ * rollout opens on its own data instead of an empty "last 5 min". Live rollouts
+ * keep the 5-minute default: that's what the policy engine itself looks at. */
+function initialWindow(startedAt: string | null, live: boolean): number {
+  if (live || !startedAt) return 300;
+  const age = (Date.now() - parseApiDate(startedAt).getTime()) / 1000;
+  return WINDOW_OPTIONS.find((o) => o.value >= age)?.value ?? WINDOW_OPTIONS[WINDOW_OPTIONS.length - 1].value;
+}
+
+export function CanaryAnalysis({
+  deploymentId,
+  live,
+  startedAt = null,
+}: {
+  deploymentId: string;
+  live: boolean;
+  startedAt?: string | null;
+}) {
+  const [windowSeconds, setWindowSeconds] = useState(() => initialWindow(startedAt, live));
   const query = useComparison(deploymentId, windowSeconds, live);
 
   return (

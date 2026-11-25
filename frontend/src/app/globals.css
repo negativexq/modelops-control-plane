@@ -189,3 +189,22 @@
     animation: none;
   }
 }
+
+/* RoutingBeam: dashes travelling along the path from router to target. */
+@keyframes beam-flow {
+  to {
+    stroke-dashoffset: -28;
+  }
+}
+
+.beam-flow {
+  stroke-dasharray: 6 8;
+  animation: beam-flow 2s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .beam-flow {
+    animation: none;
+    stroke-dasharray: none;
+  }
+}

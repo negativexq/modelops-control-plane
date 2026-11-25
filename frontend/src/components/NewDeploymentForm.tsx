@@ -13,7 +13,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Slider } from "@/components/ui/slider";
+import { TickSlider } from "@/components/viz/TickSlider";
 import { TrafficBar } from "@/components/TrafficBar";
 
 interface NewDeploymentFormProps {
@@ -122,16 +122,9 @@ export function NewDeploymentForm({ modelNames, onCreated }: NewDeploymentFormPr
       <div className="space-y-3">
         <div className="flex items-baseline justify-between">
           <Label htmlFor="weight">Initial canary weight</Label>
-          <span className="font-mono text-sm tabular">{canaryWeightPercent}%</span>
+          <span className="font-mono text-2xl font-semibold text-canary tabular">{canaryWeightPercent}%</span>
         </div>
-        <Slider
-          id="weight"
-          min={1}
-          max={50}
-          step={1}
-          value={[canaryWeightPercent]}
-          onValueChange={([value]) => setCanaryWeightPercent(value)}
-        />
+        <TickSlider id="weight" min={1} max={50} value={canaryWeightPercent} onChange={setCanaryWeightPercent} />
         {stableVersion && canaryVersion ? (
           <TrafficBar
             size="sm"

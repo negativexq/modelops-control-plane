@@ -13,7 +13,12 @@ import { DeploymentActions } from "@/components/DeploymentActions";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Timeline } from "@/components/Timeline";
 import { TrafficBar } from "@/components/TrafficBar";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PolicyChecks } from "@/components/PolicyChecks";
+import { DecisionPanel } from "@/components/viz/DecisionPanel";
+import { TrafficProgression } from "@/components/viz/TrafficProgression";
+import { trafficSeries } from "@/lib/derive";
 import { Skeleton } from "@/components/ui/skeleton";
 
 const ROUTER_MANAGED_STATUSES = new Set(["CANARY_RUNNING", "EVALUATING"]);
@@ -71,18 +76,11 @@ function RouterReconciliationStatus({ deployment }: { deployment: DeploymentOut 
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="space-y-1">
-      <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd className="text-sm">{children}</dd>
-    </div>
-  );
-}
-
 function DeploymentDetail({ deployment }: { deployment: DeploymentOut }) {
   const live = isLive(deployment.status);
   const timeline = useTimeline(deployment.id, live);
+  const series = trafficSeries(deployment);
+  const policyCount = timeline.data?.filter((i) => i.type === "policy_evaluation").length;
 
   return (
     <div className="space-y-6">
@@ -97,66 +95,77 @@ function DeploymentDetail({ deployment }: { deployment: DeploymentOut }) {
           <p className="font-mono text-sm text-muted-foreground">
             {deployment.stable_version} <span className="text-muted-foreground/50">→</span>{" "}
             <span className="text-canary">{deployment.canary_version}</span>
+            <span className="ml-3 text-xs" title={deployment.id}>
+              #{deployment.id.slice(0, 8)} · started {formatDate(deployment.started_at)}
+            </span>
           </p>
         </div>
         <DeploymentActions deployment={deployment} />
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
+        <Card className="min-w-0">
           <CardHeader>
-            <CardTitle>Traffic split</CardTitle>
+            <CardTitle>Traffic</CardTitle>
+            <CardDescription>Desired split, how it moved over time, and whether the router agrees.</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3">
+          <CardContent className="space-y-4">
             {deployment.traffic_allocation ? (
-              <>
-                <TrafficBar
-                  stableVersion={deployment.stable_version}
-                  targets={deployment.traffic_allocation.targets}
-                />
-                <RouterReconciliationStatus deployment={deployment} />
-              </>
+              <TrafficBar stableVersion={deployment.stable_version} targets={deployment.traffic_allocation.targets} />
             ) : (
               <p className="text-sm text-muted-foreground">No traffic allocation recorded.</p>
             )}
+            {series ? (
+              <TrafficProgression points={series} />
+            ) : (
+              <p className="rounded-md border border-dashed px-3 py-6 text-center text-xs text-muted-foreground">
+                No traffic advances recorded for this rollout, so there is no progression to plot.
+              </p>
+            )}
+            <RouterReconciliationStatus deployment={deployment} />
           </CardContent>
         </Card>
         <Card>
           <CardContent>
-            <dl className="grid grid-cols-2 gap-4">
-              <Field label="Created">
-                <span className="font-mono text-xs tabular">{formatDate(deployment.created_at)}</span>
-              </Field>
-              <Field label="Started">
-                <span className="font-mono text-xs tabular">{formatDate(deployment.started_at)}</span>
-              </Field>
-              <Field label="Completed">
-                <span className="font-mono text-xs tabular">{formatDate(deployment.completed_at)}</span>
-              </Field>
-              <Field label="ID">
-                <span className="block truncate font-mono text-xs" title={deployment.id}>
-                  {deployment.id.slice(0, 8)}
-                </span>
-              </Field>
-            </dl>
+            <DecisionPanel deployment={deployment} showLink={false} />
           </CardContent>
         </Card>
       </div>
 
-      <Card>
-        <CardContent>
-          <CanaryAnalysis deploymentId={deployment.id} live={live} />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Timeline</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <QueryState query={timeline}>{(items) => <Timeline items={items} />}</QueryState>
-        </CardContent>
-      </Card>
+      <Tabs defaultValue="analysis" className="gap-4">
+        <TabsList>
+          <TabsTrigger value="analysis">Canary analysis</TabsTrigger>
+          <TabsTrigger value="policies" className="gap-1.5">
+            Policy checks
+            {policyCount != null ? (
+              <span className="rounded bg-foreground/8 px-1 font-mono text-[10px] tabular">{policyCount}</span>
+            ) : null}
+          </TabsTrigger>
+          <TabsTrigger value="timeline" className="gap-1.5">
+            Timeline
+            {timeline.data ? (
+              <span className="rounded bg-foreground/8 px-1 font-mono text-[10px] tabular">{timeline.data.length}</span>
+            ) : null}
+          </TabsTrigger>
+        </TabsList>
+        <TabsContent value="analysis">
+          <Card>
+            <CardContent>
+              <CanaryAnalysis deploymentId={deployment.id} live={live} startedAt={deployment.started_at} />
+            </CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="policies">
+          <QueryState query={timeline}>{(items) => <PolicyChecks items={items} />}</QueryState>
+        </TabsContent>
+        <TabsContent value="timeline">
+          <Card>
+            <CardContent>
+              <QueryState query={timeline}>{(items) => <Timeline items={items} />}</QueryState>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

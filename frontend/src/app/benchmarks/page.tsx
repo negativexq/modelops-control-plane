@@ -2,7 +2,24 @@
 
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CircleCheck, CircleX, FlaskConical, Loader2, Play, TriangleAlert, X } from "lucide-react";
+import {
+  ArrowUpRight,
+  Brain,
+  CircleCheck,
+  CircleHelp,
+  CircleX,
+  FlaskConical,
+  Gauge,
+  Loader2,
+  OctagonAlert,
+  Play,
+  Timer,
+  TriangleAlert,
+  Undo2,
+  X,
+  type LucideIcon,
+} from "lucide-react";
+import { TONE_PILL, type Tone } from "@/lib/status";
 import { getBenchmarkRun, getCurrentBenchmarkRun } from "@/lib/api";
 import { keys, useBenchmarkRuns, useScenarios, useStartBenchmark } from "@/lib/queries";
 import { formatDate, parseApiDate } from "@/lib/format";
@@ -145,6 +162,23 @@ export default function BenchmarksPage() {
   );
 }
 
+const SCENARIO_ICON: Record<string, LucideIcon> = {
+  baseline: Gauge,
+  "latency-failure": Timer,
+  "error-failure": OctagonAlert,
+  "quality-failure": Brain,
+  success: ArrowUpRight,
+};
+
+/** Expected outcome as a toned pill, so the five cards read as "what should the
+ * control loop do here" at a glance. Unknown outcomes fall back to neutral. */
+function expectation(outcome: string): { tone: Tone; icon: LucideIcon } {
+  if (outcome.includes("rollback")) return { tone: "danger", icon: Undo2 };
+  if (outcome.includes("promote")) return { tone: "success", icon: ArrowUpRight };
+  if (outcome.includes("inconclusive")) return { tone: "warning", icon: CircleHelp };
+  return { tone: "neutral", icon: Gauge };
+}
+
 function ScenarioCard({
   scenario,
   disabled,
@@ -157,15 +191,30 @@ function ScenarioCard({
   onRun: () => void;
 }) {
   return (
-    <Card size="sm" className="justify-between">
+    <Card size="sm" className="group justify-between transition-colors hover:border-foreground/20">
       <CardHeader>
+        <div className="mb-1 flex size-8 items-center justify-center rounded-lg border bg-muted/40 text-muted-foreground transition-colors group-hover:text-foreground">
+          {(() => {
+            const Icon = SCENARIO_ICON[scenario.key] ?? FlaskConical;
+            return <Icon className="size-4" />;
+          })()}
+        </div>
         <CardTitle>{scenario.title}</CardTitle>
         <CardDescription className="line-clamp-3">{scenario.description}</CardDescription>
       </CardHeader>
       <CardFooter className="flex items-center justify-between gap-2">
-        <span className="font-mono text-xs text-muted-foreground">
-          expect <span className="text-foreground">{scenario.expected_outcome}</span>
-        </span>
+        {(() => {
+          const e = expectation(scenario.expected_outcome);
+          return (
+            <span
+              className={`inline-flex h-5 items-center gap-1 rounded-full border px-2 font-mono text-[11px] ${TONE_PILL[e.tone]}`}
+              title="Expected outcome"
+            >
+              <e.icon className="size-3" />
+              {scenario.expected_outcome}
+            </span>
+          );
+        })()}
         <div className="flex items-center gap-1.5">
           {scenario.synthetic_disclaimer ? (
             <Tooltip>

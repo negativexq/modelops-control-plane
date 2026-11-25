@@ -29,7 +29,9 @@ export const isLive = (status: DeploymentStatus | undefined) =>
   status != null && LIVE_STATUSES.has(status);
 
 const LIVE_INTERVAL_MS = 3_000;
-const IDLE_INTERVAL_MS = 15_000;
+// Short even when idle: a rollout started from another tab or the CLI should
+// show up about as fast as the router state (polled every 6s) does.
+const IDLE_INTERVAL_MS = 5_000;
 
 export const keys = {
   deployments: ["deployments"] as const,
