@@ -40,6 +40,7 @@ def build_timeline(db: Session, deployment: Deployment) -> list[TimelineItem]:
             timestamp=event.created_at,
             event_type=event.event_type,
             message=event.message,
+            actor=event.actor,
         )
         for event in deployment.events
     ]

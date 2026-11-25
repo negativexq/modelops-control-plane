@@ -55,6 +55,7 @@ def poll_changes(db: Session, cursor: FeedCursor) -> list[dict[str, Any]]:
                     "deployment_id": event.deployment_id,
                     "event_type": event.event_type,
                     "message": event.message,
+                    "actor": event.actor,
                     "at": at.isoformat(),
                 },
             )

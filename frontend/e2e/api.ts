@@ -35,7 +35,11 @@ export async function rollBackLeftovers(ctx: APIRequestContext) {
 }
 
 /** A paused rollout: the worker won't promote or roll it back underneath the test. */
-export async function createPausedRollout(ctx: APIRequestContext, canaryWeight = 0.15): Promise<Deployment> {
+export async function createPausedRollout(
+  ctx: APIRequestContext,
+  canaryWeight = 0.15,
+  policyConfig?: Record<string, unknown>,
+): Promise<Deployment> {
   await rollBackLeftovers(ctx);
   const res = await ctx.post("/api/deployments", {
     data: {
@@ -44,6 +48,7 @@ export async function createPausedRollout(ctx: APIRequestContext, canaryWeight =
       canary_version: "v2-good",
       canary_weight: canaryWeight,
       automation_paused: true,
+      ...(policyConfig ? { policy_config: policyConfig } : {}),
     },
   });
   if (!res.ok()) throw new Error(`create failed: ${res.status()} ${await res.text()}`);

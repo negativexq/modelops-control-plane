@@ -92,6 +92,21 @@ export function useComparison(id: string, windowSeconds: number, live: boolean) 
   });
 }
 
+/** Metrics are written by the router on every request, not streamed, so this
+ * polls while the rollout is live regardless of the change stream. */
+export function useMetricsTimeseries(id: string, live: boolean) {
+  return useQuery({
+    queryKey: keys.timeseries(id),
+    queryFn: () => api.getMetricsTimeseries(id),
+    refetchInterval: live ? LIVE_INTERVAL_MS * 2 : false,
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function usePolicyDefaults() {
+  return useQuery({ queryKey: keys.policyDefaults, queryFn: api.getPolicyDefaults, staleTime: 5 * 60_000 });
+}
+
 export function useRouterObserved(enabled = true) {
   return useQuery({
     queryKey: keys.routerObserved,

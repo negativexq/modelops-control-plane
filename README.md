@@ -315,6 +315,16 @@ Next.js Client Components calling the control plane directly
 - **Fleet summary**: `GET /api/fleet/summary` returns outcome counts split by who
   decided (policy engine or operator), the automation rate, median time to decision
   and per-day history. The Overview KPIs are built from it.
+- **Policy thresholds per rollout**: the rollout form starts from
+  `GET /api/policy/defaults` and sends a `policy_config` only for what the operator
+  changed; the detail page shows the thresholds the rollout is judged by, with custom
+  values marked.
+- **Metrics over time**: `GET /api/deployments/{id}/metrics/timeseries` buckets p95
+  latency and error rate per version across the whole rollout; the chart overlays
+  traffic steps, the final decision and the rollout's own policy limits.
+- **Operator name**: manual actions send an `X-Operator` header (set from the
+  header menu) and the name is stored on the events they write. It's an audit hint,
+  not authentication.
 
 ### Evidence-based policy engine
 
@@ -527,7 +537,7 @@ curl localhost:8000/api/router-config/fraud-model   # now finds a PROMOTED/
 
 ```bash
 make dev             # bring up the whole stack via docker compose
-make test            # backend tests (pytest) - 286 tests
+make test            # backend tests (pytest) - 303 tests
 make coverage        # same, plus an HTML report at backend/htmlcov/index.html
 make lint            # backend (ruff, mypy) + frontend (eslint, tsc) lint/type-check
 make ci-smoke-test   # the same real-stack check CI runs - needs `make dev` running
@@ -540,7 +550,7 @@ every push/PR:
 
 | Job | What it checks | Runtime |
 |---|---|---|
-| `backend` | `ruff`, `mypy --strict`, `pytest` (286 tests, mocked collaborators) | seconds |
+| `backend` | `ruff`, `mypy --strict`, `pytest` (303 tests, mocked collaborators) | seconds |
 | `frontend` | `eslint`, `tsc --noEmit`, `next build` | seconds |
 | `integration` | Builds and boots the **real** 9-container stack (8 HTTP-exposed services + the worker, which has no HTTP surface), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s six scenarios followed by the Playwright suite in [`frontend/e2e`](frontend/e2e) - gated on the two jobs above passing first | a few minutes |
 

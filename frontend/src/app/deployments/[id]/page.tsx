@@ -9,6 +9,7 @@ import { QueryState } from "@/components/QueryState";
 import { AutomationPausedBadge } from "@/components/AutomationPausedBadge";
 import { BenchmarkBadge } from "@/components/BenchmarkBadge";
 import { CanaryAnalysis } from "@/components/CanaryAnalysis";
+import { MetricsOverTime } from "@/components/MetricsOverTime";
 import { DeploymentActions } from "@/components/DeploymentActions";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Timeline } from "@/components/Timeline";
@@ -16,6 +17,7 @@ import { TrafficBar } from "@/components/TrafficBar";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PolicyChecks } from "@/components/PolicyChecks";
+import { AppliedPolicy } from "@/components/AppliedPolicy";
 import { DecisionPanel } from "@/components/viz/DecisionPanel";
 import { TrafficProgression } from "@/components/viz/TrafficProgression";
 import { trafficSeries } from "@/lib/derive";
@@ -150,13 +152,17 @@ function DeploymentDetail({ deployment }: { deployment: DeploymentOut }) {
         </TabsList>
         <TabsContent value="analysis">
           <Card>
-            <CardContent>
+            <CardContent className="space-y-8">
+              <MetricsOverTime deployment={deployment} live={live} />
               <CanaryAnalysis deploymentId={deployment.id} live={live} startedAt={deployment.started_at} />
             </CardContent>
           </Card>
         </TabsContent>
         <TabsContent value="policies">
-          <QueryState query={timeline}>{(items) => <PolicyChecks items={items} />}</QueryState>
+          <div className="space-y-4">
+            <QueryState query={timeline}>{(items) => <PolicyChecks items={items} />}</QueryState>
+            <AppliedPolicy config={deployment.policy_config} />
+          </div>
         </TabsContent>
         <TabsContent value="timeline">
           <Card>

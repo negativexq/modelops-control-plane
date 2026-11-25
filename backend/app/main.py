@@ -13,6 +13,7 @@ from app.control_plane.api import reconcile_router, router_config_router
 from app.control_plane.api import router as deployments_router
 from app.control_plane.labels_api import router as labels_router
 from app.control_plane.live_api import router as live_router
+from app.policy.api import defaults_router as policy_defaults_router
 from app.policy.api import router as policy_router
 
 
@@ -42,5 +43,6 @@ app.include_router(router_config_router)
 app.include_router(reconcile_router)
 app.include_router(labels_router)
 app.include_router(policy_router)
+app.include_router(policy_defaults_router)
 app.include_router(benchmarks_router)
 app.include_router(live_router)

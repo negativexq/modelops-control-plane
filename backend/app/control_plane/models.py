@@ -220,6 +220,10 @@ class DeploymentEvent(Base):
     deployment_id: Mapped[str] = mapped_column(ForeignKey("deployments.id"), nullable=False)
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
+    # Who did it, for manual actions: the operator name sent in the X-Operator
+    # header. Self-reported, not authenticated - an audit hint, not access control.
+    # Null for worker actions and for requests that didn't send one.
+    actor: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=_utcnow
     )

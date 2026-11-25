@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Loader2, Rocket } from "lucide-react";
-import { useCreateDeployment, useModelVersions } from "@/lib/queries";
+import { useCreateDeployment, useModelVersions, usePolicyDefaults } from "@/lib/queries";
 import type { DeploymentOut } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/select";
 import { TickSlider } from "@/components/viz/TickSlider";
 import { TrafficBar } from "@/components/TrafficBar";
+import { PolicyThresholds, resolveThresholds, type ThresholdDrafts } from "@/components/PolicyThresholds";
 
 interface NewDeploymentFormProps {
   modelNames: string[];
@@ -29,6 +30,9 @@ export function NewDeploymentForm({ modelNames, onCreated }: NewDeploymentFormPr
   const [stableOverride, setStableOverride] = useState<string | null>(null);
   const [canaryOverride, setCanaryOverride] = useState<string | null>(null);
   const [canaryWeightPercent, setCanaryWeightPercent] = useState(10);
+  const [thresholdDrafts, setThresholdDrafts] = useState<ThresholdDrafts>({});
+  const policyDefaults = usePolicyDefaults().data;
+  const thresholds = policyDefaults ? resolveThresholds(policyDefaults, thresholdDrafts) : null;
 
   const versionsQuery = useModelVersions(modelName);
   const versions = versionsQuery.data;
@@ -43,6 +47,7 @@ export function NewDeploymentForm({ modelNames, onCreated }: NewDeploymentFormPr
     stableVersion.length > 0 &&
     canaryVersion.length > 0 &&
     !sameVersion &&
+    !thresholds?.invalid.size &&
     !create.isPending;
 
   function handleSubmit(event: React.FormEvent) {
@@ -53,6 +58,7 @@ export function NewDeploymentForm({ modelNames, onCreated }: NewDeploymentFormPr
         stable_version: stableVersion,
         canary_version: canaryVersion,
         canary_weight: canaryWeightPercent / 100,
+        ...(thresholds?.config ? { policy_config: thresholds.config } : {}),
       },
       { onSuccess: onCreated },
     );
@@ -136,6 +142,15 @@ export function NewDeploymentForm({ modelNames, onCreated }: NewDeploymentFormPr
           />
         ) : null}
       </div>
+
+      {policyDefaults ? (
+        <PolicyThresholds
+          defaults={policyDefaults}
+          drafts={thresholdDrafts}
+          onChange={(key, raw) => setThresholdDrafts((prev) => ({ ...prev, [key]: raw }))}
+          onReset={() => setThresholdDrafts({})}
+        />
+      ) : null}
 
       {versionsQuery.isError ? (
         <p className="text-sm text-danger">{versionsQuery.error.message}</p>

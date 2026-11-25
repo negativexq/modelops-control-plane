@@ -56,6 +56,7 @@ class DeploymentEventOut(BaseModel):
     id: str
     event_type: str
     message: str
+    actor: str | None = None
     created_at: datetime
 
 
@@ -108,6 +109,7 @@ class TimelineEventItem(BaseModel):
     timestamp: datetime
     event_type: str
     message: str
+    actor: str | None = None
 
 
 class TimelinePolicyItem(BaseModel):
@@ -235,3 +237,27 @@ class ComparisonOut(BaseModel):
     stable: MetricsSummary
     canary: MetricsSummary
     deltas: MetricsDeltas
+
+
+class MetricsBucket(BaseModel):
+    """One time bucket of PredictionMetric rows for one version."""
+
+    t: datetime  # bucket start
+    count: int
+    error_rate: float | None
+    p50_latency_ms: float | None
+    p95_latency_ms: float | None
+
+
+class VersionSeries(BaseModel):
+    version: str
+    role: Literal["stable", "canary"]
+    buckets: list[MetricsBucket]
+
+
+class MetricsTimeseriesOut(BaseModel):
+    deployment_id: str
+    start: datetime
+    end: datetime
+    bucket_seconds: int
+    series: list[VersionSeries]

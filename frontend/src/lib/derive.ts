@@ -15,6 +15,8 @@ export const OUTCOMES: readonly Outcome[] = ["PROMOTED", "ROLLED_BACK", "INCONCL
 export interface Decision {
   outcome: Outcome;
   actor: Actor | null;
+  /** Operator name, when a person made the call and said who they were. */
+  by: string | null;
   at: Date | null;
 }
 
@@ -27,6 +29,7 @@ export function decisionOf(deployment: DeploymentOut): Decision | null {
   if (!OUTCOME_STATUSES.has(deployment.status)) return null;
   const outcome = deployment.status as Outcome;
   let actor: Actor | null = null;
+  let by: string | null = null;
   if (outcome === "INCONCLUSIVE") {
     actor = "automatic";
   } else {
@@ -35,13 +38,14 @@ export function decisionOf(deployment: DeploymentOut): Decision | null {
       .find((e) => e.event_type === "status_changed" && e.message.includes(`-> ${outcome}`));
     if (final?.message.includes("(automatic)")) actor = "automatic";
     else if (final?.message.includes("(manual)")) actor = "manual";
+    if (actor === "manual") by = final?.actor ?? null;
   }
   const at = deployment.completed_at
     ? parseApiDate(deployment.completed_at)
     : deployment.events.length
       ? parseApiDate(deployment.events[deployment.events.length - 1].created_at)
       : null;
-  return { outcome, actor, at };
+  return { outcome, actor, by, at };
 }
 
 export function durationSeconds(deployment: DeploymentOut): number | null {

@@ -12,6 +12,7 @@ import {
   ShieldQuestion,
   ShieldX,
   Undo2,
+  UserRound,
   Unplug,
   type LucideIcon,
 } from "lucide-react";
@@ -141,6 +142,12 @@ export function Timeline({ items }: { items: TimelineItem[] }) {
             <div className="min-w-0 flex-1 pb-5">
               <div className="flex flex-wrap items-center gap-x-2">
                 <span className="font-mono text-xs font-medium">{item.event_type}</span>
+                {item.actor ? (
+                  <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                    <UserRound className="size-3" aria-hidden />
+                    {item.actor}
+                  </span>
+                ) : null}
                 <span className="ml-auto">
                   <Timestamp value={item.timestamp} />
                 </span>

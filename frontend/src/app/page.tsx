@@ -138,7 +138,7 @@ function DecisionFeed({ deployments }: { deployments: DeploymentOut[] }) {
                     </span>
                   </span>
                   <span className="hidden sm:block">
-                    <ActorBadge actor={decision?.actor ?? null} />
+                    <ActorBadge actor={decision?.actor ?? null} by={decision?.by} />
                   </span>
                   <StatusBadge status={d.status} />
                   <span className="w-16 text-right font-mono text-xs text-muted-foreground tabular">

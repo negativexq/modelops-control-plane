@@ -1,6 +1,9 @@
+import re
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
+from urllib.parse import unquote
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
 from app.control_plane import metrics_service, reconcile, service
@@ -12,6 +15,7 @@ from app.control_plane.schemas import (
     DeploymentOut,
     MetricIn,
     MetricsOut,
+    MetricsTimeseriesOut,
     TimelineItem,
 )
 from app.control_plane.service import (
@@ -36,6 +40,34 @@ DbDep = Annotated[Session, Depends(get_db)]
 RouterGatewayDep = Annotated[RouterGateway, Depends(get_router_gateway)]
 IdempotencyKeyDep = Annotated[str | None, Header(alias="Idempotency-Key")]
 
+_OPERATOR_RE = re.compile(r"^[\w .@'-]{1,64}$")
+
+
+def operator_name(x_operator: Annotated[str | None, Header()] = None) -> str | None:
+    """The operator's self-reported name (X-Operator header), recorded on the events
+    a manual action writes. Not authentication: it answers "who clicked this" in the
+    audit trail, nothing more. Missing or blank means unknown, not an error.
+
+    HTTP header values can't carry most non-Latin-1 text, so clients percent-encode
+    names like "Ömer" or "Şule"; plain ASCII names arrive as-is."""
+    if x_operator is None or not x_operator.strip():
+        return None
+    name = " ".join(unquote(x_operator).split())
+    if not _OPERATOR_RE.fullmatch(name):
+        raise HTTPException(
+            status_code=422,
+            detail="X-Operator must be 1-64 characters: letters, digits, space, . @ ' - _",
+        )
+    return name
+
+
+OperatorDep = Annotated[str | None, Depends(operator_name)]
+
+
+def _manual_actor(triggered_by: str, operator: str | None) -> str | None:
+    # The worker never acts on someone's behalf; ignore a stray header on its calls.
+    return operator if triggered_by == "manual" else None
+
 
 def _not_found(deployment_id: str) -> HTTPException:
     return HTTPException(status_code=404, detail=f"Deployment '{deployment_id}' not found")
@@ -47,6 +79,7 @@ async def create_deployment(
     response: Response,
     db: DbDep,
     router_gateway: RouterGatewayDep,
+    operator: OperatorDep,
     idempotency_key: IdempotencyKeyDep = None,
 ) -> DeploymentOut:
     try:
@@ -60,6 +93,7 @@ async def create_deployment(
             idempotency_key=idempotency_key,
             policy_config=payload.policy_config,
             automation_paused=payload.automation_paused,
+            actor=operator,
         )
     except ActiveDeploymentExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -101,6 +135,7 @@ async def promote_deployment(
     deployment_id: str,
     db: DbDep,
     router_gateway: RouterGatewayDep,
+    operator: OperatorDep,
     triggered_by: TriggeredByDep = "manual",
 ) -> DeploymentOut:
     try:
@@ -110,7 +145,11 @@ async def promote_deployment(
 
     try:
         deployment = await service.promote_deployment(
-            db, router_gateway, deployment, triggered_by=triggered_by
+            db,
+            router_gateway,
+            deployment,
+            triggered_by=triggered_by,
+            actor=_manual_actor(triggered_by, operator),
         )
     except InvalidTransitionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -125,6 +164,7 @@ async def rollback_deployment(
     deployment_id: str,
     db: DbDep,
     router_gateway: RouterGatewayDep,
+    operator: OperatorDep,
     triggered_by: TriggeredByDep = "manual",
 ) -> DeploymentOut:
     try:
@@ -134,7 +174,11 @@ async def rollback_deployment(
 
     try:
         deployment = await service.rollback_deployment(
-            db, router_gateway, deployment, triggered_by=triggered_by
+            db,
+            router_gateway,
+            deployment,
+            triggered_by=triggered_by,
+            actor=_manual_actor(triggered_by, operator),
         )
     except InvalidTransitionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -146,7 +190,7 @@ async def rollback_deployment(
 
 @router.post("/{deployment_id}/pause-automation")
 def pause_automation(
-    deployment_id: str, db: DbDep, triggered_by: TriggeredByDep = "manual"
+    deployment_id: str, db: DbDep, operator: OperatorDep, triggered_by: TriggeredByDep = "manual"
 ) -> DeploymentOut:
     """Stops the automated worker from touching this deployment - see
     Deployment.automation_paused and docs/DESIGN_NOTES.md#manual-automation-hold.
@@ -158,7 +202,9 @@ def pause_automation(
         raise _not_found(deployment_id) from exc
 
     try:
-        deployment = service.pause_automation(db, deployment, triggered_by=triggered_by)
+        deployment = service.pause_automation(
+            db, deployment, triggered_by=triggered_by, actor=_manual_actor(triggered_by, operator)
+        )
     except DeploymentTerminalError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
@@ -169,7 +215,7 @@ def pause_automation(
 
 @router.post("/{deployment_id}/resume-automation")
 def resume_automation(
-    deployment_id: str, db: DbDep, triggered_by: TriggeredByDep = "manual"
+    deployment_id: str, db: DbDep, operator: OperatorDep, triggered_by: TriggeredByDep = "manual"
 ) -> DeploymentOut:
     """Lets the automated worker act on this deployment again. 409 if the
     deployment is already terminal."""
@@ -179,7 +225,9 @@ def resume_automation(
         raise _not_found(deployment_id) from exc
 
     try:
-        deployment = service.resume_automation(db, deployment, triggered_by=triggered_by)
+        deployment = service.resume_automation(
+            db, deployment, triggered_by=triggered_by, actor=_manual_actor(triggered_by, operator)
+        )
     except DeploymentTerminalError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ConcurrentUpdateError as exc:
@@ -247,6 +295,36 @@ def record_metric(deployment_id: str, payload: MetricIn, db: DbDep) -> dict[str,
         raise _not_found(deployment_id)
     metrics_service.record_metric(db, deployment_id, payload)
     return {"recorded": True}
+
+
+@router.get("/{deployment_id}/metrics/timeseries", response_model=MetricsTimeseriesOut)
+def get_deployment_metrics_timeseries(
+    deployment_id: str,
+    db: DbDep,
+    window_seconds: Annotated[int | None, Query(ge=10, le=7 * 86400)] = None,
+) -> MetricsTimeseriesOut:
+    """Latency and error rate over time, stable vs canary, bucketed. Covers the
+    whole rollout (start to decision, or to now while live) unless window_seconds
+    narrows it to the most recent part."""
+    try:
+        deployment = service.get_deployment(db, deployment_id)
+    except DeploymentNotFoundError as exc:
+        raise _not_found(deployment_id) from exc
+
+    end = deployment.completed_at or datetime.now(UTC)
+    start = deployment.started_at or deployment.created_at
+    if window_seconds is not None:
+        start = max(
+            metrics_service.as_utc(start),
+            metrics_service.as_utc(end) - timedelta(seconds=window_seconds),
+        )
+    return metrics_service.compute_timeseries(
+        db,
+        deployment.id,
+        [(deployment.stable_version, "stable"), (deployment.canary_version, "canary")],
+        start,
+        end,
+    )
 
 
 @router.get("/{deployment_id}/metrics", response_model=MetricsOut)

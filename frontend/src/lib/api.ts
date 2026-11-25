@@ -1,9 +1,12 @@
+import { getOperator } from "./operator";
 import type {
   BenchmarkRun,
   ComparisonOut,
   CreateDeploymentRequest,
   DeploymentOut,
   FleetSummary,
+  MetricsTimeseries,
+  PolicyConfig,
   MetricsOut,
   ModelVersionEvaluation,
   ModelVersionMetadata,
@@ -28,6 +31,13 @@ export class ApiError extends Error {
   }
 }
 
+function operatorHeader(): Record<string, string> {
+  const name = getOperator();
+  // Header values can't carry most non-Latin-1 text ("Şule"); the control plane
+  // percent-decodes this header.
+  return name ? { "X-Operator": encodeURIComponent(name) } : {};
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
@@ -35,6 +45,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...init,
       headers: {
         "content-type": "application/json",
+        // Self-reported operator name, recorded on the events a manual action writes.
+        ...operatorHeader(),
         ...init?.headers,
       },
     });
@@ -136,6 +148,14 @@ export function resumeAutomation(id: string): Promise<DeploymentOut> {
 // Read-only - never triggers a push. See ObservedRouterState.
 export function getObservedRouterState(): Promise<ObservedRouterState> {
   return request<ObservedRouterState>("/api/router/observed");
+}
+
+export function getPolicyDefaults(): Promise<PolicyConfig> {
+  return request<PolicyConfig>("/api/policy/defaults");
+}
+
+export function getMetricsTimeseries(id: string): Promise<MetricsTimeseries> {
+  return request<MetricsTimeseries>(`/api/deployments/${encodeURIComponent(id)}/metrics/timeseries`);
 }
 
 export function getFleetSummary(): Promise<FleetSummary> {

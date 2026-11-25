@@ -54,7 +54,7 @@ export function DecisionPanel({ deployment, showLink = true }: { deployment: Dep
       </div>
 
       <div className="divide-y border-y">
-        <Meta label="Decided by">{decision ? <ActorBadge actor={decision.actor} /> : "—"}</Meta>
+        <Meta label="Decided by">{decision ? <ActorBadge actor={decision.actor} by={decision.by} /> : "—"}</Meta>
         <Meta label="Duration">
           <span className="font-mono text-xs tabular">{formatDuration(durationSeconds(deployment))}</span>
         </Meta>

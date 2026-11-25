@@ -64,7 +64,7 @@ export function RolloutLanes({ deployments, limit = 8 }: { deployments: Deployme
                   </p>
                   <p>
                     {meta.label}
-                    {decision?.actor ? ` · ${decision.actor}` : ""} · {formatDuration(durationSeconds(d))}
+                    {decision?.actor ? ` · ${decision.by ?? decision.actor}` : ""} · {formatDuration(durationSeconds(d))}
                   </p>
                 </TooltipContent>
               </Tooltip>

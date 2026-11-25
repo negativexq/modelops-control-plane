@@ -3,6 +3,8 @@ export const keys = {
   deployments: ["deployments"] as const,
   deployment: (id: string) => ["deployments", id] as const,
   timeline: (id: string) => ["deployments", id, "timeline"] as const,
+  timeseries: (id: string) => ["deployments", id, "timeseries"] as const,
+  policyDefaults: ["policy", "defaults"] as const,
   comparison: (id: string, windowSeconds: number) =>
     ["deployments", id, "comparison", windowSeconds] as const,
   routerObserved: ["router", "observed"] as const,

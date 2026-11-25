@@ -19,6 +19,7 @@ import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { NAV_ITEMS } from "./nav";
+import { OperatorMenu } from "./OperatorMenu";
 import { ThemeToggle } from "./ThemeToggle";
 
 function useCrumbs(): Array<{ href: string; label: string; mono?: boolean }> {
@@ -103,6 +104,7 @@ export function AppHeader() {
       </Breadcrumb>
       <div className="ml-auto flex items-center gap-3">
         <SyncIndicator />
+        <OperatorMenu />
         <ThemeToggle />
       </div>
     </header>

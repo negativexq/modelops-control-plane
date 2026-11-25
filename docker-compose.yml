@@ -11,6 +11,9 @@ services:
       # scripts/benchmarks/locustfile.py); the image doesn't ship the dataset.
       - ./backend/data:/app/data:ro
       - ./backend/scripts:/app/scripts:ro
+      # Migrations run at startup (`alembic upgrade head` below); mounted so a new
+      # one applies on restart without rebuilding the image.
+      - ./backend/alembic:/app/alembic:ro
     environment:
       MODELOPS_ENVIRONMENT: development
       MODELOPS_DATABASE_URL: sqlite:///./modelops.db

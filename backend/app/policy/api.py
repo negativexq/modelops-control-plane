@@ -12,10 +12,11 @@ from app.control_plane.service import (
 )
 from app.db import get_db
 from app.policy import service as policy_service
-from app.policy.config import PolicyConfig
+from app.policy.config import PolicyConfig, policy_settings
 from app.policy.schemas import EvaluateResponse, PolicyCheckOut, PolicyEvaluationOut
 
 router = APIRouter(prefix="/api/deployments", tags=["policy"])
+defaults_router = APIRouter(prefix="/api/policy", tags=["policy"])
 
 DbDep = Annotated[Session, Depends(get_db)]
 
@@ -80,3 +81,11 @@ def list_policy_evaluations(deployment_id: str, db: DbDep) -> list[PolicyEvaluat
 
     evaluations = policy_service.list_policy_evaluations(db, deployment_id)
     return [PolicyEvaluationOut.model_validate(evaluation) for evaluation in evaluations]
+
+
+@defaults_router.get("/defaults", response_model=PolicyConfig)
+def get_policy_defaults() -> PolicyConfig:
+    """The thresholds a new deployment gets when it doesn't send its own
+    policy_config (environment-configurable, see PolicySettings) - what the
+    dashboard's rollout form starts from."""
+    return policy_settings.to_policy_config()

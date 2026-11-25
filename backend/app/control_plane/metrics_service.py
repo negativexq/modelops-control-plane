@@ -1,11 +1,19 @@
 import math
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.control_plane.models import GroundTruthLabel, PredictionMetric
-from app.control_plane.schemas import MetricIn, MetricsDeltas, MetricsSummary
+from app.control_plane.schemas import (
+    MetricIn,
+    MetricsBucket,
+    MetricsDeltas,
+    MetricsSummary,
+    MetricsTimeseriesOut,
+    VersionSeries,
+)
 
 
 def record_metric(db: Session, deployment_id: str, payload: MetricIn) -> None:
@@ -164,4 +172,86 @@ def compute_deltas(stable: MetricsSummary, canary: MetricsSummary) -> MetricsDel
         p95_latency_ms=_delta(canary.p95_latency_ms, stable.p95_latency_ms),
         error_rate=_delta(canary.error_rate, stable.error_rate),
         recall=_delta(canary.recall, stable.recall),
+    )
+
+
+# Bucket sizes a timeseries may use; the smallest one that keeps the series at or
+# under MAX_BUCKETS points wins, so a 2-minute rollout and a 2-day one both chart.
+BUCKET_CHOICES_SECONDS = (5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 21600)
+MAX_BUCKETS = 120
+
+
+def choose_bucket_seconds(span_seconds: float) -> int:
+    for size in BUCKET_CHOICES_SECONDS:
+        if span_seconds / size <= MAX_BUCKETS:
+            return size
+    return BUCKET_CHOICES_SECONDS[-1]
+
+
+def as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def compute_timeseries(
+    db: Session,
+    deployment_id: str,
+    versions: list[tuple[str, Literal["stable", "canary"]]],
+    start: datetime,
+    end: datetime,
+) -> MetricsTimeseriesOut:
+    """Latency percentiles and error rate per version per time bucket, over
+    [start, end]. Empty buckets are kept (count=0, values None) so a chart shows
+    gaps as gaps instead of drawing a line across them."""
+    start, end = as_utc(start), as_utc(end)
+    if end <= start:
+        end = start + timedelta(seconds=1)
+    bucket_seconds = choose_bucket_seconds((end - start).total_seconds())
+    bucket_count = math.ceil((end - start).total_seconds() / bucket_seconds)
+
+    rows = db.execute(
+        select(
+            PredictionMetric.model_version,
+            PredictionMetric.created_at,
+            PredictionMetric.latency_ms,
+            PredictionMetric.status_code,
+        ).where(
+            PredictionMetric.deployment_id == deployment_id,
+            PredictionMetric.created_at >= start,
+            PredictionMetric.created_at <= end,
+        )
+    ).all()
+
+    grouped: dict[tuple[str, int], list[tuple[float, int]]] = {}
+    for version, created_at, latency_ms, status_code in rows:
+        index = int((as_utc(created_at) - start).total_seconds() // bucket_seconds)
+        index = min(max(index, 0), bucket_count - 1)
+        grouped.setdefault((version, index), []).append((latency_ms, status_code))
+
+    series: list[VersionSeries] = []
+    for version, role in versions:
+        buckets: list[MetricsBucket] = []
+        for index in range(bucket_count):
+            samples = grouped.get((version, index), [])
+            latencies = sorted(latency for latency, _ in samples)
+            buckets.append(
+                MetricsBucket(
+                    t=start + timedelta(seconds=index * bucket_seconds),
+                    count=len(samples),
+                    error_rate=(
+                        sum(1 for _, code in samples if code >= 400) / len(samples)
+                        if samples
+                        else None
+                    ),
+                    p50_latency_ms=_percentile(latencies, 50) if latencies else None,
+                    p95_latency_ms=_percentile(latencies, 95) if latencies else None,
+                )
+            )
+        series.append(VersionSeries(version=version, role=role, buckets=buckets))
+
+    return MetricsTimeseriesOut(
+        deployment_id=deployment_id,
+        start=start,
+        end=end,
+        bucket_seconds=bucket_seconds,
+        series=series,
     )

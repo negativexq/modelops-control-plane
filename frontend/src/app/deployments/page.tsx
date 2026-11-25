@@ -106,7 +106,7 @@ const columns = col.columns([
   col.accessor((d) => decisionOf(d)?.actor ?? "", {
     id: "actor",
     header: "Decided by",
-    cell: ({ row: { original: d } }) => <ActorBadge actor={decisionOf(d)?.actor ?? null} />,
+    cell: ({ row: { original: d } }) => <ActorBadge actor={decisionOf(d)?.actor ?? null} by={decisionOf(d)?.by} />,
   }),
   col.accessor((d) => durationSeconds(d) ?? -1, {
     id: "duration",
@@ -280,7 +280,7 @@ function DeploymentsTable({ deployments }: { deployments: DeploymentOut[] }) {
               </div>
             ) : null}
             <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
-              <ActorBadge actor={decisionOf(d)?.actor ?? null} />
+              <ActorBadge actor={decisionOf(d)?.actor ?? null} by={decisionOf(d)?.by} />
               <span className="font-mono tabular">{formatDuration(durationSeconds(d))}</span>
             </div>
           </Link>

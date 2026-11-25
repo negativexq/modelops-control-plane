@@ -41,6 +41,8 @@ export interface DeploymentEventOut {
   id: string;
   event_type: string;
   message: string;
+  /** Operator name for manual actions (X-Operator header); null for the worker. */
+  actor: string | null;
   created_at: string;
 }
 
@@ -50,6 +52,8 @@ export interface DeploymentOut {
   stable_version: string;
   canary_version: string;
   status: DeploymentStatus;
+  /** Thresholds snapshotted at creation; null only on very old rows. */
+  policy_config: PolicyConfig | null;
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -77,6 +81,7 @@ export interface TimelineEventItem {
   timestamp: string;
   event_type: string;
   message: string;
+  actor: string | null;
 }
 
 export interface TimelinePolicyItem {
@@ -106,6 +111,8 @@ export interface CreateDeploymentRequest {
   stable_version: string;
   canary_version: string;
   canary_weight: number;
+  /** Omit to get the control plane's defaults (GET /api/policy/defaults). */
+  policy_config?: PolicyConfig;
   // Internal-only escape hatch for the benchmark suite's "baseline" scenario
   // (canary_weight=0) - never set by this dashboard's own NewDeploymentForm, which
   // already enforces 0 < weight < 1 client-side. See backend's
@@ -278,6 +285,7 @@ export type StreamChange =
       deployment_id: string;
       event_type: string;
       message: string;
+      actor: string | null;
       at: string;
     }
   | {
@@ -287,3 +295,36 @@ export type StreamChange =
       result: PolicyEvaluationResult;
       at: string;
     };
+
+// --- Policy thresholds (GET /api/policy/defaults, CreateDeploymentRequest) ------
+
+export interface PolicyConfig {
+  minimum_requests: number;
+  evaluation_window_seconds: number;
+  max_inconclusive_retries: number;
+  label_maturity_seconds: number;
+  minimum_labeled_samples: number;
+  minimum_label_coverage: number;
+  minimum_positive_labels: number;
+  latency: { p95_max_increase_percent: number };
+  reliability: { max_error_rate_percent: number };
+  quality: { minimum_recall: number };
+}
+
+// --- GET /api/deployments/{id}/metrics/timeseries --------------------------------
+
+export interface MetricsBucket {
+  t: string;
+  count: number;
+  error_rate: number | null;
+  p50_latency_ms: number | null;
+  p95_latency_ms: number | null;
+}
+
+export interface MetricsTimeseries {
+  deployment_id: string;
+  start: string;
+  end: string;
+  bucket_seconds: number;
+  series: Array<{ version: string; role: "stable" | "canary"; buckets: MetricsBucket[] }>;
+}

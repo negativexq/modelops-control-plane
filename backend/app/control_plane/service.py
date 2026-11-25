@@ -203,13 +203,29 @@ def get_authoritative_allocation(db: Session, model_name: str) -> Deployment | N
     return db.execute(stmt).scalars().first()
 
 
-def _log_event(db: Session, deployment: Deployment, event_type: str, message: str) -> None:
-    db.add(DeploymentEvent(deployment_id=deployment.id, event_type=event_type, message=message))
+def _log_event(
+    db: Session,
+    deployment: Deployment,
+    event_type: str,
+    message: str,
+    actor: str | None = None,
+) -> None:
+    """`actor` is the operator's self-reported name (X-Operator header) for
+    manual actions; None for the worker and for callers that didn't send one."""
+    db.add(
+        DeploymentEvent(
+            deployment_id=deployment.id, event_type=event_type, message=message, actor=actor
+        )
+    )
     logger.info("deployment %s: %s - %s", deployment.id, event_type, message)
 
 
 def _transition(
-    db: Session, deployment: Deployment, target: DeploymentStatus, message: str
+    db: Session,
+    deployment: Deployment,
+    target: DeploymentStatus,
+    message: str,
+    actor: str | None = None,
 ) -> None:
     """Validate and apply a state transition, logging it as a DeploymentEvent.
 
@@ -219,7 +235,13 @@ def _transition(
     validate_transition(deployment.status, target)
     previous = deployment.status
     deployment.status = target
-    _log_event(db, deployment, "status_changed", f"{previous.value} -> {target.value}: {message}")
+    _log_event(
+        db,
+        deployment,
+        "status_changed",
+        f"{previous.value} -> {target.value}: {message}",
+        actor,
+    )
 
 
 def _next_routing_generation(db: Session, model_name: str) -> int:
@@ -425,6 +447,7 @@ async def create_deployment(
     idempotency_key: str | None,
     policy_config: PolicyConfig | None = None,
     automation_paused: bool = False,
+    actor: str | None = None,
 ) -> tuple[Deployment, bool]:
     """Start a new canary deployment.
 
@@ -480,6 +503,7 @@ async def create_deployment(
         deployment,
         "created",
         f"deployment created for {model_name}: stable={stable_version} canary={canary_version}",
+        actor,
     )
     if automation_paused:
         _log_event(
@@ -488,6 +512,7 @@ async def create_deployment(
             "automation_paused",
             "automation paused at creation (manual) - the worker will not act on "
             "this deployment until it's resumed",
+            actor,
         )
 
     targets: list[dict[str, float | str]] = [
@@ -495,7 +520,7 @@ async def create_deployment(
         {"version": canary_version, "weight": round(canary_weight, 6)},
     ]
 
-    _transition(db, deployment, DeploymentStatus.DEPLOYING, "starting canary rollout")
+    _transition(db, deployment, DeploymentStatus.DEPLOYING, "starting canary rollout", actor)
     deployment.started_at = datetime.now(UTC)
 
     # Desired state (DB) is committed FIRST, router push happens after - see
@@ -517,6 +542,7 @@ async def create_deployment(
         # The initial weight is recorded here (and only here) so the traffic
         # progression of a rollout that never advanced can still be drawn.
         f"canary receiving traffic at {round(canary_weight * 100, 2):g}%",
+        actor,
     )
 
     db.commit()
@@ -527,7 +553,11 @@ async def create_deployment(
 
 
 async def promote_deployment(
-    db: Session, router_gateway: RouterGateway, deployment: Deployment, triggered_by: str = "manual"
+    db: Session,
+    router_gateway: RouterGateway,
+    deployment: Deployment,
+    triggered_by: str = "manual",
+    actor: str | None = None,
 ) -> Deployment:
     """Promote the canary to 100% of traffic. `triggered_by` ("manual" or
     "automatic") is recorded in the event message so the audit trail can tell a human
@@ -539,9 +569,12 @@ async def promote_deployment(
             deployment,
             DeploymentStatus.EVALUATING,
             f"auto-advancing before {triggered_by} promote",
+            actor,
         )
 
-    _transition(db, deployment, DeploymentStatus.PROMOTING, f"{triggered_by} promote requested")
+    _transition(
+        db, deployment, DeploymentStatus.PROMOTING, f"{triggered_by} promote requested", actor
+    )
 
     targets: list[dict[str, float | str]] = [{"version": deployment.canary_version, "weight": 1.0}]
     # Commit desired state before pushing to the router - see create_deployment's
@@ -552,6 +585,7 @@ async def promote_deployment(
         deployment,
         DeploymentStatus.PROMOTED,
         f"canary promoted to 100% traffic ({triggered_by})",
+        actor,
     )
     deployment.completed_at = datetime.now(UTC)
 
@@ -565,7 +599,11 @@ async def promote_deployment(
 
 
 async def rollback_deployment(
-    db: Session, router_gateway: RouterGateway, deployment: Deployment, triggered_by: str = "manual"
+    db: Session,
+    router_gateway: RouterGateway,
+    deployment: Deployment,
+    triggered_by: str = "manual",
+    actor: str | None = None,
 ) -> Deployment:
     """Roll back all traffic to the stable version. `triggered_by` distinguishes a
     manual dashboard click from a worker's automated FAIL decision in the event log.
@@ -577,9 +615,12 @@ async def rollback_deployment(
             deployment,
             DeploymentStatus.EVALUATING,
             f"auto-advancing before {triggered_by} rollback",
+            actor,
         )
 
-    _transition(db, deployment, DeploymentStatus.ROLLING_BACK, f"{triggered_by} rollback requested")
+    _transition(
+        db, deployment, DeploymentStatus.ROLLING_BACK, f"{triggered_by} rollback requested", actor
+    )
 
     targets: list[dict[str, float | str]] = [{"version": deployment.stable_version, "weight": 1.0}]
     # Commit desired state before pushing to the router - see create_deployment's
@@ -590,6 +631,7 @@ async def rollback_deployment(
         deployment,
         DeploymentStatus.ROLLED_BACK,
         f"traffic rolled back to stable ({triggered_by})",
+        actor,
     )
     deployment.completed_at = datetime.now(UTC)
 
@@ -695,7 +737,7 @@ def record_inconclusive(db: Session, deployment: Deployment, max_retries: int) -
 
 
 def pause_automation(
-    db: Session, deployment: Deployment, triggered_by: str = "manual"
+    db: Session, deployment: Deployment, triggered_by: str = "manual", actor: str | None = None
 ) -> Deployment:
     """Sets automation_paused=True - the worker's next sweep (app/worker/loop.py's
     run_once) will skip this deployment entirely, before it ever calls /evaluate.
@@ -712,7 +754,7 @@ def pause_automation(
 
     _touch(deployment)
     deployment.automation_paused = True
-    _log_event(db, deployment, "automation_paused", f"automation paused ({triggered_by})")
+    _log_event(db, deployment, "automation_paused", f"automation paused ({triggered_by})", actor)
 
     _commit(db, deployment)
     db.refresh(deployment)
@@ -720,7 +762,7 @@ def pause_automation(
 
 
 def resume_automation(
-    db: Session, deployment: Deployment, triggered_by: str = "manual"
+    db: Session, deployment: Deployment, triggered_by: str = "manual", actor: str | None = None
 ) -> Deployment:
     """Sets automation_paused=False - the worker will pick this deployment back up
     on its next sweep, same as any other active deployment. Idempotent, same
@@ -731,7 +773,7 @@ def resume_automation(
 
     _touch(deployment)
     deployment.automation_paused = False
-    _log_event(db, deployment, "automation_resumed", f"automation resumed ({triggered_by})")
+    _log_event(db, deployment, "automation_resumed", f"automation resumed ({triggered_by})", actor)
 
     _commit(db, deployment)
     db.refresh(deployment)
