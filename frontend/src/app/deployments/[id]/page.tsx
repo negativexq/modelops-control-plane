@@ -1,8 +1,7 @@
 "use client";
 
-import Link from "next/link";
 import { useParams } from "next/navigation";
-import { ChevronLeft, CircleAlert, CircleCheck, Loader2, Unplug } from "lucide-react";
+import { CircleAlert, CircleCheck, Loader2, Unplug } from "lucide-react";
 import { isLive, useDeployment, useRouterObserved, useTimeline } from "@/lib/queries";
 import { formatDate } from "@/lib/format";
 import type { DeploymentOut } from "@/lib/types";
@@ -168,12 +167,6 @@ export default function DeploymentDetailPage() {
 
   return (
     <div className="space-y-4">
-      <Link
-        href="/deployments"
-        className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-      >
-        <ChevronLeft className="size-4" /> Deployments
-      </Link>
       <QueryState
         query={query}
         skeleton={

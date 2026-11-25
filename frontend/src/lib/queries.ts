@@ -57,10 +57,11 @@ export function useDeployments() {
   });
 }
 
-export function useDeployment(id: string) {
+export function useDeployment(id: string, enabled = true) {
   return useQuery({
     queryKey: keys.deployment(id),
     queryFn: () => api.getDeployment(id),
+    enabled: enabled && id.length > 0,
     refetchInterval: (query) => (isLive(query.state.data?.status) ? LIVE_INTERVAL_MS : false),
   });
 }

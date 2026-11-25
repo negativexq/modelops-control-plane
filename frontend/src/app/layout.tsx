@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import { NavBar } from "@/components/NavBar";
+import { cookies } from "next/headers";
+import { AppShell } from "@/components/shell/AppShell";
 import { Providers } from "@/components/providers";
 import "./globals.css";
 
@@ -19,11 +20,12 @@ export const metadata: Metadata = {
   description: "Manage model versions, canary deployments, and traffic allocation.",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const sidebarState = (await cookies()).get("sidebar_state")?.value;
   return (
     <html
       lang="en"
@@ -32,8 +34,7 @@ export default function RootLayout({
     >
       <body className="flex min-h-full flex-col">
         <Providers>
-          <NavBar />
-          <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">{children}</main>
+          <AppShell defaultOpen={sidebarState !== "false"}>{children}</AppShell>
         </Providers>
       </body>
     </html>
