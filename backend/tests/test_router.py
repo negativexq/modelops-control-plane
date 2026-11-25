@@ -537,3 +537,96 @@ def test_predict_skips_metric_emission_without_deployment_id(artifacts_dir: Path
 
     time.sleep(0.1)
     assert transport.calls == []
+
+
+# --- multiple models ------------------------------------------------------------
+
+
+def _push(client: TestClient, model_name: str, revision: int, canary: float) -> Any:
+    return client.put(
+        "/router/config",
+        json={
+            "model_name": model_name,
+            "deployment_id": f"dep-{model_name}-{revision}",
+            "revision": revision,
+            "targets": [
+                {"version": "v1", "weight": 1 - canary},
+                {"version": "v2-good", "weight": canary},
+            ],
+        },
+    )
+
+
+def test_each_model_keeps_its_own_split(artifacts_dir: Path) -> None:
+    client = _router_client(artifacts_dir, stable_weight=1.0, canary_weight=0.0)
+    assert _push(client, "other-model", 1, 1.0).status_code == 200
+
+    # The default model is untouched by another model's push.
+    default = client.get("/router/config").json()
+    assert default["model_name"] == "fraud-model"
+    assert {t["version"]: t["weight"] for t in default["targets"]}["v1"] == 1.0
+
+    other = client.get("/router/config", params={"model_name": "other-model"}).json()
+    assert other["deployment_id"] == "dep-other-model-1"
+    assert [c["model_name"] for c in client.get("/router/configs").json()] == [
+        "fraud-model",
+        "other-model",
+    ]
+
+    sample = _sample_payload(FULL_FEATURES)
+    for _ in range(10):
+        assert client.post("/router/predict", json=sample).json()["routed_to"] == "v1"
+        routed = client.post("/router/models/other-model/predict", json=sample).json()
+        assert routed["routed_to"] == "v2-good"
+
+
+def test_revisions_are_scoped_per_model(artifacts_dir: Path) -> None:
+    client = _router_client(artifacts_dir)
+    assert _push(client, "model-a", 5, 0.1).status_code == 200
+    # A low revision is fine for a model that has never been pushed...
+    assert _push(client, "model-b", 1, 0.1).status_code == 200
+    # ...but stale within its own model.
+    assert _push(client, "model-a", 4, 0.2).status_code == 409
+
+
+def test_unknown_model_is_a_404_not_a_misroute(artifacts_dir: Path) -> None:
+    client = _router_client(artifacts_dir)
+    sample = _sample_payload(FULL_FEATURES)
+    assert client.post("/router/models/nope/predict", json=sample).status_code == 404
+    assert client.get("/router/config", params={"model_name": "nope"}).status_code == 404
+
+
+def test_health_reports_every_model(artifacts_dir: Path) -> None:
+    client = _router_client(artifacts_dir)
+    _push(client, "other-model", 1, 0.5)
+    body = client.get("/router/health").json()
+    assert body["model_name"] == "fraud-model"
+    assert [m["model_name"] for m in body["models"]] == ["fraud-model", "other-model"]
+    assert all(t["ready"] for m in body["models"] for t in m["targets"])
+
+
+def test_startup_sync_loads_every_model_from_the_control_plane(artifacts_dir: Path) -> None:
+    def control_plane(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/router-config"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "model_name": "fraud-model",
+                    "deployment_id": "dep-a",
+                    "targets": [{"version": "v2-good", "weight": 1.0}],
+                },
+                {
+                    "model_name": "other-model",
+                    "deployment_id": "dep-b",
+                    "targets": [{"version": "v1", "weight": 1.0}],
+                },
+            ],
+        )
+
+    settings = _router_settings(control_plane_url="http://control-plane")
+    client = httpx.AsyncClient(mounts={"http://control-plane": httpx.MockTransport(control_plane)})
+    with TestClient(create_router_app(settings, client=client)) as router:
+        configs = {c["model_name"]: c for c in router.get("/router/configs").json()}
+    assert configs["fraud-model"]["deployment_id"] == "dep-a"
+    assert configs["other-model"]["deployment_id"] == "dep-b"

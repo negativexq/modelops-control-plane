@@ -5,9 +5,8 @@ import { useRouterObserved } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { SidebarMenuButton } from "@/components/ui/sidebar";
 
-/** Router health from GET /api/router/observed. `reachable` is checked first: an
- * unreachable router and a reachable-but-unconfigured one both report
- * deployment_id: null. */
+/** Router health from GET /api/router/observed: reachable or not, and how many
+ * models' traffic it's splitting. */
 export function RouterStatus() {
   const { data, isError } = useRouterObserved();
   const unreachable = isError || data?.reachable === false;
@@ -15,8 +14,10 @@ export function RouterStatus() {
     ? "Checking router…"
     : unreachable
       ? "Router unreachable"
-      : data?.model_name
-        ? `${data.model_name} · r${data.revision}`
+      : data?.configs.length
+        ? data.configs.length === 1
+          ? `${data.configs[0].model_name} · r${data.configs[0].revision}`
+          : `${data.configs.length} models routed`
         : "Router idle";
 
   return (

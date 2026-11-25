@@ -47,6 +47,9 @@ class RouterConfig(BaseModel):
 class RouterSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ROUTER_", protected_namespaces=())
 
+    # The default model: what the unqualified routes (POST /router/predict, GET
+    # /router/config) serve, and the only one with a bootstrap split before the
+    # control plane pushes anything. Other models are added by their first push.
     model_name: str = "fraud-model"
 
     # Static deployment topology: which host:port serves each known version. This is
@@ -89,19 +92,25 @@ class RouterSettings(BaseSettings):
 
 
 class RouterConfigStore:
-    """Thread-safe holder for the mutable, runtime-updatable router configuration."""
+    """Thread-safe holder for the runtime-updatable traffic split of every model
+    this router serves, keyed by model_name. Each model has its own config and its
+    own revision sequence; a push for one model never touches another's."""
 
     def __init__(self, initial: RouterConfig) -> None:
         self._lock = threading.Lock()
-        self._config = initial
+        self._configs: dict[str, RouterConfig] = {initial.model_name: initial}
 
-    def get(self) -> RouterConfig:
+    def get(self, model_name: str) -> RouterConfig | None:
         with self._lock:
-            return self._config
+            return self._configs.get(model_name)
+
+    def all(self) -> list[RouterConfig]:
+        with self._lock:
+            return [self._configs[name] for name in sorted(self._configs)]
 
     def set(self, config: RouterConfig) -> None:
         with self._lock:
-            self._config = config
+            self._configs[config.model_name] = config
 
 
 router_settings = RouterSettings()

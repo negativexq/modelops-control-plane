@@ -25,10 +25,23 @@ export interface TrafficAllocationOut {
 }
 
 // GET /api/router/observed - read-only passthrough of the router's own
-// GET /router/config (never mutates anything, unlike POST /api/router/reconcile).
-// Check `reachable` first: a genuinely unreachable router and a reachable-but-
-// never-configured one (fresh restart) both report deployment_id: null, so
-// only `reachable` tells them apart.
+// GET /router/configs: one split per model it serves (never mutates anything,
+// unlike POST /api/router/reconcile). Check `reachable` first: an unreachable
+// router and a reachable one that holds no split for a model both leave that
+// model out of `configs`.
+export interface ObservedModelConfig {
+  model_name: string;
+  deployment_id: string | null;
+  revision: number;
+  targets: TargetWeight[];
+}
+
+export interface ObservedRouter {
+  reachable: boolean;
+  configs: ObservedModelConfig[];
+}
+
+/** One model's view of the router (see observedFor in queries.ts). */
 export interface ObservedRouterState {
   reachable: boolean;
   model_name: string | null;

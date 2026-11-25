@@ -198,6 +198,7 @@ def run_scenario(
                 control_plane_url=control_plane_url,
                 label_delay_seconds=label_delay_seconds,
                 label_coverage=label_coverage,
+                model_name=scenario.model_name,
             )
 
             final_deployment = _wait_for_outcome(

@@ -48,6 +48,9 @@ LABEL_DELAY_SECONDS = float(os.environ.get("BENCHMARK_LABEL_DELAY_SECONDS", "10"
 # Deliberately < 1.0 by default: at coverage=1.0 every prediction gets labeled and
 # minimum_label_coverage's gate would never actually be exercised by this harness.
 LABEL_COVERAGE = float(os.environ.get("BENCHMARK_LABEL_COVERAGE", "0.8"))
+# Which model's split to load. Empty means the router's default model.
+MODEL_NAME = os.environ.get("BENCHMARK_MODEL_NAME", "")
+PREDICT_PATH = f"/router/models/{MODEL_NAME}/predict" if MODEL_NAME else "/router/predict"
 _LABEL_FLUSH_INTERVAL_SECONDS = 2.0
 _LABEL_FLUSH_BATCH_SIZE = 50
 
@@ -198,7 +201,7 @@ class RouterUser(HttpUser):
     @task
     def predict(self) -> None:
         payload, true_label = _sample_row()
-        response = self.client.post("/router/predict", json=payload, name="/router/predict")
+        response = self.client.post(PREDICT_PATH, json=payload, name="/router/predict")
         if response.status_code != 200:
             return
         prediction_id = response.json().get("prediction_id")

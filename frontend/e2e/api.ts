@@ -3,7 +3,8 @@ import { request, type APIRequestContext } from "@playwright/test";
 export const API_URL = process.env.E2E_API_URL ?? "http://localhost:8000";
 
 /** Its own model name, so these tests never collide with a real fraud-model
- * rollout (one active rollout per model is enforced by the control plane). */
+ * rollout (one active rollout per model is enforced by the control plane), and
+ * the router keeps fraud-model's split untouched while they run. */
 export const E2E_MODEL = "e2e-ui";
 
 const ACTIVE = new Set([

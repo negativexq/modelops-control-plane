@@ -2,7 +2,7 @@
 
 import { useParams } from "next/navigation";
 import { CircleAlert, CircleCheck, Loader2, Unplug } from "lucide-react";
-import { isLive, useDeployment, useRouterObserved, useTimeline } from "@/lib/queries";
+import { isLive, observedFor, useDeployment, useRouterObserved, useTimeline } from "@/lib/queries";
 import { formatDate } from "@/lib/format";
 import type { DeploymentOut } from "@/lib/types";
 import { QueryState } from "@/components/QueryState";
@@ -32,7 +32,8 @@ const ROUTER_MANAGED_STATUSES = new Set(["CANARY_RUNNING", "EVALUATING"]);
  * old deployment against it would be a false alarm, not real drift. */
 function RouterReconciliationStatus({ deployment }: { deployment: DeploymentOut }) {
   const managed = ROUTER_MANAGED_STATUSES.has(deployment.status);
-  const { data: observed } = useRouterObserved(managed);
+  const { data: router } = useRouterObserved(managed);
+  const observed = router ? observedFor(router, deployment.model_name) : undefined;
 
   if (!deployment.traffic_allocation) return null;
   const desired = deployment.traffic_allocation.revision;

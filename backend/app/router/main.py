@@ -32,28 +32,30 @@ def choose_target(config: RouterConfig) -> TargetWeight:
     )[0]
 
 
-async def _fetch_control_plane_allocation(
-    client: httpx.AsyncClient, control_plane_url: str, model_name: str, timeout: float
-) -> RouterConfig | None:
-    """Best-effort startup sync from the control plane's current traffic allocation.
+async def _fetch_control_plane_allocations(
+    client: httpx.AsyncClient, control_plane_url: str, timeout: float
+) -> list[RouterConfig]:
+    """Best-effort startup sync: every model's authoritative traffic allocation
+    from the control plane (GET /api/router-config).
 
     Not a full sync mechanism (no polling, no push subscription) - just enough to
-    avoid booting with a stale default config after a restart. Any failure (control
-    plane down, no active deployment yet, bad response) is logged and swallowed; the
-    router falls back to its own configured initial_targets.
+    avoid booting with a stale default after a restart. Any failure (control plane
+    down, bad response) is logged and swallowed; the router keeps its own
+    bootstrap config for the default model, and the control plane's reconciler
+    pushes the rest on its next tick.
     """
-    url = f"{control_plane_url.rstrip('/')}/api/router-config/{model_name}"
+    url = f"{control_plane_url.rstrip('/')}/api/router-config"
     try:
         response = await client.get(url, timeout=timeout)
         response.raise_for_status()
-        return RouterConfig.model_validate(response.json())
+        return [RouterConfig.model_validate(item) for item in response.json()]
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning(
             "startup sync from control plane failed (%s), keeping default targets: %s",
             url,
             exc,
         )
-        return None
+        return []
 
 
 def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None) -> FastAPI:
@@ -102,15 +104,11 @@ def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if settings.control_plane_url:
-            synced = await _fetch_control_plane_allocation(
-                http_client,
-                settings.control_plane_url,
-                settings.model_name,
-                settings.upstream_timeout_seconds,
-            )
-            if synced is not None:
+            for synced in await _fetch_control_plane_allocations(
+                http_client, settings.control_plane_url, settings.upstream_timeout_seconds
+            ):
                 store.set(synced)
-                logger.info("synced initial traffic allocation from control plane: %s", synced)
+                logger.info("synced traffic allocation from control plane: %s", synced)
         yield
         if owns_client:
             await http_client.aclose()
@@ -128,9 +126,24 @@ def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None
             )
         return base_url
 
+    def _config_for(model_name: str) -> RouterConfig:
+        config = store.get(model_name)
+        if config is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Router has no traffic split for model '{model_name}'",
+            )
+        return config
+
     @app.get("/router/config")
-    def get_config() -> RouterConfig:
-        return store.get()
+    def get_config(model_name: str | None = None) -> RouterConfig:
+        """One model's split; the default model when model_name is omitted."""
+        return _config_for(model_name or settings.model_name)
+
+    @app.get("/router/configs")
+    def get_configs() -> list[RouterConfig]:
+        """Every model's split - what the control plane reconciles against."""
+        return store.all()
 
     @app.put("/router/config")
     def put_config(config: RouterConfig) -> RouterConfig:
@@ -143,20 +156,15 @@ def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None
                 detail=f"No host:port mapping for version(s): {unknown}",
             )
 
-        current = store.get()
-        # Compare revisions per model_name, not per deployment_id (changed in
-        # Sprint 14 - see TrafficAllocation.revision and
-        # docs/DESIGN_NOTES.md#desired-observed-reconciliation): revision is now
-        # a monotonic routing generation scoped to the model, so a push from a
-        # *different* deployment_id no longer automatically wins - a delayed
-        # push from an old, already-terminal deployment must still be rejected
-        # if a newer deployment (or a later push from the same one) already
-        # landed a higher generation for this model. Only a config for a
-        # genuinely different model_name (this router serves exactly one at a
-        # time, but the field exists) always wins outright, same as a first-ever
-        # push.
-        same_model = config.model_name == current.model_name
-        if same_model and config.revision <= current.revision:
+        # Revisions are a monotonic routing generation scoped to the model (see
+        # TrafficAllocation.revision and
+        # docs/DESIGN_NOTES.md#desired-observed-reconciliation): a delayed push
+        # from an old, already-terminal deployment must be rejected if a newer
+        # one already landed a higher generation for the same model. Each model
+        # has its own slot, so a push for another model is judged only against
+        # that model's history, and never displaces this one.
+        current = store.get(config.model_name)
+        if current is not None and config.revision <= current.revision:
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -178,24 +186,36 @@ def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None
 
     @app.get("/router/health")
     async def router_health() -> dict[str, Any]:
-        config = store.get()
         timeout = settings.upstream_timeout_seconds
-        target_health = []
-        for target in config.targets:
-            base_url = settings.resolve_base_url(target.version)
-            ready = base_url is not None and await check_ready(http_client, base_url, timeout)
-            target_health.append(
-                {"version": target.version, "weight": target.weight, "ready": ready}
-            )
+        readiness: dict[str, bool] = {}
+        models = []
+        for config in store.all():
+            target_health = []
+            for target in config.targets:
+                if target.version not in readiness:
+                    base_url = settings.resolve_base_url(target.version)
+                    readiness[target.version] = base_url is not None and await check_ready(
+                        http_client, base_url, timeout
+                    )
+                target_health.append(
+                    {
+                        "version": target.version,
+                        "weight": target.weight,
+                        "ready": readiness[target.version],
+                    }
+                )
+            models.append({"model_name": config.model_name, "targets": target_health})
+        default = next((m for m in models if m["model_name"] == settings.model_name), None)
         return {
             "status": "ok",
-            "model_name": config.model_name,
-            "targets": target_health,
+            # Default model's view, kept at the top level for existing callers.
+            "model_name": settings.model_name,
+            "targets": default["targets"] if default else [],
+            "models": models,
         }
 
-    @app.post("/router/predict")
-    async def route_predict(payload: dict[str, Any]) -> JSONResponse:
-        config = store.get()
+    async def _route(model_name: str, payload: dict[str, Any]) -> JSONResponse:
+        config = _config_for(model_name)
         target = choose_target(config)
         base_url = _resolve(target.version)
 
@@ -243,6 +263,15 @@ def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None
             )
 
         return JSONResponse(status_code=response.status_code, content=body)
+
+    @app.post("/router/predict")
+    async def route_predict(payload: dict[str, Any]) -> JSONResponse:
+        """Routes for the default model (ROUTER_MODEL_NAME)."""
+        return await _route(settings.model_name, payload)
+
+    @app.post("/router/models/{model_name}/predict")
+    async def route_model_predict(model_name: str, payload: dict[str, Any]) -> JSONResponse:
+        return await _route(model_name, payload)
 
     return app
 

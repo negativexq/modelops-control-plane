@@ -261,10 +261,15 @@ One process per model version (`app.serving.main:app`), selected via
 curl -X POST localhost:8080/router/predict -d '{...}' -H 'content-type: application/json'
 ```
 
-- `POST /router/predict` — weighted-random pick, forwards the body unmodified,
-  tags the response with `routed_to`.
-- `GET`/`PUT /router/config` — read/replace `{model_name, targets: [{version, weight}]}`.
-- `GET /router/health` — router liveness + each target's live `/ready` status.
+- One router serves many models, each with its own split and its own revision
+  sequence; a push for one model never touches another's.
+- `POST /router/models/{model_name}/predict` — weighted-random pick within that
+  model's split, forwards the body unmodified, tags the response with `routed_to`.
+  `POST /router/predict` does the same for the default model (`ROUTER_MODEL_NAME`).
+- `PUT /router/config` — replace one model's `{model_name, deployment_id, revision,
+  targets: [{version, weight}]}`; `GET /router/config?model_name=` reads one,
+  `GET /router/configs` reads all.
+- `GET /router/health` — router liveness + each target's live `/ready` status, per model.
 - A target that's unhealthy or unreachable returns **503**, never a silent
   fallback to another target ([why](docs/DESIGN_NOTES.md#traffic-router)).
 
@@ -657,13 +662,11 @@ though - this is not a real production feedback loop (see the
   (`WORKER_POLL_INTERVAL_SECONDS`, 15s by default), not the moment it happens.
   See [Desired/observed
   reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation).
-- The reconciler assumes a single router instance. It compares the DB's
-  desired state against *one* `GET /router/config` response and re-pushes to
-  that same router - there's no notion of multiple router replicas each with
-  their own (possibly different) observed state to reconcile independently.
-  This matches the rest of the project's "one router process" assumption (see
-  [Benchmark suite](docs/DESIGN_NOTES.md#benchmark-suite)'s note on why
-  benchmarks can't run concurrently), not a recent regression.
+- The reconciler assumes a single router instance. Every tick it compares each
+  model's authoritative allocation in the DB against that model's entry in one
+  `GET /router/configs` response and re-pushes where they differ - there's no
+  notion of multiple router replicas each with their own (possibly different)
+  observed state to reconcile independently.
 - A sustained router outage is surfaced (a one-time `router_unreachable`/
   `router_recovered` timeline event, and a `reachable` flag the dashboard
   turns into a visible warning), not silently swallowed - see [Desired/observed

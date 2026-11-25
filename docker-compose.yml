@@ -130,8 +130,9 @@ services:
       ENVIRONMENT: development
     command: uvicorn app.serving.main:app --host 0.0.0.0 --port 8000 --reload
 
-  # Weighted traffic router: splits /router/predict across a list of {version, weight}
-  # targets. version_hosts (below) is the router's own deployment topology - the
+  # Weighted traffic router: one {version, weight} split per model, served at
+  # /router/models/{model}/predict (and /router/predict for ROUTER_MODEL_NAME, the
+  # default). version_hosts (below) is the router's own deployment topology - the
   # control plane (the `backend` service) only ever pushes "version -> weight" via
   # PUT /router/config, never host/port.
   router:

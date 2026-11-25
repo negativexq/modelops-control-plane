@@ -34,93 +34,59 @@ class ReconcileResult:
     deployment_id: str | None = None
     from_revision: int | None = None
     to_revision: int | None = None
+    model_name: str | None = None
 
 
-def _all_authoritative_deployments(db: Session) -> list[Deployment]:
-    """Used only when the router is fully unreachable (GET itself failed), so
-    there's no observed model_name to look up a single one by - marks every
-    model's currently-authoritative deployment (see
-    service.get_authoritative_allocation) unreachable instead, whatever its
-    status (in-flight, frozen INCONCLUSIVE, or a terminal PROMOTED/
-    ROLLED_BACK still holding the router's desired state). Deliberately the
-    same definition reachability events use everywhere else in this module -
-    a router outage must be visible on whichever deployment's routing state
-    it's actually affecting, not just the ones still CANARY_RUNNING/
-    EVALUATING. Under this project's single-router-instance assumption (see
-    docs/DESIGN_NOTES.md#desired-observed-reconciliation) there's
-    realistically at most one distinct model_name in play, but this doesn't
-    assume that.
-    """
+def all_authoritative_deployments(db: Session) -> list[Deployment]:
+    """Every model's currently-authoritative deployment (see
+    service.get_authoritative_allocation): the active rollout if one is in
+    flight, otherwise the most recent PROMOTED/ROLLED_BACK one, whatever its
+    status. This is the router's whole desired state - one split per model."""
     model_names = db.execute(select(Deployment.model_name).distinct()).scalars().all()
     deployments = []
-    for model_name in model_names:
+    for model_name in sorted(model_names):
         deployment = service.get_authoritative_allocation(db, model_name)
         if deployment is not None:
             deployments.append(deployment)
     return deployments
 
 
-async def reconcile_router_state(db: Session, router_gateway: RouterGateway) -> ReconcileResult:
-    """Compares the router's observed (model_name, deployment_id, revision) against
-    the DB's authoritative desired state for that model (see
-    service.get_authoritative_allocation - the active rollout if one is in
-    flight, otherwise the most recent PROMOTED/ROLLED_BACK deployment's final
-    allocation), and re-pushes if they differ.
-
-    Using the authoritative allocation rather than only the active deployment is
-    what makes this still work *after* a rollout finishes: a router push that
-    fails right after a promote/rollback commit (or a router restart after one)
-    used to have nothing left to reconcile against once that deployment left
-    CANARY_RUNNING/EVALUATING - the drift became permanent instead of closing
-    on the next tick. See docs/DESIGN_NOTES.md#desired-observed-reconciliation.
-
-    No-op (no push, no DeploymentEvent) when they already match, or when there's
-    nothing to compare against (router unreachable, or no deployment at all yet
-    for the router's model) - reconciliation should be silent when there's
-    nothing to reconcile, not spam the timeline every tick just for checking.
-    """
-    observed = await router_gateway.get_observed_config()
-    if observed is None:
-        for deployment in _all_authoritative_deployments(db):
-            service.record_router_reachability_change(db, deployment.id, reachable=False)
-        return ReconcileResult(reconciled=False, reason="router unreachable")
-
-    model_name = observed.get("model_name")
-    if not model_name:
-        return ReconcileResult(reconciled=False, reason="router reported no model_name")
-
-    desired_deployment = service.get_authoritative_allocation(db, model_name)
-    if desired_deployment is None or desired_deployment.traffic_allocation is None:
-        return ReconcileResult(reconciled=False, reason="no authoritative allocation")
-
-    # The GET above succeeded, so the router answered - it's reachable, even if
-    # the push below then fails (that's recorded separately as a fresh
-    # transition, since it's a distinct signal at a distinct moment).
-    service.record_router_reachability_change(db, desired_deployment.id, reachable=True)
-
+async def _reconcile_model(
+    db: Session,
+    router_gateway: RouterGateway,
+    desired_deployment: Deployment,
+    observed: dict[str, Any] | None,
+) -> ReconcileResult:
+    assert desired_deployment.traffic_allocation is not None
+    model_name = desired_deployment.model_name
     desired_revision = desired_deployment.traffic_allocation.revision
-    observed_deployment_id = observed.get("deployment_id")
-    observed_revision = observed.get("revision", 0)
+    observed_deployment_id = observed.get("deployment_id") if observed else None
+    observed_revision = observed.get("revision", 0) if observed else 0
 
     if observed_deployment_id == desired_deployment.id and observed_revision == desired_revision:
-        return ReconcileResult(reconciled=False, reason="already in sync")
+        return ReconcileResult(reconciled=False, reason="already in sync", model_name=model_name)
 
     targets: list[dict[str, Any]] = desired_deployment.traffic_allocation.targets
     try:
         await router_gateway.push_traffic_allocation(
-            desired_deployment.model_name, desired_deployment.id, desired_revision, targets
+            model_name, desired_deployment.id, desired_revision, targets
         )
     except StaleRevisionError:
         # Something else (a concurrent promote/rollback, or another reconcile
         # tick) already pushed this same or a newer revision between our GET and
         # this PUT - we're actually in sync now. Not an error, no event: nothing
         # this call did actually changed anything.
-        return ReconcileResult(reconciled=False, reason="already in sync (race)")
+        return ReconcileResult(
+            reconciled=False, reason="already in sync (race)", model_name=model_name
+        )
     except RouterUpdateError as exc:
-        logger.warning("reconcile push failed for deployment %s, will retry next tick: %s",
-                        desired_deployment.id, exc)
+        logger.warning(
+            "reconcile push failed for deployment %s, will retry next tick: %s",
+            desired_deployment.id,
+            exc,
+        )
         service.record_router_reachability_change(db, desired_deployment.id, reachable=False)
-        return ReconcileResult(reconciled=False, reason="router unreachable")
+        return ReconcileResult(reconciled=False, reason="router unreachable", model_name=model_name)
 
     db.add(
         DeploymentEvent(
@@ -148,4 +114,49 @@ async def reconcile_router_state(db: Session, router_gateway: RouterGateway) -> 
         deployment_id=desired_deployment.id,
         from_revision=observed_revision,
         to_revision=desired_revision,
+        model_name=model_name,
     )
+
+
+async def reconcile_router_state(
+    db: Session, router_gateway: RouterGateway
+) -> list[ReconcileResult]:
+    """For every model with an authoritative allocation in the DB, compares the
+    router's observed (deployment_id, revision) for that model against it and
+    re-pushes if they differ - including a model the router doesn't hold at all
+    (e.g. right after a restart, when only the default model has a bootstrap
+    split).
+
+    Using the authoritative allocation rather than only the active deployment is
+    what makes this still work *after* a rollout finishes: a router push that
+    fails right after a promote/rollback commit (or a router restart after one)
+    would otherwise have nothing left to reconcile against. See
+    docs/DESIGN_NOTES.md#desired-observed-reconciliation.
+
+    No push and no DeploymentEvent for a model that's already in sync -
+    reconciliation should be silent when there's nothing to reconcile, not spam
+    the timeline every tick just for checking.
+    """
+    desired = [d for d in all_authoritative_deployments(db) if d.traffic_allocation is not None]
+    observed_list = await router_gateway.get_observed_configs()
+    if observed_list is None:
+        for deployment in desired:
+            service.record_router_reachability_change(db, deployment.id, reachable=False)
+        return [ReconcileResult(reconciled=False, reason="router unreachable")]
+
+    observed_by_model = {
+        item["model_name"]: item for item in observed_list if item.get("model_name")
+    }
+    results = []
+    for deployment in desired:
+        # The GET above succeeded, so the router answered - it's reachable, even if
+        # the push below then fails (recorded separately as a fresh transition).
+        service.record_router_reachability_change(db, deployment.id, reachable=True)
+        results.append(
+            await _reconcile_model(
+                db, router_gateway, deployment, observed_by_model.get(deployment.model_name)
+            )
+        )
+    if not results:
+        return [ReconcileResult(reconciled=False, reason="no authoritative allocation")]
+    return results

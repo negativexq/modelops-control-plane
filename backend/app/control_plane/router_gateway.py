@@ -76,18 +76,19 @@ class RouterGateway:
             logger.warning("router config push failed: %s", exc)
             raise RouterUpdateError(str(exc)) from exc
 
-    async def get_observed_config(self) -> dict[str, Any] | None:
-        """GETs the router's current observed config - {model_name, deployment_id,
-        revision, targets}. Returns None if the router is unreachable: a router
-        that's down has nothing to reconcile against right now, and the next
-        reconcile tick will simply try again - see
-        app/control_plane/reconcile.py.
+    async def get_observed_configs(self) -> list[dict[str, Any]] | None:
+        """GETs every model's observed config from the router - a list of
+        {model_name, deployment_id, revision, targets}. Returns None if the router
+        is unreachable: a router that's down has nothing to reconcile against
+        right now, and the next reconcile tick will simply try again - see
+        app/control_plane/reconcile.py. An empty list is a reachable router that
+        holds no split at all.
         """
-        url = f"{self._base_url}/router/config"
+        url = f"{self._base_url}/router/configs"
         try:
             response = await self._client.get(url, timeout=self._timeout)
             response.raise_for_status()
-            result: dict[str, Any] = response.json()
+            result: list[dict[str, Any]] = response.json()
             return result
         except httpx.HTTPError as exc:
             logger.warning("router config fetch failed during reconcile: %s", exc)

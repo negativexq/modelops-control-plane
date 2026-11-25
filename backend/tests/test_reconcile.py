@@ -10,67 +10,88 @@ from sqlalchemy.orm import Session
 
 from app.control_plane import service
 from app.control_plane.models import Deployment, DeploymentStatus
-from app.control_plane.reconcile import reconcile_router_state
+from app.control_plane.reconcile import ReconcileResult, reconcile_router_state
 from app.control_plane.router_gateway import RouterUpdateError, StaleRevisionError
 
 
 class FakeRouterGateway:
-    """Router-shaped fake with observed state AND a directly-settable "as if the
-    router restarted / diverged" knob (see `desync`), plus `should_fail` to
-    simulate the router being completely unreachable."""
+    """Router-shaped fake holding one observed split per model (like the real
+    multi-model router), plus a directly-settable "as if the router restarted /
+    diverged" knob (see `desync`) and `should_fail` to simulate the router being
+    completely unreachable.
+
+    `observed_*` read the split of `observed_model_name` - the model last pushed
+    (or the one passed in) - which keeps single-model tests short."""
 
     def __init__(self, should_fail: bool = False, model_name: str = "fraud-model") -> None:
-        # A real router always has *some* model_name (set via its own
-        # RouterSettings env var, never None) even before any deployment has
-        # ever pushed a config to it - this is that bootstrap value.
         self.should_fail = should_fail
         self.calls: list[tuple[str, str, int, list[dict[str, Any]]]] = []
-        self.observed_model_name: str | None = model_name
-        self.observed_deployment_id: str | None = None
-        self.observed_revision: int = 0
-        self.observed_targets: list[dict[str, Any]] | None = None
+        self.configs: dict[str, dict[str, Any]] = {}
+        self.observed_model_name: str = model_name
+
+    @property
+    def _current(self) -> dict[str, Any]:
+        return self.configs.get(self.observed_model_name, {})
+
+    @property
+    def observed_deployment_id(self) -> str | None:
+        return self._current.get("deployment_id")
+
+    @property
+    def observed_revision(self) -> int:
+        return int(self._current.get("revision", 0))
+
+    @property
+    def observed_targets(self) -> list[dict[str, Any]] | None:
+        return self._current.get("targets")
 
     async def push_traffic_allocation(
         self, model_name: str, deployment_id: str, revision: int, targets: list[dict[str, Any]]
     ) -> None:
         if self.should_fail:
             raise RouterUpdateError("simulated router failure")
-        # Model-scoped generation (Sprint 14), not per-deployment - see
-        # app/router/main.py's put_config.
-        same_model = model_name == self.observed_model_name
-        if same_model and revision <= self.observed_revision:
+        # Model-scoped generation - see app/router/main.py's put_config.
+        current = self.configs.get(model_name)
+        if current is not None and revision <= current["revision"]:
             raise StaleRevisionError(f"stale revision {revision} for {deployment_id}")
+        self.configs[model_name] = {
+            "model_name": model_name,
+            "deployment_id": deployment_id,
+            "revision": revision,
+            "targets": targets,
+        }
         self.observed_model_name = model_name
-        self.observed_deployment_id = deployment_id
-        self.observed_revision = revision
-        self.observed_targets = targets
         self.calls.append((model_name, deployment_id, revision, targets))
 
-    async def get_observed_config(self) -> dict[str, Any] | None:
+    async def get_observed_configs(self) -> list[dict[str, Any]] | None:
         if self.should_fail:
             return None
-        # deployment_id=None is a legitimate observed state (a router that never
-        # had, or just lost, a real config still answers GET /router/config with
-        # its bootstrap default) - only should_fail means "unreachable".
-        return {
-            "model_name": self.observed_model_name,
-            "deployment_id": self.observed_deployment_id,
-            "revision": self.observed_revision,
-            "targets": self.observed_targets,
-        }
+        return list(self.configs.values())
 
     def desync(self, *, deployment_id: str | None, revision: int) -> None:
-        """Directly overwrites observed state without going through
-        push_traffic_allocation's staleness check - simulates the router
-        restarting and losing its config (deployment_id=None, revision reset)
-        or otherwise ending up out of step with the DB, without needing a real
-        restart."""
-        self.observed_deployment_id = deployment_id
-        self.observed_revision = revision
+        """Directly overwrites the current model's observed split without going
+        through push_traffic_allocation's staleness check. deployment_id=None
+        simulates the router restarting and losing that model's split."""
+        if deployment_id is None:
+            self.configs.pop(self.observed_model_name, None)
+        else:
+            self.configs[self.observed_model_name] = {
+                "model_name": self.observed_model_name,
+                "deployment_id": deployment_id,
+                "revision": revision,
+                "targets": None,
+            }
 
 
 def run(coro: Any) -> Any:
     return asyncio.run(coro)
+
+
+def reconcile_once(db: Session, router: FakeRouterGateway) -> ReconcileResult:
+    """One reconcile tick, for tests with a single model in play."""
+    results = run(reconcile_router_state(db, router))
+    assert len(results) == 1, results
+    return results[0]
 
 
 def _create_and_promote(db: Session, router: FakeRouterGateway, model_name: str) -> Deployment:
@@ -93,7 +114,7 @@ def test_reconcile_is_a_noop_when_already_in_sync(db_session: Session) -> None:
     _create_and_promote(db_session, router, "sync-model")
     calls_before = len(router.calls)
 
-    result = run(reconcile_router_state(db_session, router))
+    result = reconcile_once(db_session, router)
 
     assert result.reconciled is False
     assert result.reason == "already in sync"
@@ -115,7 +136,7 @@ def test_reconcile_corrects_drift_and_logs_exactly_one_event(db_session: Session
     # through the DB at all - the DB's desired state is unchanged.
     router.desync(deployment_id=None, revision=0)
 
-    result = run(reconcile_router_state(db_session, router))
+    result = reconcile_once(db_session, router)
 
     assert result.reconciled is True
     assert result.deployment_id == deployment.id
@@ -136,10 +157,10 @@ def test_reconcile_second_tick_after_correction_is_a_noop(db_session: Session) -
     deployment = _create_and_promote(db_session, router, "drift-model-2")
     router.desync(deployment_id=None, revision=0)
 
-    first = run(reconcile_router_state(db_session, router))
+    first = reconcile_once(db_session, router)
     assert first.reconciled is True
 
-    second = run(reconcile_router_state(db_session, router))
+    second = reconcile_once(db_session, router)
     assert second.reconciled is False
     assert second.reason == "already in sync"
 
@@ -152,7 +173,7 @@ def test_reconcile_handles_unreachable_router_without_raising(db_session: Sessio
     router = FakeRouterGateway(should_fail=True)
     _create_and_promote(db_session, FakeRouterGateway(), "unreachable-model")
 
-    result = run(reconcile_router_state(db_session, router))
+    result = reconcile_once(db_session, router)
 
     assert result.reconciled is False
     assert result.reason == "router unreachable"
@@ -169,7 +190,7 @@ def test_reconcile_writes_exactly_one_unreachable_event_across_repeated_failures
 
     failing = FakeRouterGateway(should_fail=True)
     for _ in range(3):
-        result = run(reconcile_router_state(db_session, failing))
+        result = reconcile_once(db_session, failing)
         assert result.reason == "router unreachable"
 
     db_session.refresh(deployment)
@@ -182,13 +203,13 @@ def test_reconcile_writes_exactly_one_recovered_event_after_outage(db_session: S
     deployment = _create_and_promote(db_session, router, "recovering-model")
 
     router.should_fail = True
-    run(reconcile_router_state(db_session, router))
+    reconcile_once(db_session, router)
     db_session.refresh(deployment)
     assert len([e for e in deployment.events if e.event_type == "router_unreachable"]) == 1
 
     router.should_fail = False
     for _ in range(3):
-        run(reconcile_router_state(db_session, router))
+        reconcile_once(db_session, router)
 
     db_session.refresh(deployment)
     recovered_events = [e for e in deployment.events if e.event_type == "router_recovered"]
@@ -199,16 +220,55 @@ def test_reconcile_writes_exactly_one_recovered_event_after_outage(db_session: S
 
 def test_reconcile_noop_when_no_deployment_at_all_for_model(db_session: Session) -> None:
     router = FakeRouterGateway()
-    # A non-None deployment_id so get_observed_config() returns a real payload
-    # (not "router unreachable") - the model_name it reports simply has no
-    # deployment of any kind (active or terminal) in the DB at all.
-    router.desync(deployment_id="some-stale-deployment-id", revision=1)
+    # The router holds a split for a model the DB knows nothing about; there's
+    # no desired state to reconcile it toward, so nothing is pushed.
     router.observed_model_name = "no-such-model"
+    router.desync(deployment_id="some-stale-deployment-id", revision=1)
 
-    result = run(reconcile_router_state(db_session, router))
+    result = reconcile_once(db_session, router)
 
     assert result.reconciled is False
     assert result.reason == "no authoritative allocation"
+    assert router.calls == []
+
+
+def test_reconcile_restores_every_model_after_a_router_restart(db_session: Session) -> None:
+    """The multi-model router holds one split per model; a restart loses all of
+    them, and one reconcile tick must put every model back, each with its own
+    deployment and revision - not just whichever model happened to be last."""
+    router = FakeRouterGateway()
+    first = _create_and_promote(db_session, router, "model-a")
+    second = _create_and_promote(db_session, router, "model-b")
+    router.configs.clear()
+
+    results = run(reconcile_router_state(db_session, router))
+
+    assert sorted((r.model_name, r.reconciled) for r in results) == [
+        ("model-a", True),
+        ("model-b", True),
+    ]
+    assert router.configs["model-a"]["deployment_id"] == first.id
+    assert router.configs["model-b"]["deployment_id"] == second.id
+
+    again = run(reconcile_router_state(db_session, router))
+    assert [r.reason for r in again] == ["already in sync", "already in sync"]
+
+
+def test_drift_on_one_model_does_not_touch_another(db_session: Session) -> None:
+    router = FakeRouterGateway()
+    _create_and_promote(db_session, router, "steady-model")
+    drifting = _create_and_promote(db_session, router, "drifting-model")
+    router.observed_model_name = "drifting-model"
+    router.desync(deployment_id=None, revision=0)
+    calls_before = len(router.calls)
+
+    results = {r.model_name: r for r in run(reconcile_router_state(db_session, router))}
+
+    assert results["steady-model"].reason == "already in sync"
+    assert results["drifting-model"].reconciled is True
+    assert router.calls[calls_before:] == [
+        ("drifting-model", drifting.id, 1, router.configs["drifting-model"]["targets"])
+    ]
 
 
 def test_post_commit_push_failure_is_corrected_by_a_later_reconcile_tick(
@@ -240,7 +300,7 @@ def test_post_commit_push_failure_is_corrected_by_a_later_reconcile_tick(
 
     # Router "comes back" - the next reconcile tick finds and fixes the drift.
     router.should_fail = False
-    result = run(reconcile_router_state(db_session, router))
+    result = reconcile_once(db_session, router)
 
     assert result.reconciled is True
     assert router.observed_deployment_id == deployment.id
@@ -291,7 +351,7 @@ def test_reconcile_recovers_promoted_deployment_after_post_commit_push_failure(
     ]
 
     router.should_fail = False
-    result = run(reconcile_router_state(db_session, router))
+    result = reconcile_once(db_session, router)
 
     assert result.reconciled is True
     assert router.observed_deployment_id == deployment.id
@@ -333,7 +393,7 @@ def test_reconcile_recovers_rolled_back_deployment_after_post_commit_push_failur
     ]
 
     router.should_fail = False
-    result = run(reconcile_router_state(db_session, router))
+    result = reconcile_once(db_session, router)
 
     assert result.reconciled is True
     assert router.observed_deployment_id == deployment.id
@@ -392,7 +452,7 @@ def test_reconcile_serves_frozen_inconclusive_allocation_not_prior_promoted(
     # touching the DB - the desired state (D2's frozen split) is unchanged.
     router.desync(deployment_id=None, revision=0)
 
-    result = run(reconcile_router_state(db_session, router))
+    result = reconcile_once(db_session, router)
 
     assert result.reconciled is True
     assert result.deployment_id == d2.id
@@ -427,7 +487,7 @@ def test_reconcile_handles_router_unreachable_when_authoritative_deployment_is_t
 
     failing = FakeRouterGateway(should_fail=True)
     for _ in range(3):
-        result = run(reconcile_router_state(db_session, failing))
+        result = reconcile_once(db_session, failing)
         assert result.reason == "router unreachable"
 
     db_session.refresh(deployment)

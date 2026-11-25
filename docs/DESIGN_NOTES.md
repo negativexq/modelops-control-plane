@@ -668,9 +668,11 @@ codebase's asyncio/httpx would be its own source of bugs).
 
 **Isolation**: each scenario gets its own `model_name`, so its
 `Deployment`/`PolicyEvaluation`/`DeploymentEvent` rows never mix with a real
-deployment created from the dashboard. This does **not** extend to the router: it
-holds exactly one active traffic split, so running a benchmark concurrently with a
-real demo will overwrite that demo's traffic split for the benchmark's duration.
+deployment created from the dashboard. The router keeps one split per model, and
+the benchmark's load goes to `POST /router/models/{model_name}/predict`, so a
+benchmark running next to a real demo leaves the demo's traffic split alone.
+(Before the router was multi-model it held a single split, and a benchmark
+overwrote the demo's for its duration.)
 
 **Fault injection without a Docker socket**: the two fault-injected scenarios
 target dedicated containers that serve the *same* v2-good artifact as the real

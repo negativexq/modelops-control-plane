@@ -27,10 +27,7 @@ class FakeRouterGateway:
     def __init__(self, should_fail: bool = False) -> None:
         self.should_fail = should_fail
         self.calls: list[tuple[str, str, int, list[dict[str, Any]]]] = []
-        self.observed_model_name: str | None = None
-        self.observed_deployment_id: str | None = None
-        self.observed_revision: int = 0
-        self.observed_targets: list[dict[str, Any]] | None = None
+        self.configs: dict[str, dict[str, Any]] = {}
 
     async def push_traffic_allocation(
         self, model_name: str, deployment_id: str, revision: int, targets: list[dict[str, Any]]
@@ -39,26 +36,22 @@ class FakeRouterGateway:
 
         if self.should_fail:
             raise RouterUpdateError("simulated router failure")
-        # Model-scoped generation (Sprint 14), not per-deployment - see
-        # app/router/main.py's put_config.
-        same_model = model_name == self.observed_model_name
-        if same_model and revision <= self.observed_revision:
+        # Model-scoped generation - see app/router/main.py's put_config.
+        current = self.configs.get(model_name)
+        if current is not None and revision <= current["revision"]:
             raise StaleRevisionError(f"stale revision {revision} for {deployment_id}")
-        self.observed_model_name = model_name
-        self.observed_deployment_id = deployment_id
-        self.observed_revision = revision
-        self.observed_targets = targets
+        self.configs[model_name] = {
+            "model_name": model_name,
+            "deployment_id": deployment_id,
+            "revision": revision,
+            "targets": targets,
+        }
         self.calls.append((model_name, deployment_id, revision, targets))
 
-    async def get_observed_config(self) -> dict[str, Any] | None:
-        if self.observed_deployment_id is None:
+    async def get_observed_configs(self) -> list[dict[str, Any]] | None:
+        if self.should_fail:
             return None
-        return {
-            "model_name": self.observed_model_name,
-            "deployment_id": self.observed_deployment_id,
-            "revision": self.observed_revision,
-            "targets": self.observed_targets,
-        }
+        return list(self.configs.values())
 
 
 @pytest.fixture
@@ -399,8 +392,26 @@ def test_get_observed_router_state_reflects_last_push(client: TestClient) -> Non
     assert response.status_code == 200
     body = response.json()
     assert body["reachable"] is True
-    assert body["deployment_id"] == deployment_id
-    assert body["revision"] == 1
+    [observed] = body["configs"]
+    assert observed["deployment_id"] == deployment_id
+    assert observed["revision"] == 1
+
+
+def test_list_router_configs_has_one_entry_per_model(client: TestClient) -> None:
+    _create_deployment(client)
+    response = client.post(
+        "/api/deployments",
+        json={
+            "model_name": "other-model",
+            "stable_version": "v1",
+            "canary_version": "v2-good",
+            "canary_weight": 0.2,
+        },
+    )
+    assert response.status_code == 201
+
+    configs = client.get("/api/router-config").json()
+    assert sorted(c["model_name"] for c in configs) == ["fraud-model", "other-model"]
 
 
 def test_reconcile_endpoint_is_a_noop_when_already_in_sync(client: TestClient) -> None:

@@ -10,7 +10,7 @@ import type {
   MetricsOut,
   ModelVersionEvaluation,
   ModelVersionMetadata,
-  ObservedRouterState,
+  ObservedRouter,
   RunBenchmarkRequest,
   ScenarioInfo,
   TimelineItem,
@@ -145,9 +145,9 @@ export function resumeAutomation(id: string): Promise<DeploymentOut> {
   );
 }
 
-// Read-only - never triggers a push. See ObservedRouterState.
-export function getObservedRouterState(): Promise<ObservedRouterState> {
-  return request<ObservedRouterState>("/api/router/observed");
+// Read-only - never triggers a push. See ObservedRouter.
+export function getObservedRouterState(): Promise<ObservedRouter> {
+  return request<ObservedRouter>("/api/router/observed");
 }
 
 export function getPolicyDefaults(): Promise<PolicyConfig> {

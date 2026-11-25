@@ -370,17 +370,37 @@ def get_deployment_comparison(
     )
 
 
+def _router_config_payload(deployment: Deployment) -> dict[str, Any]:
+    assert deployment.traffic_allocation is not None
+    return {
+        "model_name": deployment.model_name,
+        "deployment_id": deployment.id,
+        "targets": deployment.traffic_allocation.targets,
+    }
+
+
+@router_config_router.get("")
+def list_router_configs(db: DbDep) -> list[dict[str, Any]]:
+    """The router's startup-sync source: every model's authoritative traffic
+    allocation (see get_router_config below for what "authoritative" means).
+    Deliberately without revision, same as the single-model form: the router
+    boots with the right split, and the reconciler stamps the revision on its
+    next tick."""
+    return [
+        _router_config_payload(d)
+        for d in reconcile.all_authoritative_deployments(db)
+        if d.traffic_allocation is not None
+    ]
+
+
 @router_config_router.get("/{model_name}")
 def get_router_config(model_name: str, db: DbDep) -> dict[str, Any]:
-    """The router's startup-sync source: the authoritative traffic allocation for
-    this model (see service.get_authoritative_allocation - the active rollout if
-    one is in flight, otherwise the most recent PROMOTED/ROLLED_BACK deployment's
-    final allocation), so a restarted router doesn't boot with a stale default
-    split - including after a rollout has already *finished*: before Sprint 14
-    this only ever looked at the active deployment, so a router restarted after a
-    successful promote/rollback (no in-flight rollout left to find) fell all the
-    way back to the bootstrap default instead of the promoted/rolled-back split -
-    see docs/DESIGN_NOTES.md#desired-observed-reconciliation.
+    """The authoritative traffic allocation for one model (see
+    service.get_authoritative_allocation - the active rollout if one is in
+    flight, otherwise the most recent PROMOTED/ROLLED_BACK deployment's final
+    allocation), so a restarted router doesn't boot with a stale default split -
+    including after a rollout has already *finished*. See
+    docs/DESIGN_NOTES.md#desired-observed-reconciliation.
 
     Deliberately minimal - a plain GET, no push/webhook, no polling loop. The control
     plane remains the source of truth; the router just reads it once at startup.
@@ -390,56 +410,58 @@ def get_router_config(model_name: str, db: DbDep) -> dict[str, Any]:
         raise HTTPException(
             status_code=404, detail=f"No active traffic allocation on record for '{model_name}'"
         )
-    return {
-        "model_name": model_name,
-        "deployment_id": deployment.id,
-        "targets": deployment.traffic_allocation.targets,
-    }
+    return _router_config_payload(deployment)
 
 
 @reconcile_router.get("/observed")
 async def get_observed_router_state(router_gateway: RouterGatewayDep) -> dict[str, Any]:
-    """Read-only passthrough of the router's current observed config (GET
-    /router/config) - never mutates anything, unlike POST /reconcile. Exists so
+    """Read-only passthrough of every model's observed split on the router (GET
+    /router/configs) - never mutates anything, unlike POST /reconcile. Exists so
     the dashboard (which only ever talks to the control plane, not the router
     directly) can show desired-vs-observed drift without triggering a
     correction just by loading a page.
 
     `reachable` is the field the dashboard must check first: a router that's
-    genuinely down and one that's up but has never had a deployment pushed to
-    it (a fresh restart) both report `deployment_id: None`, so `deployment_id`
-    alone can't tell those apart - only whether the GET itself succeeded can.
-    Conflating them would make a real outage look identical to a harmless
-    one-tick-old boot state, which is exactly the failure mode this field
-    exists to avoid. See docs/DESIGN_NOTES.md#desired-observed-reconciliation.
+    down and one that's up but doesn't hold a split for some model both leave
+    that model out of `configs`, so only whether the GET itself succeeded can
+    tell them apart. See docs/DESIGN_NOTES.md#desired-observed-reconciliation.
     """
-    observed = await router_gateway.get_observed_config()
+    observed = await router_gateway.get_observed_configs()
     if observed is None:
-        return {
-            "reachable": False,
-            "model_name": None,
-            "deployment_id": None,
-            "revision": None,
-            "targets": None,
-        }
-    return {"reachable": True, **observed}
+        return {"reachable": False, "configs": []}
+    return {"reachable": True, "configs": observed}
 
 
 @reconcile_router.post("/reconcile")
 async def reconcile_router_state(db: DbDep, router_gateway: RouterGatewayDep) -> dict[str, Any]:
-    """Compares the router's observed (deployment_id, revision) against the DB's
-    desired state and re-pushes if they differ - see
+    """Compares the router's observed (deployment_id, revision) for every model
+    against the DB's desired state and re-pushes where they differ - see
     app/control_plane/reconcile.py and
     docs/DESIGN_NOTES.md#desired-observed-reconciliation. Called once per sweep by
     the worker's poll loop (app/worker/loop.py); never raises on its own account -
     a genuinely unreachable router or "nothing to reconcile" are both reported as
     `reconciled: false` with a `reason`, not an error.
+
+    The top-level fields summarise the sweep (the first correction made, if any);
+    `models` has one entry per model checked.
     """
-    result = await reconcile.reconcile_router_state(db, router_gateway)
+    results = await reconcile.reconcile_router_state(db, router_gateway)
+    first = next((r for r in results if r.reconciled), results[0])
     return {
-        "reconciled": result.reconciled,
-        "reason": result.reason,
-        "deployment_id": result.deployment_id,
-        "from_revision": result.from_revision,
-        "to_revision": result.to_revision,
+        "reconciled": any(r.reconciled for r in results),
+        "reason": first.reason,
+        "deployment_id": first.deployment_id,
+        "from_revision": first.from_revision,
+        "to_revision": first.to_revision,
+        "models": [
+            {
+                "model_name": r.model_name,
+                "reconciled": r.reconciled,
+                "reason": r.reason,
+                "deployment_id": r.deployment_id,
+                "from_revision": r.from_revision,
+                "to_revision": r.to_revision,
+            }
+            for r in results
+        ],
     }

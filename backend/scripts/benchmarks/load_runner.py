@@ -50,6 +50,7 @@ def start_locust(
     control_plane_url: str = "http://localhost:8000",
     label_delay_seconds: float = 10.0,
     label_coverage: float = 0.8,
+    model_name: str | None = None,
 ) -> subprocess.Popen[bytes]:
     """Launches Locust in the background (headless) so the caller can poll the
     control plane concurrently while load is in flight.
@@ -92,6 +93,8 @@ def start_locust(
         "BENCHMARK_CONTROL_PLANE_URL": control_plane_url,
         "BENCHMARK_LABEL_DELAY_SECONDS": str(label_delay_seconds),
         "BENCHMARK_LABEL_COVERAGE": str(label_coverage),
+        # The router serves several models; send load to this one's split.
+        "BENCHMARK_MODEL_NAME": model_name or "",
     }
     return subprocess.Popen(
         cmd,
@@ -131,6 +134,7 @@ def run_locust(
     control_plane_url: str = "http://localhost:8000",
     label_delay_seconds: float = 10.0,
     label_coverage: float = 0.8,
+    model_name: str | None = None,
 ) -> LoadTestResult:
     """Blocking convenience wrapper for callers that don't need to do anything else
     while load is running (e.g. the baseline scenario)."""
@@ -143,5 +147,6 @@ def run_locust(
         control_plane_url=control_plane_url,
         label_delay_seconds=label_delay_seconds,
         label_coverage=label_coverage,
+        model_name=model_name,
     )
     return finish_locust(process, output_prefix, duration_seconds, timeout=duration_seconds + 60)

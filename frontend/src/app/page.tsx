@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { useState } from "react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ArrowRight, ArrowUpRight, CircleHelp, GitBranch, Rocket, Undo2 } from "lucide-react";
-import { isLive, useDeployments, useFleetSummary, useRouterObserved } from "@/lib/queries";
+import { isLive, observedFor, useDeployments, useFleetSummary, useRouterObserved } from "@/lib/queries";
 import { decisionOf, formatDuration, relativeTime } from "@/lib/derive";
 import { STATUS_META, TONE_DOT } from "@/lib/status";
 import type { DeploymentOut } from "@/lib/types";
@@ -78,23 +80,56 @@ function Kpis() {
   );
 }
 
+/** Which model to show first: one with a live rollout, else the most recently
+ * started one the router holds a split for. */
+function defaultModel(deployments: DeploymentOut[], routed: string[]): string | undefined {
+  const live = deployments.find((d) => isLive(d.status) && routed.includes(d.model_name));
+  if (live) return live.model_name;
+  const latest = [...deployments]
+    .filter((d) => routed.includes(d.model_name))
+    .sort((a, b) => (b.created_at > a.created_at ? 1 : -1))[0];
+  return latest?.model_name ?? routed[0];
+}
+
 function LiveRouting({ deployments }: { deployments: DeploymentOut[] }) {
-  const { data: observed } = useRouterObserved();
+  const { data: router } = useRouterObserved();
+  const routed = router?.configs.map((c) => c.model_name) ?? [];
+  const [picked, setPicked] = useState<string | null>(null);
+  const model = picked && routed.includes(picked) ? picked : defaultModel(deployments, routed);
+  const observed = router ? observedFor(router, model) : undefined;
   const served = deployments.find((d) => d.id === observed?.deployment_id);
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>Live routing</CardTitle>
-        <CardDescription>What the router is serving right now, read from the router itself.</CardDescription>
-        {served ? (
-          <CardAction>
-            <Button asChild variant="ghost" size="xs">
+        <CardDescription>
+          What the router is serving right now, read from the router itself
+          {routed.length > 1 ? ` · ${routed.length} models` : ""}.
+        </CardDescription>
+        <CardAction className="flex items-center gap-1">
+          {routed.length > 1 && model ? (
+            <Select value={model} onValueChange={setPicked}>
+              <SelectTrigger size="sm" className="h-7 w-44 font-mono text-xs" aria-label="Model">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                {routed.map((name) => (
+                  <SelectItem key={name} value={name} className="font-mono text-xs">
+                    {name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : null}
+          {served ? (
+            <Button asChild variant="ghost" size="xs" aria-label={`Open ${served.model_name} rollout`}>
               <Link href={`/deployments/${served.id}`}>
-                <span className="font-mono">{served.model_name}</span> <ArrowRight />
+                {routed.length > 1 ? null : <span className="font-mono">{served.model_name}</span>} <ArrowRight />
               </Link>
             </Button>
-          </CardAction>
-        ) : null}
+          ) : null}
+        </CardAction>
       </CardHeader>
       <CardContent>
         <RoutingBeam observed={observed} stableVersion={served?.stable_version} />

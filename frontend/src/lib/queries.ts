@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import * as api from "./api";
 import { streamState } from "./live-stream";
 import { keys } from "./query-keys";
-import type { DeploymentOut, DeploymentStatus } from "./types";
+import type { DeploymentOut, DeploymentStatus, ObservedRouter, ObservedRouterState } from "./types";
 
 /**
  * Single source of truth for server state. Replaces the old hand-rolled
@@ -105,6 +105,19 @@ export function useMetricsTimeseries(id: string, live: boolean) {
 
 export function usePolicyDefaults() {
   return useQuery({ queryKey: keys.policyDefaults, queryFn: api.getPolicyDefaults, staleTime: 5 * 60_000 });
+}
+
+/** One model's slice of the router's observed state, in the shape the UI
+ * compares against a deployment's desired state. */
+export function observedFor(router: ObservedRouter, modelName: string | null | undefined): ObservedRouterState {
+  const config = router.configs.find((c) => c.model_name === modelName);
+  return {
+    reachable: router.reachable,
+    model_name: config?.model_name ?? modelName ?? null,
+    deployment_id: config?.deployment_id ?? null,
+    revision: config?.revision ?? null,
+    targets: config?.targets ?? null,
+  };
 }
 
 export function useRouterObserved(enabled = true) {
