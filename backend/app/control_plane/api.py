@@ -1,6 +1,6 @@
 import re
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
@@ -16,6 +16,12 @@ from app.control_plane.schemas import (
     MetricIn,
     MetricsOut,
     MetricsTimeseriesOut,
+    ObservedModelConfig,
+    ObservedRouterOut,
+    ReconcileModelOut,
+    ReconcileOut,
+    RouterConfigOut,
+    TargetWeightOut,
     TimelineItem,
 )
 from app.control_plane.service import (
@@ -370,17 +376,17 @@ def get_deployment_comparison(
     )
 
 
-def _router_config_payload(deployment: Deployment) -> dict[str, Any]:
+def _router_config_payload(deployment: Deployment) -> RouterConfigOut:
     assert deployment.traffic_allocation is not None
-    return {
-        "model_name": deployment.model_name,
-        "deployment_id": deployment.id,
-        "targets": deployment.traffic_allocation.targets,
-    }
+    return RouterConfigOut(
+        model_name=deployment.model_name,
+        deployment_id=deployment.id,
+        targets=[TargetWeightOut(**t) for t in deployment.traffic_allocation.targets],
+    )
 
 
 @router_config_router.get("")
-def list_router_configs(db: DbDep) -> list[dict[str, Any]]:
+def list_router_configs(db: DbDep) -> list[RouterConfigOut]:
     """The router's startup-sync source: every model's authoritative traffic
     allocation (see get_router_config below for what "authoritative" means).
     Deliberately without revision, same as the single-model form: the router
@@ -394,7 +400,7 @@ def list_router_configs(db: DbDep) -> list[dict[str, Any]]:
 
 
 @router_config_router.get("/{model_name}")
-def get_router_config(model_name: str, db: DbDep) -> dict[str, Any]:
+def get_router_config(model_name: str, db: DbDep) -> RouterConfigOut:
     """The authoritative traffic allocation for one model (see
     service.get_authoritative_allocation - the active rollout if one is in
     flight, otherwise the most recent PROMOTED/ROLLED_BACK deployment's final
@@ -414,7 +420,7 @@ def get_router_config(model_name: str, db: DbDep) -> dict[str, Any]:
 
 
 @reconcile_router.get("/observed")
-async def get_observed_router_state(router_gateway: RouterGatewayDep) -> dict[str, Any]:
+async def get_observed_router_state(router_gateway: RouterGatewayDep) -> ObservedRouterOut:
     """Read-only passthrough of every model's observed split on the router (GET
     /router/configs) - never mutates anything, unlike POST /reconcile. Exists so
     the dashboard (which only ever talks to the control plane, not the router
@@ -428,12 +434,14 @@ async def get_observed_router_state(router_gateway: RouterGatewayDep) -> dict[st
     """
     observed = await router_gateway.get_observed_configs()
     if observed is None:
-        return {"reachable": False, "configs": []}
-    return {"reachable": True, "configs": observed}
+        return ObservedRouterOut(reachable=False, configs=[])
+    return ObservedRouterOut(
+        reachable=True, configs=[ObservedModelConfig.model_validate(c) for c in observed]
+    )
 
 
 @reconcile_router.post("/reconcile")
-async def reconcile_router_state(db: DbDep, router_gateway: RouterGatewayDep) -> dict[str, Any]:
+async def reconcile_router_state(db: DbDep, router_gateway: RouterGatewayDep) -> ReconcileOut:
     """Compares the router's observed (deployment_id, revision) for every model
     against the DB's desired state and re-pushes where they differ - see
     app/control_plane/reconcile.py and
@@ -447,21 +455,21 @@ async def reconcile_router_state(db: DbDep, router_gateway: RouterGatewayDep) ->
     """
     results = await reconcile.reconcile_router_state(db, router_gateway)
     first = next((r for r in results if r.reconciled), results[0])
-    return {
-        "reconciled": any(r.reconciled for r in results),
-        "reason": first.reason,
-        "deployment_id": first.deployment_id,
-        "from_revision": first.from_revision,
-        "to_revision": first.to_revision,
-        "models": [
-            {
-                "model_name": r.model_name,
-                "reconciled": r.reconciled,
-                "reason": r.reason,
-                "deployment_id": r.deployment_id,
-                "from_revision": r.from_revision,
-                "to_revision": r.to_revision,
-            }
+    return ReconcileOut(
+        reconciled=any(r.reconciled for r in results),
+        reason=first.reason,
+        deployment_id=first.deployment_id,
+        from_revision=first.from_revision,
+        to_revision=first.to_revision,
+        models=[
+            ReconcileModelOut(
+                model_name=r.model_name,
+                reconciled=r.reconciled,
+                reason=r.reason,
+                deployment_id=r.deployment_id,
+                from_revision=r.from_revision,
+                to_revision=r.to_revision,
+            )
             for r in results
         ],
-    }
+    )

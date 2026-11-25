@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
@@ -51,7 +51,9 @@ class CreateDeploymentRequest(BaseModel):
 
 
 class DeploymentEventOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(
+        json_schema_serialization_defaults_required=True, from_attributes=True
+    )
 
     id: str
     event_type: str
@@ -81,7 +83,7 @@ class DeploymentOut(BaseModel):
     stable_version: str
     canary_version: str
     status: DeploymentStatus
-    policy_config: dict[str, Any] | None
+    policy_config: PolicyConfig | None
     inconclusive_retry_count: int
     automation_paused: bool
     created_at: datetime
@@ -104,6 +106,9 @@ class TimelineEventItem(BaseModel):
     """One DeploymentEvent row, tagged for the merged timeline (see
     app/control_plane/timeline.py)."""
 
+    # Always present in responses, so the API schema marks it required there.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
     type: Literal["event"] = "event"
     id: str
     timestamp: datetime
@@ -117,6 +122,9 @@ class TimelinePolicyItem(BaseModel):
     human-readable `explanation` (see app/policy/explain.py) - the raw
     observed_value/threshold/result alone don't say *why* e.g. minimum_requests
     stayed INCONCLUSIVE."""
+
+    # Always present in responses, so the API schema marks it required there.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
 
     type: Literal["policy_evaluation"] = "policy_evaluation"
     id: str
@@ -261,3 +269,52 @@ class MetricsTimeseriesOut(BaseModel):
     end: datetime
     bucket_seconds: int
     series: list[VersionSeries]
+
+
+# --- Router-facing views (GET /api/router-config, /api/router/observed, POST
+# /api/router/reconcile) ----------------------------------------------------------
+
+
+class TargetWeightOut(BaseModel):
+    version: str
+    weight: float
+
+
+class RouterConfigOut(BaseModel):
+    """One model's authoritative split, as the router's startup sync reads it."""
+
+    model_name: str
+    deployment_id: str
+    targets: list[TargetWeightOut]
+
+
+class ObservedModelConfig(BaseModel):
+    """One model's split as the router itself reports it."""
+
+    model_name: str
+    deployment_id: str | None
+    revision: int
+    targets: list[TargetWeightOut]
+
+
+class ObservedRouterOut(BaseModel):
+    reachable: bool
+    configs: list[ObservedModelConfig]
+
+
+class ReconcileModelOut(BaseModel):
+    model_name: str | None
+    reconciled: bool
+    reason: str
+    deployment_id: str | None
+    from_revision: int | None
+    to_revision: int | None
+
+
+class ReconcileOut(BaseModel):
+    reconciled: bool
+    reason: str
+    deployment_id: str | None
+    from_revision: int | None
+    to_revision: int | None
+    models: list[ReconcileModelOut]

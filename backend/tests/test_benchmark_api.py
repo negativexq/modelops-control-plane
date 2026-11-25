@@ -173,7 +173,33 @@ def test_completed_run_picks_up_json_report(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _patch_subprocess(monkeypatch, FakeProcess(returncode=0))
-    (tmp_path / "baseline.json").write_text(json.dumps({"scenario": "baseline", "ok": True}))
+    # The shape scripts/benchmarks/report.py's save_json_report writes.
+    report = {
+        "scenario": "baseline",
+        "description": "Baseline throughput",
+        "expected_outcome": "promote",
+        "observed_outcome": "PROMOTED",
+        "outcome_matches_expectation": True,
+        "deployment_id": "dep-1",
+        "model_name": "benchmark-baseline",
+        "started_at": None,
+        "final_status": "PROMOTED",
+        "load": {
+            "total_requests": 100,
+            "total_failures": 0,
+            "requests_per_second": 10.0,
+            "error_rate": 0.0,
+            "p50_ms": 5.0,
+            "p95_ms": 9.0,
+            "p99_ms": 12.0,
+            "duration_seconds": 10,
+        },
+        "time_to_detect_seconds": None,
+        "time_to_action_seconds": 4.2,
+        "notes": [],
+        "run_at": "2026-11-26T10:00:00+00:00",
+    }
+    (tmp_path / "baseline.json").write_text(json.dumps(report))
 
     run_id = client.post("/api/benchmarks/run", json={"scenario": "baseline"}).json()["id"]
 
@@ -185,7 +211,8 @@ def test_completed_run_picks_up_json_report(
     body = client.get(f"/api/benchmarks/{run_id}").json()
     assert body["status"] == "COMPLETED"
     assert body["completed_at"] is not None
-    assert body["result"] == {"scenario": "baseline", "ok": True}
+    assert body["result"]["observed_outcome"] == "PROMOTED"
+    assert body["result"]["load"]["total_requests"] == 100
 
 
 def test_completed_run_without_report_file_still_completes(

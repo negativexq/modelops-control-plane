@@ -10,7 +10,7 @@ import statistics
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -36,13 +36,26 @@ LIVE_STATUSES = frozenset(
 
 
 class OutcomeCount(BaseModel):
+    # Always present in responses, so the API schema marks it required there.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
     total: int = 0
     automatic: int = 0
     manual: int = 0
     unknown: int = 0
 
 
+class OutcomeCounts(BaseModel):
+    PROMOTED: OutcomeCount
+    ROLLED_BACK: OutcomeCount
+    INCONCLUSIVE: OutcomeCount
+    FAILED: OutcomeCount
+
+
 class DailyOutcomes(BaseModel):
+    # Always present in responses, so the API schema marks it required there.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
     date: date
     PROMOTED: int = 0
     ROLLED_BACK: int = 0
@@ -55,7 +68,7 @@ class FleetSummary(BaseModel):
     total: int
     live: int
     by_status: dict[str, int]
-    outcomes: dict[str, OutcomeCount]
+    outcomes: OutcomeCounts
     # Share of PROMOTED/ROLLED_BACK decisions the policy engine made on its own.
     automation_rate: float | None
     # Median seconds from start to PROMOTED/ROLLED_BACK.
@@ -138,7 +151,7 @@ def build_summary(
         total=len(deployments),
         live=sum(1 for d in deployments if d.status in LIVE_STATUSES),
         by_status=by_status,
-        outcomes=outcomes,
+        outcomes=OutcomeCounts(**outcomes),
         automation_rate=automatic / decided if decided else None,
         median_decision_seconds=statistics.median(decision_seconds) if decision_seconds else None,
         daily=daily,

@@ -38,6 +38,38 @@ jobs:
       - run: npm run type-check
       - run: npm run build
 
+  # The dashboard's API types are generated from the control plane's OpenAPI
+  # schema (frontend/openapi.json -> frontend/src/lib/api-schema.ts). Regenerate
+  # both from the code being tested and fail if either differs from what's
+  # committed: an API change has to bring the dashboard's types along with it.
+  api-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - run: pip install -e .
+        working-directory: backend
+      - run: npm ci
+        working-directory: frontend
+      - name: Regenerate the schema and the TypeScript types
+        working-directory: frontend
+        env:
+          PYTHON: python
+        run: npm run gen:api
+      - name: Fail if they differ from what's committed
+        run: |
+          if ! git diff --exit-code -- frontend/openapi.json frontend/src/lib/api-schema.ts; then
+            echo "::error::The API changed but frontend/openapi.json / src/lib/api-schema.ts weren't regenerated. Run 'npm run gen:api' in frontend/ and commit the result."
+            exit 1
+          fi
+
   # Brings up the real docker-compose stack (9 containers: 8 HTTP-exposed services
   # + the worker, which has no HTTP surface) and exercises it over HTTP exactly like
   # a human demoing the platform would - including waiting for the real automated
@@ -51,7 +83,7 @@ jobs:
   # collaborators.
   integration:
     runs-on: ubuntu-latest
-    needs: [backend, frontend]
+    needs: [backend, frontend, api-contract]
     timeout-minutes: 20
     env:
       # The worker's real (production) poll interval is 15s - two of the three

@@ -8,7 +8,10 @@
     "start": "next start",
     "lint": "eslint",
     "type-check": "tsc --noEmit",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "gen:api": "npm run gen:api:schema && npm run gen:api:types",
+    "gen:api:schema": "cd ../backend && ${PYTHON:-.venv/bin/python} -m scripts.export_openapi",
+    "gen:api:types": "openapi-typescript openapi.json -o src/lib/api-schema.ts --default-non-nullable=false"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.108.4",
@@ -35,6 +38,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.12",
+    "openapi-typescript": "^7.13.0",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

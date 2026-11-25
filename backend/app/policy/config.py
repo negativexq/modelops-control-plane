@@ -1,16 +1,25 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class LatencyPolicy(BaseModel):
+    # Always present in responses, so the API schema marks it required there.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
     p95_max_increase_percent: float = Field(default=20.0, ge=0)
 
 
 class ReliabilityPolicy(BaseModel):
+    # Always present in responses, so the API schema marks it required there.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
     max_error_rate_percent: float = Field(default=5.0, ge=0)
 
 
 class QualityPolicy(BaseModel):
+    # Always present in responses, so the API schema marks it required there.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
     minimum_recall: float = Field(default=0.8, ge=0, le=1)
 
 
@@ -22,6 +31,9 @@ class PolicyConfig(BaseModel):
     `window_seconds`) - a policy's outcome should be reproducible from the policy
     alone, not depend on whatever window a client happened to pass that call.
     """
+
+    # Always present in responses, so the API schema marks it required there.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
 
     minimum_requests: int = Field(default=100, ge=0)
     evaluation_window_seconds: int = Field(default=300, ge=1)

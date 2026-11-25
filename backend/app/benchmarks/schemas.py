@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -23,6 +22,42 @@ class RunBenchmarkRequest(BaseModel):
     max_wait_seconds: int | None = None
 
 
+class LoadTestResultOut(BaseModel):
+    """Mirrors scripts/benchmarks/report.py's LoadTestResult (what the benchmark
+    subprocess writes); declared here so the API schema is exact."""
+
+    total_requests: int
+    total_failures: int
+    requests_per_second: float
+    error_rate: float
+    p50_ms: float
+    p95_ms: float
+    p99_ms: float
+    duration_seconds: float
+
+
+class BenchmarkResultOut(BaseModel):
+    """Mirrors scripts/benchmarks/report.py's BenchmarkResult."""
+
+    # Always present in responses, so the API schema marks it required there.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+    scenario: str
+    description: str
+    expected_outcome: str
+    observed_outcome: str
+    outcome_matches_expectation: bool
+    deployment_id: str
+    model_name: str
+    started_at: str | None
+    final_status: str
+    load: LoadTestResultOut | None
+    time_to_detect_seconds: float | None
+    time_to_action_seconds: float | None
+    notes: list[str] = []
+    run_at: str
+
+
 class BenchmarkRunOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -31,5 +66,5 @@ class BenchmarkRunOut(BaseModel):
     status: BenchmarkRunStatus
     started_at: datetime
     completed_at: datetime | None
-    result: dict[str, Any] | None
+    result: BenchmarkResultOut | None
     error_message: str | None

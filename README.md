@@ -542,22 +542,31 @@ curl localhost:8000/api/router-config/fraud-model   # now finds a PROMOTED/
 
 ```bash
 make dev             # bring up the whole stack via docker compose
-make test            # backend tests (pytest) - 303 tests
+make test            # backend tests (pytest) - 311 tests
 make coverage        # same, plus an HTML report at backend/htmlcov/index.html
 make lint            # backend (ruff, mypy) + frontend (eslint, tsc) lint/type-check
 make ci-smoke-test   # the same real-stack check CI runs - needs `make dev` running
 make e2e             # Playwright browser tests against the running stack
 make down            # stop the services
+cd frontend && npm run gen:api   # regenerate the dashboard's API types after an API change
 ```
 
-**CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs three jobs on
+The dashboard's API types aren't written by hand: `npm run gen:api` exports the
+control plane's OpenAPI schema to `frontend/openapi.json` and generates
+`frontend/src/lib/api-schema.ts` from it; `src/lib/types.ts` only re-exports
+those, plus the few shapes OpenAPI can't describe (the SSE payload, free-form
+registry JSON). The `api-contract` CI job regenerates both and fails if they
+differ from what's committed.
+
+**CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs four jobs on
 every push/PR:
 
 | Job | What it checks | Runtime |
 |---|---|---|
-| `backend` | `ruff`, `mypy --strict`, `pytest` (303 tests, mocked collaborators) | seconds |
+| `backend` | `ruff`, `mypy --strict`, `pytest` (311 tests, mocked collaborators) | seconds |
 | `frontend` | `eslint`, `tsc --noEmit`, `next build` | seconds |
-| `integration` | Builds and boots the **real** 9-container stack (8 HTTP-exposed services + the worker, which has no HTTP surface), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s six scenarios followed by the Playwright suite in [`frontend/e2e`](frontend/e2e) - gated on the two jobs above passing first | a few minutes |
+| `api-contract` | Regenerates the OpenAPI schema and the dashboard's TypeScript types; fails if either differs from what's committed | seconds |
+| `integration` | Builds and boots the **real** 9-container stack (8 HTTP-exposed services + the worker, which has no HTTP surface), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s six scenarios followed by the Playwright suite in [`frontend/e2e`](frontend/e2e) - gated on the three jobs above passing first | a few minutes |
 
 The `integration` job's six scenarios, in order: **(1)** a fast manual create →
 evaluate → promote path, created with `automation_paused=True` so the always-on

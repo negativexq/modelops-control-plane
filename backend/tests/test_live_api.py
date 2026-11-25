@@ -212,9 +212,9 @@ def test_summary_counts_outcomes_actors_and_median(db_session: Session) -> None:
     assert summary.total == 5
     assert summary.live == 1
     assert summary.by_status["ROLLED_BACK"] == 2
-    assert summary.outcomes["ROLLED_BACK"].automatic == 1
-    assert summary.outcomes["ROLLED_BACK"].manual == 1
-    assert summary.outcomes["INCONCLUSIVE"].total == 1
+    assert summary.outcomes.ROLLED_BACK.automatic == 1
+    assert summary.outcomes.ROLLED_BACK.manual == 1
+    assert summary.outcomes.INCONCLUSIVE.total == 1
     assert summary.median_decision_seconds == pytest.approx(60.0)
     assert summary.automation_rate == pytest.approx(2 / 3)
     assert len(summary.daily) == 14
@@ -223,7 +223,7 @@ def test_summary_counts_outcomes_actors_and_median(db_session: Session) -> None:
 
     without_benchmarks = build_summary(db_session, include_benchmarks=False, now=NOW)
     assert without_benchmarks.total == 4
-    assert without_benchmarks.outcomes["ROLLED_BACK"].total == 1
+    assert without_benchmarks.outcomes.ROLLED_BACK.total == 1
 
 
 @pytest.fixture
