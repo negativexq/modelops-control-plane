@@ -180,7 +180,7 @@ crash or restart loses nothing.
 | Check | Measures | Statistics |
 |---|---|---|
 | `max_error_rate` | Canary 5xx share | Wilson score interval, exact binomial test |
-| `latency_p95_increase` | Canary p95 vs stable p95 | Bootstrap interval of the p95 ratio, one-sided Mann-Whitney U |
+| `latency_p95_increase` | Canary p95 vs stable p95, over successful responses | Bootstrap interval of the p95 ratio, one-sided Mann-Whitney U |
 | `minimum_recall` | Recall over matured labels | Wilson score interval, exact binomial test |
 | `minimum_requests` | Traffic on both sides | gate |
 | `minimum_labeled_samples` · `minimum_label_coverage` · `minimum_positive_labels` | Is there enough ground truth to judge quality? | gates |

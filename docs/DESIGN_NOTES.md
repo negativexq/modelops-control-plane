@@ -162,6 +162,16 @@ SQL — SQLite has no `percentile_cont` or window-function equivalent. The windo
 query pulls matching rows and computes linear-interpolation percentiles (same
 convention as `numpy.percentile`'s default) over the in-memory list.
 
+Latency percentiles (and the raw samples the latency check bootstraps over) come
+from successful responses only; every 4xx/5xx counts toward the error rate
+instead. Failures say nothing about how fast a version serves, and some are
+nearly instant: when a version's circuit breaker is open the gateway fails the
+request fast and reports a 503 after well under a millisecond. Counting those
+made a canary that was down look ~100% *faster* than stable, so the latency
+check passed it (the error-rate check still failed it). A canary that served
+nothing now has no p95 at all, and its latency check is INCONCLUSIVE. The
+Gateway page's live p95 uses the same definition.
+
 `compute_version_summary()` takes a `window_end_offset_seconds` parameter
 (default `0`), shifting the whole window into the past rather than always ending
 "now" — this is what lets the policy engine read two different slices of history

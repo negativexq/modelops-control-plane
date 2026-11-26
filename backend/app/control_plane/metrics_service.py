@@ -35,6 +35,15 @@ def record_metric(db: Session, deployment_id: str, payload: MetricIn) -> None:
     db.commit()
 
 
+def _is_answered(status_code: int) -> bool:
+    """Latency percentiles are computed over successful responses only. Failures
+    are the error-rate check's job, and their "latency" says nothing about how
+    fast the version serves: a request the gateway failed fast because the
+    version's circuit breaker is open is reported as a 503 after ~0 ms, so
+    counting it would make a canary that is down look *faster* than stable."""
+    return status_code < 400
+
+
 def _percentile(sorted_values: list[float], pct: float) -> float:
     """Linear-interpolation percentile (same convention as numpy.percentile's
     default), computed in Python since SQLite has no percentile_cont/window function
@@ -107,8 +116,10 @@ def compute_version_summary(
             label_delay_p95_seconds=None,
         )
 
-    latencies = sorted(metric.latency_ms for metric, _label in rows)
-    error_count = sum(1 for metric, _label in rows if metric.status_code >= 400)
+    latencies = sorted(
+        metric.latency_ms for metric, _label in rows if _is_answered(metric.status_code)
+    )
+    error_count = sum(1 for metric, _label in rows if not _is_answered(metric.status_code))
 
     labeled_rows = [(metric, label) for metric, label in rows if label is not None]
     labeled_sample_count = len(labeled_rows)
@@ -148,9 +159,9 @@ def compute_version_summary(
     return MetricsSummary(
         version=version,
         sample_count=sample_count,
-        p50_latency_ms=_percentile(latencies, 50),
-        p95_latency_ms=_percentile(latencies, 95),
-        p99_latency_ms=_percentile(latencies, 99),
+        p50_latency_ms=_percentile(latencies, 50) if latencies else None,
+        p95_latency_ms=_percentile(latencies, 95) if latencies else None,
+        p99_latency_ms=_percentile(latencies, 99) if latencies else None,
         error_rate=error_count / sample_count,
         precision=precision,
         recall=recall,
@@ -166,14 +177,16 @@ def compute_version_summary(
 def window_latencies(
     db: Session, deployment_id: str, version: str, window_seconds: int, *, now: datetime
 ) -> list[float]:
-    """Raw latencies (ms) for one version in [now - window, now] - the same rows
-    compute_version_summary(..., now=now) summarizes. The policy engine's
-    latency check bootstraps over these (see app/policy/stats.py)."""
+    """Raw latencies (ms) of successful responses for one version in
+    [now - window, now] - the same samples compute_version_summary(..., now=now)
+    takes its percentiles from (see _is_answered). The policy engine's latency
+    check bootstraps over these (see app/policy/stats.py)."""
     stmt = select(PredictionMetric.latency_ms).where(
         PredictionMetric.deployment_id == deployment_id,
         PredictionMetric.model_version == version,
         PredictionMetric.created_at >= now - timedelta(seconds=window_seconds),
         PredictionMetric.created_at <= now,
+        PredictionMetric.status_code < 400,
     )
     return [float(v) for v in db.execute(stmt).scalars().all()]
 
@@ -248,13 +261,13 @@ def compute_timeseries(
         buckets: list[MetricsBucket] = []
         for index in range(bucket_count):
             samples = grouped.get((version, index), [])
-            latencies = sorted(latency for latency, _ in samples)
+            latencies = sorted(latency for latency, code in samples if _is_answered(code))
             buckets.append(
                 MetricsBucket(
                     t=start + timedelta(seconds=index * bucket_seconds),
                     count=len(samples),
                     error_rate=(
-                        sum(1 for _, code in samples if code >= 400) / len(samples)
+                        sum(1 for _, code in samples if not _is_answered(code)) / len(samples)
                         if samples
                         else None
                     ),

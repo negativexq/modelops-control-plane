@@ -11,7 +11,13 @@ import httpx
 from fastapi.testclient import TestClient
 
 from app.router.config import RouterSettings, TargetWeight
-from app.router.gateway import BreakerState, CircuitBreaker, TokenBucket, sticky_target
+from app.router.gateway import (
+    BreakerState,
+    CircuitBreaker,
+    TokenBucket,
+    VersionStats,
+    sticky_target,
+)
 from app.router.main import create_app as create_router_app
 from app.serving.config import ServingSettings
 from app.serving.main import create_app as create_serving_app
@@ -303,6 +309,19 @@ def test_rate_limit_answers_429_with_retry_after(artifacts_dir: Path) -> None:
     limited = client.post("/router/predict", json=payload)
     assert limited.headers["Retry-After"] == "2"
     assert client.get("/router/gateway").json()["models"][0]["rate_limited_total"] == 2
+
+
+def test_version_stats_latency_counts_successful_answers_only() -> None:
+    stats = VersionStats(clock=lambda: 100.0)
+    stats.record("ok", 40.0)
+    stats.record("ok", 60.0)
+    stats.record("server_error", 900.0)  # the model answered, with a 5xx
+    stats.record("rejected", None)  # breaker open, failed fast
+    snapshot = stats.snapshot()
+    assert snapshot["window_requests"] == 4
+    assert snapshot["error_rate"] == 0.5
+    assert snapshot["p50_latency_ms"] == 50.0
+    assert snapshot["p95_latency_ms"] == 59.0
 
 
 def test_token_bucket_refills_over_time() -> None:

@@ -165,6 +165,47 @@ def test_error_rate_counts_4xx_and_5xx(db_session: Session, deployment: Deployme
     assert summary.error_rate == pytest.approx(0.75)
 
 
+def test_latency_percentiles_use_successful_responses_only(
+    db_session: Session, deployment: Deployment
+) -> None:
+    _add_metric(db_session, deployment.id, "v1", latency_ms=40, status_code=200)
+    _add_metric(db_session, deployment.id, "v1", latency_ms=60, status_code=200)
+    _add_metric(db_session, deployment.id, "v1", latency_ms=0.3, status_code=503)  # failed fast
+    _add_metric(db_session, deployment.id, "v1", latency_ms=900, status_code=500)
+
+    summary = metrics_service.compute_version_summary(db_session, deployment.id, "v1", 3600)
+    assert summary.sample_count == 4
+    assert summary.error_rate == pytest.approx(0.5)
+    assert summary.p50_latency_ms == pytest.approx(50)
+    assert sorted(
+        metrics_service.window_latencies(
+            db_session, deployment.id, "v1", 3600, now=datetime.now(UTC)
+        )
+    ) == [40, 60]
+
+    series = metrics_service.compute_timeseries(
+        db_session,
+        deployment.id,
+        [("v1", "stable")],
+        datetime.now(UTC) - timedelta(minutes=1),
+        datetime.now(UTC) + timedelta(seconds=1),
+    ).series[0]
+    busy = [b for b in series.buckets if b.count]
+    assert sum(b.count for b in busy) == 4
+    assert max(b.p95_latency_ms or 0 for b in busy) <= 60
+
+
+def test_latency_is_none_when_every_request_failed(
+    db_session: Session, deployment: Deployment
+) -> None:
+    _add_metric(db_session, deployment.id, "v1", latency_ms=0.3, status_code=503)
+    summary = metrics_service.compute_version_summary(db_session, deployment.id, "v1", 3600)
+    assert summary.sample_count == 1
+    assert summary.error_rate == 1.0
+    assert summary.p50_latency_ms is None
+    assert summary.p95_latency_ms is None
+
+
 def test_labeled_sample_count_and_coverage(db_session: Session, deployment: Deployment) -> None:
     _add_metric(db_session, deployment.id, "v1", latency_ms=1, prediction=1, actual_label=1)
     _add_metric(db_session, deployment.id, "v1", latency_ms=1, prediction=0, actual_label=0)

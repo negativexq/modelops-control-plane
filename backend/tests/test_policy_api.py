@@ -167,6 +167,47 @@ def test_evaluate_fails_on_excessive_error_rate(
     assert error_check["observed_value"] == pytest.approx(50.0)
 
 
+def test_evaluate_canary_that_is_down_never_passes_latency(
+    client: TestClient, db_session: Session, deployment: Deployment
+) -> None:
+    """A canary whose circuit breaker is open: the gateway fails every request
+    fast and reports it as a 503 after well under a millisecond. Those must not
+    count as latency samples - they used to make the canary look ~100% faster
+    than stable, so the latency check PASSed a version that served nothing."""
+    _add_metrics(db_session, deployment.id, "v1", count=20, latency_ms=20.0)
+    _add_metrics(db_session, deployment.id, "v2-good", count=20, latency_ms=0.4, status_code=503)
+
+    response = client.post(
+        f"/api/deployments/{deployment.id}/evaluate", json={"minimum_requests": 10}
+    )
+    body = response.json()
+    latency_check = next(c for c in body["checks"] if c["policy_name"] == "latency_p95_increase")
+    assert latency_check["result"] == "INCONCLUSIVE"
+    assert latency_check["observed_value"] is None
+    error_check = next(c for c in body["checks"] if c["policy_name"] == "max_error_rate")
+    assert error_check["result"] == "FAIL"
+    assert body["overall_result"] == "FAIL"
+
+
+def test_evaluate_latency_ignores_fast_failures_hiding_slow_answers(
+    client: TestClient, db_session: Session, deployment: Deployment
+) -> None:
+    """Fast failures used to drag a slow canary's p95 down below the limit."""
+    _add_metrics(db_session, deployment.id, "v1", count=40, latency_ms=20.0)
+    _add_metrics(db_session, deployment.id, "v2-good", count=20, latency_ms=100.0)
+    _add_metrics(db_session, deployment.id, "v2-good", count=400, latency_ms=0.4, status_code=503)
+
+    response = client.post(
+        f"/api/deployments/{deployment.id}/evaluate",
+        json={"minimum_requests": 10, "latency": {"p95_max_increase_percent": 20.0}},
+    )
+    latency_check = next(
+        c for c in response.json()["checks"] if c["policy_name"] == "latency_p95_increase"
+    )
+    assert latency_check["observed_value"] == pytest.approx(400.0)
+    assert latency_check["result"] == "FAIL"
+
+
 def test_evaluate_passes_when_recall_meets_threshold_with_labels(
     client: TestClient, db_session: Session, deployment: Deployment
 ) -> None:

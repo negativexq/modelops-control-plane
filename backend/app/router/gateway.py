@@ -259,7 +259,11 @@ class VersionStats:
         outcomes = dict.fromkeys(OUTCOMES, 0)
         for s in samples:
             outcomes[s.outcome] += 1
-        latencies = sorted(s.latency_ms for s in samples if s.latency_ms is not None)
+        # Successful responses only, the same samples the policy engine's latency
+        # check uses (app/control_plane/metrics_service.py, _is_answered).
+        latencies = sorted(
+            s.latency_ms for s in samples if s.outcome == "ok" and s.latency_ms is not None
+        )
         failed = outcomes["server_error"] + outcomes["gateway_error"] + outcomes["rejected"]
         return {
             "requests_per_second": round(len(recent) / RATE_WINDOW_SECONDS, 2),
