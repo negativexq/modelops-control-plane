@@ -42,11 +42,15 @@ export function RoutingBeam({ observed, stableVersion }: { observed: ObservedRou
 
   return (
     <div className="relative grid h-[168px] grid-cols-[auto_1fr_auto] items-center gap-0">
-      <div className="z-10 flex flex-col items-center gap-1.5">
+      {/* The label hangs below the icon out of flow, so the icon itself - not
+          icon + label - is what sits on the beams' origin (H / 2). */}
+      <div className="relative z-10">
         <span className="flex size-12 items-center justify-center rounded-xl border bg-card shadow-sm">
           <Radio className="size-5 text-success" />
         </span>
-        <span className="font-mono text-[11px] text-muted-foreground">router · r{observed.revision}</span>
+        <span className="absolute top-full left-0 mt-1.5 whitespace-nowrap font-mono text-[11px] text-muted-foreground">
+          router · r{observed.revision}
+        </span>
       </div>
 
       <svg viewBox={`0 0 100 ${H}`} preserveAspectRatio="none" className="h-full w-full" aria-hidden>
