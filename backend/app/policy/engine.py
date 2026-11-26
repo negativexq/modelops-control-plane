@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 from app.control_plane.models import PolicyEvaluationResult
 from app.control_plane.schemas import MetricsSummary
+from app.policy import stats
 from app.policy.config import LatencyPolicy, PolicyConfig, QualityPolicy, ReliabilityPolicy
 
 PASS = PolicyEvaluationResult.PASS
@@ -16,6 +17,49 @@ class PolicyCheckResult:
     observed_value: float | None
     threshold: float | None
     result: PolicyEvaluationResult
+    # Statistical evidence, in the same unit as observed_value (see
+    # app/policy/stats.py). None for the data-sufficiency gates, which are counts,
+    # and when there's too little data to compute an interval at all.
+    ci_low: float | None = None
+    ci_high: float | None = None
+    p_value: float | None = None
+    method: str | None = None
+
+
+@dataclass(frozen=True)
+class LatencySamples:
+    """Raw per-request latencies (ms) in the reliability window. Without them
+    the latency check can only compare point p95s."""
+
+    stable: list[float]
+    canary: list[float]
+
+
+def _decide_upper_limit(
+    observed: float, limit: float, interval: stats.Interval | None
+) -> PolicyEvaluationResult:
+    """For a metric that must stay at or below `limit` (error rate, latency
+    increase). FAIL needs the whole confidence interval above the limit: the
+    breach must be real, not noise. Above the limit but not confidently so is
+    INCONCLUSIVE - wait for more traffic instead of rolling back a release that
+    may be fine. At or below the limit passes."""
+    if observed <= limit:
+        return PASS
+    if interval is not None and interval.low > limit:
+        return FAIL
+    return INCONCLUSIVE
+
+
+def _decide_lower_limit(
+    observed: float, limit: float, interval: stats.Interval | None
+) -> PolicyEvaluationResult:
+    """Mirror of _decide_upper_limit for a metric that must stay at or above
+    `limit` (recall)."""
+    if observed >= limit:
+        return PASS
+    if interval is not None and interval.high < limit:
+        return FAIL
+    return INCONCLUSIVE
 
 
 def _evaluate_minimum_requests(
@@ -33,7 +77,11 @@ def _evaluate_minimum_requests(
 
 
 def _evaluate_latency(
-    stable: MetricsSummary, canary: MetricsSummary, policy: LatencyPolicy
+    stable: MetricsSummary,
+    canary: MetricsSummary,
+    policy: LatencyPolicy,
+    confidence: float,
+    samples: LatencySamples | None,
 ) -> PolicyCheckResult:
     if not stable.p95_latency_ms or canary.p95_latency_ms is None:
         return PolicyCheckResult(
@@ -45,17 +93,34 @@ def _evaluate_latency(
         )
 
     increase_percent = (canary.p95_latency_ms - stable.p95_latency_ms) / stable.p95_latency_ms * 100
-    result = FAIL if increase_percent > policy.p95_max_increase_percent else PASS
+    limit = policy.p95_max_increase_percent
+    if samples is None:
+        # No raw latencies (callers that only have summaries): point estimate only.
+        return PolicyCheckResult(
+            policy_name="latency_p95_increase",
+            metric_name="p95_latency_increase_percent",
+            observed_value=increase_percent,
+            threshold=limit,
+            result=FAIL if increase_percent > limit else PASS,
+        )
+
+    interval = stats.p95_increase_interval(samples.stable, samples.canary, confidence)
     return PolicyCheckResult(
         policy_name="latency_p95_increase",
         metric_name="p95_latency_increase_percent",
         observed_value=increase_percent,
-        threshold=policy.p95_max_increase_percent,
-        result=result,
+        threshold=limit,
+        result=_decide_upper_limit(increase_percent, limit, interval),
+        ci_low=interval.low if interval else None,
+        ci_high=interval.high if interval else None,
+        p_value=stats.latency_shift_p_value(samples.stable, samples.canary, limit),
+        method="bootstrap_p95_ratio+mann_whitney",
     )
 
 
-def _evaluate_reliability(canary: MetricsSummary, policy: ReliabilityPolicy) -> PolicyCheckResult:
+def _evaluate_reliability(
+    canary: MetricsSummary, policy: ReliabilityPolicy, confidence: float
+) -> PolicyCheckResult:
     if canary.error_rate is None:
         return PolicyCheckResult(
             policy_name="max_error_rate",
@@ -66,13 +131,22 @@ def _evaluate_reliability(canary: MetricsSummary, policy: ReliabilityPolicy) -> 
         )
 
     error_rate_percent = canary.error_rate * 100
-    result = FAIL if error_rate_percent > policy.max_error_rate_percent else PASS
+    limit = policy.max_error_rate_percent
+    errors = round(canary.error_rate * canary.sample_count)
+    interval = stats.wilson_interval(errors, canary.sample_count, confidence)
+    interval_percent = (
+        stats.Interval(interval.low * 100, interval.high * 100) if interval else None
+    )
     return PolicyCheckResult(
         policy_name="max_error_rate",
         metric_name="error_rate_percent",
         observed_value=error_rate_percent,
-        threshold=policy.max_error_rate_percent,
-        result=result,
+        threshold=limit,
+        result=_decide_upper_limit(error_rate_percent, limit, interval_percent),
+        ci_low=interval_percent.low if interval_percent else None,
+        ci_high=interval_percent.high if interval_percent else None,
+        p_value=stats.binomial_p_above(errors, canary.sample_count, limit / 100),
+        method="wilson+binomial",
     )
 
 
@@ -124,7 +198,9 @@ def _evaluate_minimum_positive_labels(
     )
 
 
-def _evaluate_quality(canary_quality: MetricsSummary, policy: QualityPolicy) -> PolicyCheckResult:
+def _evaluate_quality(
+    canary_quality: MetricsSummary, policy: QualityPolicy, confidence: float
+) -> PolicyCheckResult:
     if canary_quality.recall is None:
         # No labeled canary predictions in the quality window - genuinely nothing
         # to check, not a failure. In practice this shouldn't be reached once the
@@ -139,13 +215,19 @@ def _evaluate_quality(canary_quality: MetricsSummary, policy: QualityPolicy) -> 
             result=INCONCLUSIVE,
         )
 
-    result = FAIL if canary_quality.recall < policy.minimum_recall else PASS
+    positives = canary_quality.positive_label_count
+    true_positives = round(canary_quality.recall * positives)
+    interval = stats.wilson_interval(true_positives, positives, confidence)
     return PolicyCheckResult(
         policy_name="minimum_recall",
         metric_name="recall",
         observed_value=canary_quality.recall,
         threshold=policy.minimum_recall,
-        result=result,
+        result=_decide_lower_limit(canary_quality.recall, policy.minimum_recall, interval),
+        ci_low=interval.low if interval else None,
+        ci_high=interval.high if interval else None,
+        p_value=stats.binomial_p_below(true_positives, positives, policy.minimum_recall),
+        method="wilson+binomial",
     )
 
 
@@ -180,7 +262,7 @@ def evaluate_quality_policies(
     if any(check.result != PASS for check in gate_checks):
         return gate_checks
 
-    quality_check = _evaluate_quality(canary_quality, config.quality)
+    quality_check = _evaluate_quality(canary_quality, config.quality, config.confidence_level)
     return [*gate_checks, quality_check]
 
 
@@ -189,6 +271,7 @@ def evaluate_policies(
     canary: MetricsSummary,
     canary_quality: MetricsSummary,
     config: PolicyConfig,
+    latency_samples: LatencySamples | None = None,
 ) -> list[PolicyCheckResult]:
     """Run every policy check for one evaluation.
 
@@ -207,8 +290,10 @@ def evaluate_policies(
 
     return [
         minimum_requests_check,
-        _evaluate_latency(stable, canary, config.latency),
-        _evaluate_reliability(canary, config.reliability),
+        _evaluate_latency(
+            stable, canary, config.latency, config.confidence_level, latency_samples
+        ),
+        _evaluate_reliability(canary, config.reliability, config.confidence_level),
         *evaluate_quality_policies(canary_quality, config),
     ]
 

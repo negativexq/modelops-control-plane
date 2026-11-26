@@ -8,6 +8,8 @@ migration, and can never drift out of sync with the policy engine's own wording
 since there's only one place this text is generated.
 """
 
+from dataclasses import dataclass
+
 from app.control_plane.models import PolicyEvaluationResult
 
 PASS = PolicyEvaluationResult.PASS
@@ -31,6 +33,9 @@ def explain_policy_check(
     canary_weight: float | None = None,
     is_estimated: bool = False,
     labeled_sample_count: int | None = None,
+    ci_low: float | None = None,
+    ci_high: float | None = None,
+    confidence_level: float | None = None,
 ) -> str:
     """Human-readable explanation of one policy check. `canary_weight` is context
     used only to make a minimum_requests INCONCLUSIVE concrete when the canary is
@@ -53,10 +58,11 @@ def explain_policy_check(
         return _explain_minimum_requests(
             observed_value, threshold, result, canary_weight, is_estimated
         )
+    ci = _Ci(ci_low, ci_high, confidence_level)
     if policy_name == "latency_p95_increase":
-        return _explain_latency(observed_value, threshold, result)
+        return _explain_latency(observed_value, threshold, result, ci)
     if policy_name == "max_error_rate":
-        return _explain_error_rate(observed_value, threshold, result)
+        return _explain_error_rate(observed_value, threshold, result, ci)
     if policy_name == "minimum_labeled_samples":
         return _explain_minimum_labeled_samples(observed_value, threshold, result)
     if policy_name == "minimum_label_coverage":
@@ -68,8 +74,28 @@ def explain_policy_check(
             observed_value, threshold, result, labeled_sample_count
         )
     if policy_name == "minimum_recall":
-        return _explain_recall(observed_value, threshold, result)
+        return _explain_recall(observed_value, threshold, result, ci)
     return f"{policy_name}: {result.value.lower()}."
+
+
+@dataclass(frozen=True)
+class _Ci:
+    low: float | None
+    high: float | None
+    level: float | None
+
+    def text(self, fmt: str) -> str:
+        """" (95% CI 3.1-9.8%)", or "" for rows without an interval."""
+        if self.low is None or self.high is None:
+            return ""
+        level = f"{self.level * 100:.0f}% " if self.level is not None else ""
+        return f" ({level}CI {fmt.format(self.low)} to {fmt.format(self.high)})"
+
+
+_NOISE = (
+    "past the limit, but the confidence interval still reaches back inside it, so "
+    "the breach could be noise - waiting for more traffic before deciding."
+)
 
 
 def _fmt_count(value: float | None) -> str:
@@ -104,29 +130,47 @@ def _explain_minimum_requests(
 
 
 def _explain_latency(
-    observed: float | None, threshold: float | None, result: PolicyEvaluationResult
+    observed: float | None,
+    threshold: float | None,
+    result: PolicyEvaluationResult,
+    ci: _Ci,
 ) -> str:
     if observed is None or threshold is None:
         return "insufficient data: no p95 latency could be computed yet for one or both sides."
+    interval = ci.text("{:.1f}%")
     if result == FAIL:
         return (
-            f"canary p95 latency is {observed:.1f}% higher than stable's, "
+            f"canary p95 latency is {observed:.1f}% higher than stable's{interval}, "
             f"above the {threshold:.0f}% threshold."
         )
+    if result == INCONCLUSIVE:
+        return f"canary p95 latency is {observed:.1f}% higher than stable's{interval}: {_NOISE}"
     return (
-        f"canary p95 latency increase ({observed:.1f}%) is within the "
+        f"canary p95 latency increase ({observed:.1f}%){interval} is within the "
         f"{threshold:.0f}% threshold."
     )
 
 
 def _explain_error_rate(
-    observed: float | None, threshold: float | None, result: PolicyEvaluationResult
+    observed: float | None,
+    threshold: float | None,
+    result: PolicyEvaluationResult,
+    ci: _Ci,
 ) -> str:
     if observed is None or threshold is None:
         return "insufficient data: no canary requests observed yet to compute an error rate."
+    interval = ci.text("{:.2f}%")
     if result == FAIL:
-        return f"canary error rate ({observed:.2f}%) exceeds the {threshold:.2f}% threshold."
-    return f"canary error rate ({observed:.2f}%) is within the {threshold:.2f}% threshold."
+        return (
+            f"canary error rate ({observed:.2f}%){interval} exceeds the "
+            f"{threshold:.2f}% threshold."
+        )
+    if result == INCONCLUSIVE:
+        return f"canary error rate is {observed:.2f}%{interval}: {_NOISE}"
+    return (
+        f"canary error rate ({observed:.2f}%){interval} is within the "
+        f"{threshold:.2f}% threshold."
+    )
 
 
 def _explain_minimum_labeled_samples(
@@ -199,7 +243,10 @@ def _explain_minimum_positive_labels(
 
 
 def _explain_recall(
-    observed: float | None, threshold: float | None, result: PolicyEvaluationResult
+    observed: float | None,
+    threshold: float | None,
+    result: PolicyEvaluationResult,
+    ci: _Ci,
 ) -> str:
     if observed is None or threshold is None:
         return (
@@ -209,6 +256,12 @@ def _explain_recall(
             "belong to the stable version instead), not the common case now that "
             "labels flow through POST /api/labels."
         )
+    interval = ci.text("{:.2f}")
     if result == FAIL:
-        return f"canary recall ({observed:.2f}) is below the required {threshold:.2f} threshold."
-    return f"canary recall ({observed:.2f}) meets the {threshold:.2f} threshold."
+        return (
+            f"canary recall ({observed:.2f}){interval} is below the required "
+            f"{threshold:.2f} threshold."
+        )
+    if result == INCONCLUSIVE:
+        return f"canary recall is {observed:.2f}{interval}, below {threshold:.2f}: {_NOISE}"
+    return f"canary recall ({observed:.2f}){interval} meets the {threshold:.2f} threshold."

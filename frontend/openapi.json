@@ -1182,6 +1182,39 @@
       },
       "PolicyCheckOut": {
         "properties": {
+          "ci_high": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ci High"
+          },
+          "ci_low": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ci Low"
+          },
+          "confidence_level": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence Level"
+          },
           "metric_name": {
             "title": "Metric Name",
             "type": "string"
@@ -1197,12 +1230,34 @@
             ],
             "title": "Observed Value"
           },
+          "p_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P Value"
+          },
           "policy_name": {
             "title": "Policy Name",
             "type": "string"
           },
           "result": {
             "$ref": "#/components/schemas/PolicyEvaluationResult"
+          },
+          "stat_method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stat Method"
           },
           "threshold": {
             "anyOf": [
@@ -1217,6 +1272,11 @@
           }
         },
         "required": [
+          "ci_low",
+          "ci_high",
+          "p_value",
+          "confidence_level",
+          "stat_method",
           "policy_name",
           "metric_name",
           "observed_value",
@@ -1229,6 +1289,13 @@
       "PolicyConfig-Input": {
         "description": "A named set of promotion-gate thresholds for one evaluation run.\n\n`evaluation_window_seconds` is part of the policy definition itself, not a\ncaller-supplied query parameter (unlike the comparison endpoint's\n`window_seconds`) - a policy's outcome should be reproducible from the policy\nalone, not depend on whatever window a client happened to pass that call.",
         "properties": {
+          "confidence_level": {
+            "default": 0.95,
+            "maximum": 0.999,
+            "minimum": 0.5,
+            "title": "Confidence Level",
+            "type": "number"
+          },
           "evaluation_window_seconds": {
             "default": 300,
             "minimum": 1.0,
@@ -1297,6 +1364,13 @@
       "PolicyConfig-Output": {
         "description": "A named set of promotion-gate thresholds for one evaluation run.\n\n`evaluation_window_seconds` is part of the policy definition itself, not a\ncaller-supplied query parameter (unlike the comparison endpoint's\n`window_seconds`) - a policy's outcome should be reproducible from the policy\nalone, not depend on whatever window a client happened to pass that call.",
         "properties": {
+          "confidence_level": {
+            "default": 0.95,
+            "maximum": 0.999,
+            "minimum": 0.5,
+            "title": "Confidence Level",
+            "type": "number"
+          },
           "evaluation_window_seconds": {
             "default": 300,
             "minimum": 1.0,
@@ -1367,6 +1441,7 @@
           "minimum_labeled_samples",
           "minimum_label_coverage",
           "minimum_positive_labels",
+          "confidence_level",
           "latency",
           "reliability",
           "quality"
@@ -1376,6 +1451,39 @@
       },
       "PolicyEvaluationOut": {
         "properties": {
+          "ci_high": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ci High"
+          },
+          "ci_low": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ci Low"
+          },
+          "confidence_level": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence Level"
+          },
           "evaluated_at": {
             "format": "date-time",
             "title": "Evaluated At",
@@ -1400,12 +1508,34 @@
             ],
             "title": "Observed Value"
           },
+          "p_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P Value"
+          },
           "policy_name": {
             "title": "Policy Name",
             "type": "string"
           },
           "result": {
             "$ref": "#/components/schemas/PolicyEvaluationResult"
+          },
+          "stat_method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stat Method"
           },
           "threshold": {
             "anyOf": [
@@ -1420,6 +1550,11 @@
           }
         },
         "required": [
+          "ci_low",
+          "ci_high",
+          "p_value",
+          "confidence_level",
+          "stat_method",
           "id",
           "policy_name",
           "metric_name",
@@ -1815,6 +1950,39 @@
       "TimelinePolicyItem": {
         "description": "One PolicyEvaluation row, tagged for the merged timeline, plus a derived\nhuman-readable `explanation` (see app/policy/explain.py) - the raw\nobserved_value/threshold/result alone don't say *why* e.g. minimum_requests\nstayed INCONCLUSIVE.",
         "properties": {
+          "ci_high": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ci High"
+          },
+          "ci_low": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ci Low"
+          },
+          "confidence_level": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence Level"
+          },
           "explanation": {
             "title": "Explanation",
             "type": "string"
@@ -1841,6 +2009,17 @@
               }
             ],
             "title": "Observed Value"
+          },
+          "p_value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P Value"
           },
           "policy_name": {
             "title": "Policy Name",
@@ -1881,6 +2060,10 @@
           "observed_value",
           "threshold",
           "result",
+          "ci_low",
+          "ci_high",
+          "p_value",
+          "confidence_level",
           "explanation",
           "is_estimated"
         ],

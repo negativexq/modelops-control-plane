@@ -87,6 +87,17 @@ export const EVIDENCE_FIELDS: ThresholdField[] = [
     set: (c, v) => ({ ...c, evaluation_window_seconds: v }),
   },
   {
+    key: "confidence_level",
+    label: "Confidence level",
+    hint: "A breach fails only when its whole interval is past the limit.",
+    unit: "",
+    min: 0.5,
+    max: 0.999,
+    step: 0.01,
+    get: (c) => c.confidence_level,
+    set: (c, v) => ({ ...c, confidence_level: v }),
+  },
+  {
     key: "minimum_labeled_samples",
     label: "Minimum labeled samples",
     hint: "Before recall is judged at all.",

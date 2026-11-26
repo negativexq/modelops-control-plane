@@ -11,6 +11,11 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "scikit-learn>=1.5",
+    # The policy engine's confidence intervals and significance tests
+    # (app/policy/stats.py). Both already came in with scikit-learn; listed
+    # because the engine now imports them directly.
+    "numpy>=1.26",
+    "scipy>=1.11",
     "pandas>=2.2",
     "joblib>=1.4",
     "httpx>=0.27",
@@ -54,7 +59,8 @@ extend-exclude = ["alembic/versions"]
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
-python_version = "3.11"
+# CI and the image run 3.12; numpy's stubs use 3.12-only syntax.
+python_version = "3.12"
 strict = true
 ignore_missing_imports = true
 

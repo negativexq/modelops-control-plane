@@ -376,6 +376,12 @@ curl localhost:8000/api/deployments/<id>/policy-evaluations
   quality checks read an older, matured window than the reliability checks -
   see [Policy
   engine](docs/DESIGN_NOTES.md#policy-engine).
+- **Statistical decisions.** Error rate, latency and recall carry a confidence
+  interval and a p-value (Wilson score, bootstrap p95 ratio, Mann-Whitney U,
+  exact binomial). A check fails only when the whole interval is past the
+  limit; past the limit but inside the noise is INCONCLUSIVE, so a canary isn't
+  rolled back on two unlucky requests. `confidence_level` is part of the policy
+  ([details](docs/DESIGN_NOTES.md#policy-engine)).
 - Overall verdict: **FAIL beats INCONCLUSIVE beats PASS**
   ([why](docs/DESIGN_NOTES.md#policy-engine)).
 - Records what the policies found - a human still calls `/promote`/`/rollback`.
@@ -574,7 +580,7 @@ curl localhost:8000/api/router-config/fraud-model   # now finds a PROMOTED/
 
 ```bash
 make dev             # bring up the whole stack via docker compose
-make test            # backend tests (pytest) - 326 tests
+make test            # backend tests (pytest) - 340 tests
 make coverage        # same, plus an HTML report at backend/htmlcov/index.html
 make lint            # backend (ruff, mypy) + frontend (eslint, tsc) lint/type-check
 make ci-smoke-test   # the same real-stack check CI runs - needs `make dev` running
@@ -597,7 +603,7 @@ every push/PR:
 
 | Job | What it checks | Runtime |
 |---|---|---|
-| `backend` | `ruff`, `mypy --strict`, `pytest` (326 tests, mocked collaborators) | seconds |
+| `backend` | `ruff`, `mypy --strict`, `pytest` (340 tests, mocked collaborators) | seconds |
 | `frontend` | `eslint`, `tsc --noEmit`, `next build` | seconds |
 | `api-contract` | Regenerates the OpenAPI schema and the dashboard's TypeScript types; fails if either differs from what's committed | seconds |
 | `integration` | Builds and boots the **real** stack (8 HTTP-exposed services + the worker, plus Prometheus, Grafana and Jaeger), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s six scenarios, [`check_observability.py`](backend/scripts/check_observability.py) (every target scraped, alerts and dashboards loaded, the smoke test's decisions counted, traces reaching a model service) and the Playwright suite in [`frontend/e2e`](frontend/e2e) - gated on the three jobs above passing first | a few minutes |

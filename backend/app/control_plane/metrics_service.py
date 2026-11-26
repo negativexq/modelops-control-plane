@@ -56,6 +56,7 @@ def compute_version_summary(
     window_seconds: int,
     *,
     window_end_offset_seconds: int = 0,
+    now: datetime | None = None,
 ) -> MetricsSummary:
     """Summarizes PredictionMetric rows in [now - offset - window, now - offset],
     joined against GroundTruthLabel on prediction_id for anything quality-related
@@ -71,7 +72,7 @@ def compute_version_summary(
     since labels arrive delayed and the freshest window is definitionally the
     least-labeled one - see app/policy/engine.py and docs/DESIGN_NOTES.md.
     """
-    window_end = datetime.now(UTC) - timedelta(seconds=window_end_offset_seconds)
+    window_end = (now or datetime.now(UTC)) - timedelta(seconds=window_end_offset_seconds)
     window_start = window_end - timedelta(seconds=window_seconds)
     stmt = (
         select(PredictionMetric, GroundTruthLabel)
@@ -160,6 +161,21 @@ def compute_version_summary(
         label_delay_p50_seconds=label_delay_p50,
         label_delay_p95_seconds=label_delay_p95,
     )
+
+
+def window_latencies(
+    db: Session, deployment_id: str, version: str, window_seconds: int, *, now: datetime
+) -> list[float]:
+    """Raw latencies (ms) for one version in [now - window, now] - the same rows
+    compute_version_summary(..., now=now) summarizes. The policy engine's
+    latency check bootstraps over these (see app/policy/stats.py)."""
+    stmt = select(PredictionMetric.latency_ms).where(
+        PredictionMetric.deployment_id == deployment_id,
+        PredictionMetric.model_version == version,
+        PredictionMetric.created_at >= now - timedelta(seconds=window_seconds),
+        PredictionMetric.created_at <= now,
+    )
+    return [float(v) for v in db.execute(stmt).scalars().all()]
 
 
 def compute_deltas(stable: MetricsSummary, canary: MetricsSummary) -> MetricsDeltas:

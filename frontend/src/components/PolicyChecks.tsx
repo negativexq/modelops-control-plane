@@ -2,6 +2,7 @@ import { latestPolicyResults } from "@/lib/derive";
 import { formatDate } from "@/lib/format";
 import type { TimelineItem } from "@/lib/types";
 import { PolicyResultBadge } from "@/components/PolicyResultBadge";
+import { ConfidenceStrip } from "@/components/viz/ConfidenceStrip";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 function fmt(policy: string, v: number | null) {
@@ -13,7 +14,9 @@ function fmt(policy: string, v: number | null) {
 }
 
 /** Latest verdict per policy - the evidence behind the current/last decision -
- * with how many times each policy has been evaluated over the rollout. */
+ * with how many times each policy has been evaluated over the rollout. The
+ * Evidence column draws each check's confidence interval against its limit
+ * (see app/policy/stats.py): a check only FAILs when the whole bar is past it. */
 export function PolicyChecks({ items }: { items: TimelineItem[] }) {
   const latest = latestPolicyResults(items);
   const runs = new Map<string, number>();
@@ -30,6 +33,9 @@ export function PolicyChecks({ items }: { items: TimelineItem[] }) {
             <TableHead>Result</TableHead>
             <TableHead className="text-right">Observed</TableHead>
             <TableHead className="text-right">Threshold</TableHead>
+            <TableHead className="text-right" title="Confidence interval (bar), observed value (dot), limit (dashed tick)">
+              Evidence
+            </TableHead>
             <TableHead className="text-right">Runs</TableHead>
             <TableHead>Why</TableHead>
           </TableRow>
@@ -44,6 +50,9 @@ export function PolicyChecks({ items }: { items: TimelineItem[] }) {
               <TableCell className="text-right font-mono text-xs tabular">{fmt(p.policy_name, p.observed_value)}</TableCell>
               <TableCell className="text-right font-mono text-xs text-muted-foreground tabular">
                 {fmt(p.policy_name, p.threshold)}
+              </TableCell>
+              <TableCell className="text-right">
+                <ConfidenceStrip check={p} format={(v) => fmt(p.policy_name, v)} className="ml-auto" />
               </TableCell>
               <TableCell className="text-right font-mono text-xs text-muted-foreground tabular" title={`last ${formatDate(p.timestamp)}`}>
                 {runs.get(p.policy_name)}

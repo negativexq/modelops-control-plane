@@ -298,6 +298,46 @@ actually used (`label_maturity_seconds`, `quality_window_start/end`,
 `labeled_sample_count`, `label_coverage`, `positive_label_count`), for the same
 audit-accuracy reason described below for `stable_weight`/`canary_weight`.
 
+**Breaches are tested, not eyeballed.** A canary at 30% of traffic over a
+20-second window may have served 25 requests. Two failures is 8%, over a 5%
+limit, and also what a healthy 2% model produces by chance roughly one time in
+ten. Comparing that point estimate to the limit rolls back good releases. So the
+error-rate, latency and recall checks each carry a confidence interval
+(`app/policy/stats.py`), and the rule is:
+
+| | Verdict |
+|---|---|
+| point estimate within the limit | PASS |
+| point estimate past the limit, **whole interval** past it | FAIL |
+| point estimate past the limit, interval reaches back inside | INCONCLUSIVE |
+
+| Check | Interval | p-value (one-sided, "the limit is breached") |
+|---|---|---|
+| `max_error_rate` | Wilson score interval on errors / requests | exact binomial test against the limit |
+| `latency_p95_increase` | percentile bootstrap (2,000 resamples, fixed seed) of canary p95 / stable p95 − 1 | Mann-Whitney U of canary vs stable × (1 + allowed increase) |
+| `minimum_recall` | Wilson score interval on TP / positives | exact binomial test against the minimum |
+
+`PolicyConfig.confidence_level` (default 0.95) sets the interval width. An
+INCONCLUSIVE here counts toward `max_inconclusive_retries` like any other, so a
+breach that stays ambiguous still reaches a human rather than looping forever;
+more traffic usually settles it first, because the interval narrows with √n.
+
+PASS deliberately stays a point-estimate decision. Requiring the whole interval
+*inside* the limit as well would hold every low-traffic canary INCONCLUSIVE
+(0 errors in 25 requests still has a Wilson upper bound of 13%), and
+`minimum_requests` already sets how much traffic a PASS needs.
+
+Why the latency test scales stable first: Mann-Whitney on raw latencies asks
+"is the canary slower at all?", which with enough traffic is significant for a
+1 ms difference. Multiplying stable by 1.2 makes it ask the policy's question,
+"slower by more than 20%?". The interval is bootstrapped rather than computed
+from order statistics because a 95th-percentile upper bound from order
+statistics needs ~60+ samples per side to exist at all.
+
+Each row stores `ci_low`, `ci_high`, `p_value`, `confidence_level` and
+`stat_method`; the dashboard's policy table draws the interval against the
+limit, and the timeline explanation quotes it.
+
 Overall verdict (`app/policy/engine.py::overall_result`): **FAIL beats
 INCONCLUSIVE beats PASS**. One failing check fails the whole evaluation; an
 inconclusive check can never be outvoted into a PASS by the other checks.

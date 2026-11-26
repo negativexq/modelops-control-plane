@@ -264,6 +264,15 @@ class PolicyEvaluation(Base):
     evaluated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=_utcnow, index=True
     )
+    # Statistical evidence behind the verdict (see app/policy/stats.py): a
+    # confidence interval in observed_value's unit, the one-sided p-value for "the
+    # limit is breached", the confidence level used and which test produced them.
+    # NULL for count gates and for rows written before the statistical engine.
+    ci_low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ci_high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    p_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence_level: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stat_method: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Snapshot of the deployment's own context AT THE MOMENT this check ran - not
     # derivable after the fact from the deployment's *current* state, which can
     # (and does) change later. Without this, a human reading an old PolicyEvaluation

@@ -60,6 +60,11 @@ class PolicyConfig(BaseModel):
     # minimum_label_coverage, before minimum_recall - see
     # app/policy/engine.py's evaluate_quality_policies.
     minimum_positive_labels: int = Field(default=30, ge=0)
+    # How sure the engine must be before it calls a breach real. Error rate,
+    # latency and recall checks only FAIL when the whole confidence interval at
+    # this level lies past the limit; past the limit but inside the noise is
+    # INCONCLUSIVE (see app/policy/stats.py and engine.py's _decide_* helpers).
+    confidence_level: float = Field(default=0.95, ge=0.5, le=0.999)
     latency: LatencyPolicy = LatencyPolicy()
     reliability: ReliabilityPolicy = ReliabilityPolicy()
     quality: QualityPolicy = QualityPolicy()
@@ -78,6 +83,7 @@ class PolicySettings(BaseSettings):
     minimum_labeled_samples: int = 30
     minimum_label_coverage: float = 0.5
     minimum_positive_labels: int = 30
+    confidence_level: float = 0.95
     latency_p95_max_increase_percent: float = 20.0
     reliability_max_error_rate_percent: float = 5.0
     quality_minimum_recall: float = 0.8
@@ -91,6 +97,7 @@ class PolicySettings(BaseSettings):
             minimum_labeled_samples=self.minimum_labeled_samples,
             minimum_label_coverage=self.minimum_label_coverage,
             minimum_positive_labels=self.minimum_positive_labels,
+            confidence_level=self.confidence_level,
             latency=LatencyPolicy(p95_max_increase_percent=self.latency_p95_max_increase_percent),
             reliability=ReliabilityPolicy(
                 max_error_rate_percent=self.reliability_max_error_rate_percent

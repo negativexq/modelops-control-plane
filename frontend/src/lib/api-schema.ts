@@ -1134,13 +1134,23 @@ export interface components {
         };
         /** PolicyCheckOut */
         PolicyCheckOut: {
+            /** Ci High */
+            ci_high: number | null;
+            /** Ci Low */
+            ci_low: number | null;
+            /** Confidence Level */
+            confidence_level: number | null;
             /** Metric Name */
             metric_name: string;
             /** Observed Value */
             observed_value: number | null;
+            /** P Value */
+            p_value: number | null;
             /** Policy Name */
             policy_name: string;
             result: components["schemas"]["PolicyEvaluationResult"];
+            /** Stat Method */
+            stat_method: string | null;
             /** Threshold */
             threshold: number | null;
         };
@@ -1154,6 +1164,11 @@ export interface components {
          *     alone, not depend on whatever window a client happened to pass that call.
          */
         "PolicyConfig-Input": {
+            /**
+             * Confidence Level
+             * @default 0.95
+             */
+            confidence_level?: number;
             /**
              * Evaluation Window Seconds
              * @default 300
@@ -1219,6 +1234,11 @@ export interface components {
          */
         "PolicyConfig-Output": {
             /**
+             * Confidence Level
+             * @default 0.95
+             */
+            confidence_level: number;
+            /**
              * Evaluation Window Seconds
              * @default 300
              */
@@ -1274,6 +1294,12 @@ export interface components {
         };
         /** PolicyEvaluationOut */
         PolicyEvaluationOut: {
+            /** Ci High */
+            ci_high: number | null;
+            /** Ci Low */
+            ci_low: number | null;
+            /** Confidence Level */
+            confidence_level: number | null;
             /**
              * Evaluated At
              * Format: date-time
@@ -1285,9 +1311,13 @@ export interface components {
             metric_name: string;
             /** Observed Value */
             observed_value: number | null;
+            /** P Value */
+            p_value: number | null;
             /** Policy Name */
             policy_name: string;
             result: components["schemas"]["PolicyEvaluationResult"];
+            /** Stat Method */
+            stat_method: string | null;
             /** Threshold */
             threshold: number | null;
         };
@@ -1439,6 +1469,12 @@ export interface components {
          *     stayed INCONCLUSIVE.
          */
         TimelinePolicyItem: {
+            /** Ci High */
+            ci_high: number | null;
+            /** Ci Low */
+            ci_low: number | null;
+            /** Confidence Level */
+            confidence_level: number | null;
             /** Explanation */
             explanation: string;
             /** Id */
@@ -1449,6 +1485,8 @@ export interface components {
             metric_name: string;
             /** Observed Value */
             observed_value: number | null;
+            /** P Value */
+            p_value: number | null;
             /** Policy Name */
             policy_name: string;
             result: components["schemas"]["PolicyEvaluationResult"];

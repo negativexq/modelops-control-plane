@@ -6,7 +6,12 @@ from sqlalchemy.orm import Session
 from app.control_plane import metrics_service, telemetry
 from app.control_plane.models import Deployment, PolicyEvaluation, PolicyEvaluationResult
 from app.policy.config import PolicyConfig
-from app.policy.engine import PolicyCheckResult, evaluate_policies, overall_result
+from app.policy.engine import (
+    LatencySamples,
+    PolicyCheckResult,
+    evaluate_policies,
+    overall_result,
+)
 
 _QUALITY_POLICY_NAMES = frozenset(
     {
@@ -34,11 +39,15 @@ def run_evaluation(
     PolicyEvaluation row. Does NOT touch deployment.status - promotion/rollback stay
     manual (see Sprint 4); wiring this result into the state machine is Sprint 8.
     """
+    # One clock for every window read below, so the summaries and the raw
+    # latencies the statistics run on describe exactly the same rows.
+    now = datetime.now(UTC)
+    window = config.evaluation_window_seconds
     stable = metrics_service.compute_version_summary(
-        db, deployment.id, deployment.stable_version, config.evaluation_window_seconds
+        db, deployment.id, deployment.stable_version, window, now=now
     )
     canary = metrics_service.compute_version_summary(
-        db, deployment.id, deployment.canary_version, config.evaluation_window_seconds
+        db, deployment.id, deployment.canary_version, window, now=now
     )
     # Quality checks read an older, matured window - see
     # app/policy/engine.py::evaluate_quality_policies and docs/DESIGN_NOTES.md.
@@ -48,9 +57,18 @@ def run_evaluation(
         deployment.canary_version,
         config.evaluation_window_seconds,
         window_end_offset_seconds=config.label_maturity_seconds,
+        now=now,
+    )
+    samples = LatencySamples(
+        stable=metrics_service.window_latencies(
+            db, deployment.id, deployment.stable_version, window, now=now
+        ),
+        canary=metrics_service.window_latencies(
+            db, deployment.id, deployment.canary_version, window, now=now
+        ),
     )
 
-    checks = evaluate_policies(stable, canary, canary_quality, config)
+    checks = evaluate_policies(stable, canary, canary_quality, config, samples)
     # Snapshot the deployment's own context right now, once, for every check in this
     # evaluation - not derivable later from the deployment's *current* state, which
     # will keep changing after this call returns (traffic ramps, gets promoted,
@@ -58,7 +76,6 @@ def run_evaluation(
     stable_weight = _weight_for(deployment, deployment.stable_version)
     canary_weight = _weight_for(deployment, deployment.canary_version)
 
-    now = datetime.now(UTC)
     quality_window_end = now - timedelta(seconds=config.label_maturity_seconds)
     quality_window_start = quality_window_end - timedelta(seconds=config.evaluation_window_seconds)
 
@@ -72,6 +89,11 @@ def run_evaluation(
                 observed_value=check.observed_value,
                 threshold=check.threshold,
                 result=check.result,
+                ci_low=check.ci_low,
+                ci_high=check.ci_high,
+                p_value=check.p_value,
+                confidence_level=config.confidence_level if check.method else None,
+                stat_method=check.method,
                 evaluation_window_seconds=config.evaluation_window_seconds,
                 stable_weight=stable_weight,
                 canary_weight=canary_weight,
