@@ -124,7 +124,12 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install Playwright
         working-directory: frontend
+        # The running frontend container mounts ./frontend with an anonymous
+        # volume over /app/node_modules; Docker creates that mount point on the
+        # host as an empty, root-owned frontend/node_modules, which npm ci (as
+        # the runner user) can't write into.
         run: |
+          sudo chown -R "$(id -u):$(id -g)" node_modules 2>/dev/null || true
           npm ci
           npx playwright install --with-deps chromium
       - name: Run end-to-end tests
