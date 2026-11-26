@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { ArrowRight, ArrowUpRight, CircleHelp, GitBranch, Rocket, Undo2 } from "lucide-react";
-import { isLive, useDeployments, useFleetSummary, useRouterObserved } from "@/lib/queries";
+import { isLive, useDeployments, useFleetSummary, useGatewayView, useRouterObserved } from "@/lib/queries";
 import { decisionOf, formatDuration, relativeTime } from "@/lib/derive";
 import { STATUS_META, TONE_DOT } from "@/lib/status";
 import type { DeploymentOut } from "@/lib/types";
@@ -19,7 +19,7 @@ import { ActorBadge } from "@/components/viz/ActorBadge";
 import { DecisionPanel } from "@/components/viz/DecisionPanel";
 import { KpiCard } from "@/components/viz/KpiCard";
 import { RolloutLanes } from "@/components/viz/RolloutLanes";
-import { FleetModels, fleetModels } from "@/components/viz/FleetModels";
+import { RouterFanout, activeModels, fleetModels } from "@/components/viz/FleetModels";
 import { SparkBars } from "@/components/viz/SparkBars";
 
 function percent(value: number | null) {
@@ -79,8 +79,9 @@ function Kpis() {
   );
 }
 
-/** Every model at once, read from the router itself. */
-function Models({
+/** One gateway, every active model: what the router is routing right now, read
+ * from the router itself. */
+function LiveRouting({
   deployments,
   focusId,
   onFocus,
@@ -90,16 +91,18 @@ function Models({
   onFocus: (deployment: DeploymentOut) => void;
 }) {
   const { data: router } = useRouterObserved();
+  const { data: gateway } = useGatewayView();
   const models = fleetModels(deployments, router);
-  const live = models.filter((m) => isLive(m.latest?.status)).length;
+  const active = activeModels(models, gateway);
+  const live = active.filter((m) => isLive(m.latest?.status)).length;
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Models</CardTitle>
+        <CardTitle>Live routing</CardTitle>
         <CardDescription>
-          What the router is serving right now, for every model
-          {models.length ? ` · ${models.length} model${models.length === 1 ? "" : "s"}` : ""}
-          {live ? `, ${live} rolling out` : ""}.
+          Every request goes through one gateway; this is what it routes right now, for each active model
+          {active.length ? ` · ${active.length} active${live ? `, ${live} rolling out` : ""}` : ""}.
         </CardDescription>
         <CardAction>
           <Button asChild variant="ghost" size="xs">
@@ -110,7 +113,13 @@ function Models({
         </CardAction>
       </CardHeader>
       <CardContent>
-        <FleetModels models={models} reachable={router?.reachable} focusId={focusId} onFocus={onFocus} />
+        <RouterFanout
+          models={active}
+          reachable={router?.reachable}
+          revisionTotal={router?.configs.length ?? 0}
+          focusId={focusId}
+          onFocus={onFocus}
+        />
       </CardContent>
     </Card>
   );
@@ -248,7 +257,7 @@ function OverviewContent({ deployments }: { deployments: DeploymentOut[] }) {
       <Kpis />
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
         <div className="min-w-0 space-y-6">
-          <Models deployments={deployments} focusId={focus?.id} onFocus={onFocus} />
+          <LiveRouting deployments={deployments} focusId={focus?.id} onFocus={onFocus} />
           <Card>
             <CardHeader>
               <CardTitle>Rollout history</CardTitle>
