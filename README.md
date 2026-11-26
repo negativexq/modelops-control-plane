@@ -1,849 +1,601 @@
+<div align="center">
+
 # ModelOps Control Plane
 
+**Canary rollouts for ML models, decided by statistics instead of guesswork.**
+
+A new model version earns production traffic one step at a time. Every step is
+tested against the stable version on latency, errors *and* prediction quality,
+with confidence intervals. The rollout is promoted, rolled back or frozen for a
+human on its own, and every decision is explained in plain English.
+
 [![CI](https://github.com/negativexq/modelops-control-plane/actions/workflows/ci.yml/badge.svg)](https://github.com/negativexq/modelops-control-plane/actions/workflows/ci.yml)
+![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![Next.js 16](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)
+![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?logo=prometheus&logoColor=white)
+![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-425CC7?logo=opentelemetry&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-A control plane that decides whether a new model version earns production
-traffic - and keeps that decision honest by continuously reconciling it against
-what the router is actually doing. Not a deployment tool; a policy-driven
-control loop. 
+<img src="docs/screenshots/gateway-flow.gif" alt="The Gateway page: live requests flowing from clients through the gateway to the stable and canary versions, and the control loop that moves the split" width="100%">
 
-What it actually does:
+<sub>The Gateway page during a live rollout. Beam width is each version's share of traffic, speed is its request rate. Below it, the control loop that moves the split.</sub>
 
-- Ramps a candidate model into live routed traffic gradually, not all at once.
-- Ingests delayed ground truth through a real API surface, not a synthetic backfill.
-- Judges a canary on both reliability (latency, error rate) *and* model quality
-  (precision/recall over labeled outcomes), not just "is it up."
-- Tells "not enough data yet" apart from "genuinely healthy" instead of
-  guessing when data is thin.
-- Promotes or rolls back on its own when a policy resolves, and records why in
-  plain English as part of the deployment's audit trail.
-- Lets an operator take a specific deployment out of automation without
-  stopping the automation loop for everything else.
-- Keeps the database's desired traffic split and the router's actual one in
-  sync on its own, even after the router restarts and loses its state.
+</div>
 
-Designed to run comfortably on a 16 GB RAM machine; heavy components like
-Kubernetes, MLflow, and Prometheus are deliberately not part of it - see
-[Production evolution](#production-evolution) for what would change if this had
-to actually run at scale.
+---
 
 ## Contents
 
-- [Architecture](#architecture)
+- [What it does](#what-it-does)
+- [A tour of the dashboard](#a-tour-of-the-dashboard)
+- [How it works](#how-it-works)
 - [Quickstart](#quickstart)
-- [Screenshots](#screenshots)
-- [Demo walkthrough](#demo-walkthrough)
-- [Project layout](#project-layout)
-- [Capabilities](#capabilities)
+- [Five-minute demo](#five-minute-demo)
+- [Benchmarks](#benchmarks)
+- [Feature reference](#feature-reference)
 - [Development](#development)
-- [Resource footprint](#resource-footprint)
 - [Known limitations](#known-limitations)
 - [Production evolution](#production-evolution)
 - [Troubleshooting](#troubleshooting)
- 
-## Architecture
 
-| Layer | Tech |
+## What it does
+
+| | |
 |---|---|
-| Backend / control plane | FastAPI + SQLAlchemy + SQLite + Alembic + pytest |
-| Frontend / dashboard | Next.js + TypeScript + Tailwind + Recharts |
-| Model serving | scikit-learn + joblib, one FastAPI process per model version |
-| Load generation | Locust (benchmark suite) |
-| Observability | Prometheus + Grafana (metrics, dashboards, alerts), OpenTelemetry + Jaeger (traces) |
-| Runtime | Docker + Docker Compose |
+| 🚦 **Ramps traffic gradually** | A canary climbs `10% → 25% → 50% → 100%`, one tested step at a time, through a real gateway with sticky routing, a circuit breaker per version and rate limits. |
+| 📐 **Decides with statistics** | Error rate, p95 latency and recall each come with a confidence interval and a p-value. A check fails only when the whole interval is past the limit, so two unlucky requests can't roll back a good model. |
+| 🏷️ **Judges quality, not just uptime** | Ground-truth labels arrive late and incomplete, through a real ingestion API. Quality checks wait for a matured window and enough positive examples before they speak. |
+| 🤖 **Acts on its own, explains itself** | A worker promotes, rolls back or freezes the rollout for a human. Every check writes a sentence saying why, and the timeline tells the whole story. |
+| 🔁 **Heals drift** | The database holds the desired traffic split, the router holds the observed one. A reconciler repairs any difference, even after the router restarts and forgets everything. |
+| 🔭 **Observable end to end** | Prometheus metrics on every service, Grafana dashboards with alerts, and an OpenTelemetry trace for every prediction from the gateway down to the model's inference. |
 
-### Services & ports
+It all runs with one `docker compose up` on a 16 GB laptop: 9 ModelOps containers
+plus Prometheus, Grafana and Jaeger.
 
-| Service | Port | What it is |
-|---|---|---|
-| `backend` | 8000 | Control plane: deployments, policy, metrics, benchmarks API |
-| `frontend` | 3000 | Dashboard (Next.js) |
-| `router` | 8080 | Weighted traffic router between stable/canary |
-| `model-serving-v1` | 8001 | Stable fraud model |
-| `model-serving-v2-good` | 8002 | Healthy canary candidate |
-| `model-serving-v2-quality-bad` | 8003 | Deliberately weak model, for the quality-regression scenario |
-| `model-serving-v2-good-latency-fault` | 8004 | Same artifact as v2-good, runtime-toggleable latency fault |
-| `model-serving-v2-good-error-fault` | 8005 | Same artifact as v2-good, runtime-toggleable error fault |
-| `worker` | *(internal; `:9100/metrics`)* | Automated promotion/rollback loop, no API of its own |
-| `grafana` | 3001 | Dashboards: **ModelOps · Rollouts** and **ModelOps · Services** |
-| `prometheus` | 9090 | Scrapes every service's `/metrics`, evaluates alert rules |
-| `jaeger` | 16686 | Traces (OTLP receiver on 4318) |
+## A tour of the dashboard
 
-The control plane's database is the durable **desired state** for traffic
-allocation (`Deployment` + `TrafficAllocation`, each revisioned); the router's
-in-memory config is **observed state** - a best-effort, restart-losable cache
-pushed by the control plane on every change. The two are kept in sync by a
-periodic reconciler (worker-triggered, `POST /api/router/reconcile`) that
-diffs desired against observed and re-pushes on drift - not by assuming every
-push always lands, and not by a message queue replaying missed writes. See
-[Desired/observed
-reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for why,
-and [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) generally for every other
-cross-service boundary in the system.
+### Overview
 
-### How the pieces talk to each other
+What the control loop is doing right now, what it decided recently, and how much
+of that was automatic.
+
+![Overview: live rollouts, promotions, rollbacks and frozen rollouts, the live routing split read from the router, and the rollout history](docs/screenshots/overview.png)
+
+### Gateway
+
+Every prediction's path through the router, live: clients, the gateway's rate
+limit, sticky routing and per-version circuit breaker, then the control loop that
+measures the split and moves it. Line width is the traffic share, dash speed the
+request rate.
+
+![Gateway page: requests per second, in-flight and unanswered requests, and for each model the path from clients through the gateway to stable and canary, with p95, errors and breaker state per version](docs/screenshots/gateway.png)
+
+When a canary goes down, its breaker opens after five consecutive failures and
+the gateway fails fast (dotted red) instead of waiting on timeouts, until a
+half-open probe succeeds.
+
+<p align="center">
+<img src="docs/screenshots/gateway-breaker.gif" alt="A canary that is down: its circuit breaker is open and the gateway fails its requests fast while stable keeps serving" width="100%">
+</p>
+
+### A rollback, with its evidence
+
+A canary with 400 ms of injected latency. The chart shows p95 latency and error
+rate per version across the rollout, with the traffic steps, the policy limits
+and the moment the worker rolled it back.
+
+![Over time chart: canary p95 latency far above stable, with the limit line and the rollback marker](docs/screenshots/rollout-over-time.png)
+
+Each policy check stores the interval it measured, not just a verdict. The strip
+shows the confidence interval against the limit: entirely past it means **FAIL**,
+straddling it means **INCONCLUSIVE**.
+
+![Policy checks with observed values, confidence intervals drawn against each limit, p-values and plain-English explanations](docs/screenshots/policy-evidence.png)
+
+### The timeline
+
+Every state change, worker action and policy result, merged into one story you can
+read top to bottom.
+
+![Timeline of a rollout: traffic steps, policy verdicts with explanations, and the automatic rollback](docs/screenshots/timeline.png)
+
+### Live rollout
+
+The traffic split the router actually applied, the canary analysis against stable,
+and the operator's controls: pause automation, promote, roll back.
+
+![A rollout in progress: applied traffic split, canary analysis and operator controls](docs/screenshots/deployment-live.png)
+
+### Benchmarks
+
+Five repeatable end-to-end scenarios, started from the dashboard or the CLI.
+
+![Benchmarks page with the five scenarios and their last results](docs/screenshots/benchmarks.png)
+
+### Grafana and Jaeger
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/grafana.png" alt="Grafana ModelOps Rollouts dashboard"></td>
+<td width="50%"><img src="docs/screenshots/jaeger.png" alt="Jaeger trace of one prediction from the router to the model's inference span"></td>
+</tr>
+<tr>
+<td><sub><b>ModelOps · Rollouts</b>: canary vs stable per model, the control loop, circuit breakers, with decisions marked on every graph.</sub></td>
+<td><sub>One prediction as a trace: router → readiness check → model service → <code>model.inference</code>.</sub></td>
+</tr>
+</table>
+
+## How it works
+
+### Architecture
+
+<img src="docs/diagrams/architecture.svg" alt="Architecture: clients send predictions through the gateway (rate limit, sticky routing, circuit breaker) to the model versions; the gateway reports one metric per request to the control plane, which pushes revisioned traffic splits back; the worker, label source and dashboard talk to the control plane" width="100%">
+
+The control plane never talks to a model container, and the router never learns a
+host from the control plane: it only receives `version → weight`. Each side can be
+restarted, replaced or scaled without the other noticing. See
+[DESIGN_NOTES](docs/DESIGN_NOTES.md#traffic-router) for why that boundary matters.
+
+### One request through the gateway
 
 ```mermaid
 flowchart LR
-    Dashboard["Dashboard\n(Next.js) :3000"]
-    Worker["worker\nautomated promote/rollback\n- no HTTP surface -"]
+    req(["POST /router/models/{model}/predict"]) --> limit{"Token<br/>left?"}
+    limit -- no --> r429["429<br/>Retry-After"]
+    limit -- yes --> key{"X-Routing-Key?"}
+    key -- yes --> hash["Rendezvous hash<br/>same key → same version"]
+    key -- no --> rand["Weighted random"]
+    hash & rand --> breaker{"Breaker<br/>open?"}
+    breaker -- open --> r503["503 fail fast<br/>Retry-After"]
+    breaker -- "closed / trial" --> ready{"Version<br/>ready?"}
+    ready -- no --> fail["503 · counts toward<br/>opening the breaker"]
+    ready -- yes --> model["Forward to model"]
+    model --> resp(["Response<br/>X-Request-ID · X-Routed-To"])
+    model & fail & r503 -.-> metric[("metric to the<br/>control plane")]
 
-    subgraph CP["control plane"]
-        Backend["backend (FastAPI) :8000\ndeployments · policy · metrics · benchmarks"]
-        DB[("SQLite")]
-        Backend --- DB
-    end
-
-    Router["router :8080\nweighted /predict split"]
-
-    subgraph Serving["model-serving-* (one process per version)"]
-        direction TB
-        V1["v1 :8001"]
-        V2["v2-good :8002"]
-        VBad["v2-quality-bad :8003"]
-        VLat["v2-good-latency-fault :8004"]
-        VErr["v2-good-error-fault :8005"]
-    end
-
-    Dashboard -- "REST" --> Backend
-    Worker -- "evaluate / promote / rollback\n/ advance-traffic" --> Backend
-    Backend -- "PUT /router/config\n(version -> weight only,\nnever host/port)" --> Router
-    Router -- "POST /predict\n(weighted pick)" --> V1
-    Router --> V2
-    Router --> VBad
-    Router --> VLat
-    Router --> VErr
-    Router -. "POST /metrics\n(fire-and-forget)" .-> Backend
+    classDef bad fill:#fef2f2,stroke:#dc2626,color:#7f1d1d
+    classDef good fill:#f0fdf4,stroke:#16a34a,color:#14532d
+    class r429,r503,fail bad
+    class resp good
 ```
 
-The router never learns a version's host/port from the control plane - it reads its
-own static `ROUTER_VERSION_HOSTS` map. The control plane never talks to a serving
-container directly. Neither service can accidentally leak the other's concerns; see
-[docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) for why that boundary is deliberate.
+The gateway never quietly sends a request to a different version when one is
+down. That would hide a broken canary behind the stable version. A failed request
+is answered 503 *and* recorded against the version it was meant for, so a canary
+that's down gets rolled back instead of looking idle.
+
+### The control loop
+
+<img src="docs/diagrams/control-loop.svg" alt="The control loop: gateway metrics, control plane windows, policy engine checks with confidence intervals, worker actions, and the config push back to the gateway as the next routing revision" width="100%">
+
+The worker holds no state of its own. It reads everything from the control plane
+each cycle and acts only through the same REST endpoints an operator uses, so a
+crash or restart loses nothing.
+
+### How one check decides
+
+<img src="docs/diagrams/decision.svg" alt="Decision rule: PASS when the estimate is within the limit, INCONCLUSIVE when it is past the limit but the interval still reaches below it, FAIL when the whole interval is past the limit" width="100%">
+
+| Check | Measures | Statistics |
+|---|---|---|
+| `max_error_rate` | Canary 5xx share | Wilson score interval, exact binomial test |
+| `latency_p95_increase` | Canary p95 vs stable p95 | Bootstrap interval of the p95 ratio, one-sided Mann-Whitney U |
+| `minimum_recall` | Recall over matured labels | Wilson score interval, exact binomial test |
+| `minimum_requests` | Traffic on both sides | gate |
+| `minimum_labeled_samples` · `minimum_label_coverage` · `minimum_positive_labels` | Is there enough ground truth to judge quality? | gates |
+
+The overall verdict is **FAIL > INCONCLUSIVE > PASS**: one failing check rolls the
+canary back, one undecided check holds it where it is. Thresholds and the
+confidence level (95% by default) are set per rollout.
+
+### Rollout lifecycle
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> PENDING
+    PENDING --> DEPLOYING
+    DEPLOYING --> CANARY_RUNNING
+    CANARY_RUNNING --> EVALUATING
+    EVALUATING --> CANARY_RUNNING: PASS · next traffic step
+    EVALUATING --> PROMOTING: PASS at 100%
+    EVALUATING --> ROLLING_BACK: FAIL
+    EVALUATING --> INCONCLUSIVE: retries used up
+    INCONCLUSIVE --> PROMOTING: operator
+    INCONCLUSIVE --> ROLLING_BACK: operator
+    PROMOTING --> PROMOTED
+    ROLLING_BACK --> ROLLED_BACK
+    PROMOTED --> [*]
+    ROLLED_BACK --> [*]
+```
+
+Invalid transitions answer 409. Every transition is a `DeploymentEvent` on the
+audit trail, marked `automatic` or `manual` with the operator's name.
+
+### Desired state and observed state
+
+The database is the source of truth for every model's traffic split; each change
+gets a new, monotonic revision. The router's in-memory copy is a cache that can be
+lost at any time.
+
+<img src="docs/diagrams/reconcile.svg" alt="Reconciliation timeline: the database moves to revision r7, the router restarts and falls back to r0, the next worker tick pushes r7 again" width="100%">
+
+A failed push never fails the rollout: the desired state is already committed, and
+the next reconcile tick closes the gap. The router rejects any revision older than
+the one it holds, so a delayed push can't bring back an old split. CI proves this by
+restarting the real router mid-rollout and waiting for the worker to repair it.
 
 ## Quickstart
 
 ```bash
-make prepare-models   # synthetic dataset + train v1/v2-good/v2-quality-bad + evaluate
-make migrate          # apply Alembic migrations
-make dev              # docker compose up --build (all services above)
+make prepare-models   # synthetic dataset, train v1 / v2-good / v2-quality-bad, evaluate
+make dev              # docker compose up --build
 ```
 
-Then check:
+| | |
+|---|---|
+| Dashboard | http://localhost:3000 |
+| Control plane API | http://localhost:8000/docs |
+| Gateway | http://localhost:8080/router/health |
+| Grafana | http://localhost:3001 |
+| Jaeger | http://localhost:16686 |
+| Prometheus | http://localhost:9090 |
 
-- Backend: http://localhost:8000/health
-- Frontend: http://localhost:3000
-- Router: http://localhost:8080/router/health
+The database lives on the `backend-db` volume and survives rebuilds;
+`docker compose down -v` starts over from an empty one.
 
-The control plane's SQLite database lives on the `backend-db` volume, so it
-survives container rebuilds; `docker compose down -v` starts from an empty one.
+<details>
+<summary>All services and ports</summary>
 
-## Screenshots
+| Service | Port | What it is |
+|---|---|---|
+| `backend` | 8000 | Control plane: deployments, policy, metrics, labels, benchmarks, SSE |
+| `frontend` | 3000 | Dashboard (Next.js) |
+| `router` | 8080 | Gateway: weighted, sticky routing per model |
+| `model-serving-v1` | 8001 | Stable fraud model |
+| `model-serving-v2-good` | 8002 | Healthy candidate |
+| `model-serving-v2-quality-bad` | 8003 | Deliberately weak model, for the quality scenario |
+| `model-serving-v2-good-latency-fault` | 8004 | v2-good with switchable latency injection |
+| `model-serving-v2-good-error-fault` | 8005 | v2-good with switchable error injection |
+| `worker` | `:9100/metrics` | Promotion, rollback and reconcile loop; no API |
+| `grafana` | 3001 | Dashboards and alerts |
+| `prometheus` | 9090 | Scrapes every `/metrics`, evaluates alert rules |
+| `jaeger` | 16686 | Traces (OTLP on 4318) |
 
-**Deployment detail** - canary traffic split, quality metrics (label coverage,
-positive label count) from real delayed ground truth, and the desired-vs-observed
-router revision:
+</details>
 
-![Deployment detail: canary traffic split, quality metrics, and desired/observed revision](docs/screenshots/deployment-detail.png)
+## Five-minute demo
 
-**Timeline - automatic, quality-based rollback** - every policy check's plain-English
-explanation, ending in a genuine `minimum_recall` FAIL and an automatic rollback,
-no human involved:
-
-![Timeline showing a genuine minimum_recall FAIL and an automatic rollback](docs/screenshots/timeline-quality-rollback.png)
-
-**Timeline - self-healing after a router restart** - the `router_reconciled` event
-the worker's own reconcile tick writes after catching the router back up to the
-DB's desired revision, on its own:
-
-![Timeline showing an automatic router_reconciled event after a router restart](docs/screenshots/timeline-router-reconciled.png)
-
-## Demo walkthrough
-
-Two parts: first the manual rollout flow a human actually uses, then the automated
-FAIL → rollback loop end to end - the thing this whole project is really about.
-
-**Part 1 - a manual canary rollout**
-
-```bash
-# 1. Model artifacts already exist from Quickstart (make prepare-models trained
-#    v1, v2-good, and v2-quality-bad). Start a canary at 10% traffic:
-curl -s -X POST localhost:8000/api/deployments \
-  -H 'Idempotency-Key: demo-1' -H 'content-type: application/json' \
-  -d '{"model_name":"fraud-model","stable_version":"v1","canary_version":"v2-good","canary_weight":0.1}'
-# -> note the "id" field, e.g. DEPLOYMENT_ID=...
-
-# 2. Send it some traffic
-curl -s -X POST localhost:8080/router/predict -d '{...}' -H 'content-type: application/json'
-#    (see backend/scripts/benchmarks/locustfile.py's _sample_payload for a full,
-#    valid request body - every trained version accepts the same superset of fields)
-
-# 3. Watch it in the dashboard: http://localhost:3000/deployments/<DEPLOYMENT_ID>
-#    Traffic distribution, Canary analysis, and the Timeline all update from the
-#    same API a human or the worker would call - promote/rollback whenever you like.
-```
-
-**Part 2 - the automated rollback loop**
-
-The benchmark suite *is* this demo, already wired end to end: it creates its own
-isolated canary deployment (`model_name=benchmark-latency-failure`, so it never
-touches the deployment from Part 1), injects +400ms of latency into the canary via
-`PUT /fault-injection`, generates load, and lets the automated worker take it from
-there.
+**1. Watch the platform roll back a bad canary on its own.**
 
 ```bash
 make benchmark-latency-failure
-# or, live: http://localhost:3000/benchmarks -> "Latency Regression" -> Run
 ```
 
-What happens, in order (all of it visible afterward on that deployment's Timeline):
+Or open http://localhost:3000/benchmarks and run **Latency Regression**. The
+benchmark creates its own rollout, injects 400 ms into the canary and sends ~100
+requests per second. Open the **Gateway** page to watch traffic flow, then the
+rollout itself: within one or two evaluations the latency check comes back FAIL
+with an interval far past the limit, and the worker rolls back.
 
-1. The canary starts receiving traffic with +400ms of injected latency.
-2. The worker's next poll cycle calls `/evaluate` - `latency_p95_increase` comes
-   back **FAIL** (canary p95 is now far above the stable baseline).
-3. Because `FAIL` beats every other check, the worker calls `/rollback` itself
-   (`triggered_by=automatic` in the resulting event) - traffic returns to 100%
-   stable, no human involved.
-4. Open the deployment's page - `GET /api/deployments` lists it (look for
-   `is_benchmark: true` and the **Benchmark** badge), then its detail page's
-   **Timeline** shows the whole story chronologically: traffic ramping up, the
-   FAIL policy evaluation with its plain-English explanation, then the automatic
-   rollback event.
-
-This is also exactly what CI's `integration` job exercises on every push - see
-[`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py).
-
-## Project layout
-
-```
-backend/
-  app/
-    control_plane/    deployment lifecycle, traffic allocation, metrics API
-    policy/            PASS/FAIL/INCONCLUSIVE evaluation engine
-    worker/            automated promotion/rollback loop (separate process)
-    router/            weighted traffic router
-    serving/           per-version model serving app (+ runtime fault injection)
-    benchmarks/        dashboard-triggered benchmark runs API
-  scripts/
-    benchmarks/        CLI benchmark orchestrator + Locust load definition
-    train_models.py, evaluate_models.py, generate_dataset.py
-  alembic/             DB migrations
-  tests/
-frontend/
-  src/app/             Next.js pages (Overview, Models, Deployments, Benchmarks)
-  src/lib/             typed API client, fetch/mutation hooks, formatting
-docs/
-  DESIGN_NOTES.md      the "why" behind each design decision
-```
-
-## Capabilities
-
-The platform is organized around the decisions it makes at runtime. The detailed
-design rationale for these boundaries lives in
-[docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md); this section summarizes the product
-surface and the engineering signals it demonstrates.
-
-### Model lifecycle
+**2. Watch a good canary get promoted on real (delayed) labels.**
 
 ```bash
-make prepare-models   # generate-data + train-models + evaluate-models
+make benchmark-success
 ```
 
-- `GET /api/models`, `GET /api/models/{name}/versions`,
-  `GET /api/models/{name}/versions/{version}[/evaluation]`
+Labels arrive 10 s late for 80% of predictions. The quality checks stay
+INCONCLUSIVE until enough have matured, then recall passes, and the worker walks the
+canary through every traffic step to 100%.
 
-### Model serving
-
-One process per model version (`app.serving.main:app`), selected via
-`MODEL_NAME`/`MODEL_VERSION`.
-
-- `GET /health`, `GET /ready`, `POST /predict`
-- `GET`/`PUT /fault-injection` — runtime-toggleable `latency_ms`/`error_rate`
-  (`403` in production); this is what the benchmark suite uses to simulate a
-  regression without restarting a container.
-
-### Progressive delivery and routing
+**3. Run a rollout yourself.**
 
 ```bash
-curl -X POST localhost:8080/router/predict -d '{...}' -H 'content-type: application/json'
+curl -s -X POST localhost:8000/api/deployments \
+  -H 'Idempotency-Key: demo-1' -H 'content-type: application/json' \
+  -d '{"model_name":"fraud-model","stable_version":"v1","canary_version":"v2-good","canary_weight":0.1}'
 ```
+
+Or use **Start a canary rollout** on the Models page, where you can also tighten
+the policy thresholds for this one rollout. Send it traffic with a routing key to see
+sticky routing:
+
+```bash
+curl -s -X POST localhost:8080/router/models/fraud-model/predict \
+  -H 'X-Routing-Key: customer-42' -H 'content-type: application/json' -d @payload.json -i \
+  | grep -i '^x-'
+```
+
+(`payload.json` is any row of `backend/data/test.csv` as JSON, without
+`transaction_id`, `customer_id` and `label`.)
+
+## Benchmarks
+
+Each scenario runs against the real stack with Locust, in its own model name, and
+writes `backend/benchmark-results/<scenario>.{json,md}`.
+
+| Scenario | Fault | Expected | Observed | Time to action | Throughput |
+| --- | --- | --- | --- | ---: | ---: |
+| `baseline` | none, stable only | n/a | 29,871 requests, 0 errors, p95 97 ms | n/a | 99.7 req/s |
+| `latency-failure` | +400 ms on canary | rollback | ✅ **ROLLED_BACK** | 30.9 s | 95.6 req/s |
+| `error-failure` | 50% 5xx on canary | rollback | ✅ **ROLLED_BACK** | 30.7 s | 99.9 req/s |
+| `quality-failure` | weak model (`v2-quality-bad`) | freeze | ✅ **INCONCLUSIVE** (frozen for a human) | 46.3 s | 99.8 req/s |
+| `success` | none | promote | ✅ **PROMOTED** (p95 140 ms) | 82.2 s | 99.9 req/s |
+
+Time to action is from the rollout starting to the worker's final decision, with
+the worker's production 15 s poll interval. The fault containers are switched at
+runtime (`PUT /fault-injection`) and always reset afterwards, even if the run
+crashes. A run first rolls back anything still holding its own `benchmark-*` model,
+so a frozen previous run never blocks the next one.
+
+## Feature reference
+
+<details>
+<summary><b>Gateway</b>: sticky routing, circuit breakers, rate limits, request IDs</summary>
 
 - One router serves many models, each with its own split and its own revision
   sequence; a push for one model never touches another's.
-- `POST /router/models/{model_name}/predict` — weighted-random pick within that
-  model's split, forwards the body unmodified, tags the response with `routed_to`.
-  `POST /router/predict` does the same for the default model (`ROUTER_MODEL_NAME`).
-- `PUT /router/config` — replace one model's `{model_name, deployment_id, revision,
-  targets: [{version, weight}]}`; `GET /router/config?model_name=` reads one,
-  `GET /router/configs` reads all.
-- `GET /router/health` — router liveness + each target's live `/ready` status, per model.
-- A target that's unhealthy or unreachable returns **503**, never a silent
-  fallback to another target ([why](docs/DESIGN_NOTES.md#traffic-router)).
+- **Sticky routing** by `X-Routing-Key` with weighted rendezvous hashing. Raising
+  the canary's weight only moves keys *onto* the canary, never between unrelated
+  versions.
+- **Circuit breaker per version**, opened by consecutive unreachable or not-ready
+  answers (default 5). While open it fails fast with 503 and `Retry-After`; after a
+  cooldown one trial request goes through (half-open). It never fails over.
+- **Rate limit per model** (token bucket, `ROUTER_RATE_LIMIT_RPS`, off by default),
+  answering 429 with `Retry-After`.
+- **Request IDs**: `X-Request-ID` is kept or minted and returned, with `X-Routed-To`.
+- Readiness is cached for 1 s, so a busy version isn't probed on every request.
+- `GET /router/gateway` (and `GET /api/router/gateway` through the control plane):
+  rolling 60 s stats per version — rate, p95, outcomes, in-flight, breaker state.
 
-### Gateway
+</details>
 
-```bash
-curl -H 'X-Routing-Key: user-42' -H 'X-Request-ID: demo-1' -H 'content-type: application/json' \
-  -X POST localhost:8080/router/models/fraud-model/predict -d @payload.json
-curl localhost:8000/api/router/gateway   # live view, what the Gateway page draws
-```
+<details>
+<summary><b>Policy engine</b>: seven checks, two windows, confidence intervals</summary>
 
-- Sticky routing by `X-Routing-Key` (weighted rendezvous hashing: ramping the
-  canary only moves users onto it), request IDs, a 1s readiness cache.
-- Circuit breaker per version for unreachable / not-ready upstreams: fail fast
-  with `Retry-After`, half-open trial, never fail over to another version.
-- Unanswered requests are reported to the control plane as 503s, so a canary
-  that's down is rolled back instead of looking idle.
-- Optional per-model rate limit (429 + `Retry-After`).
-- Dashboard **Gateway** page: clients → gateway → versions as animated beams
-  (width = share, speed = request rate, red = breaker open), and under each live
-  rollout the control loop: metrics → windows → policy engine with intervals →
-  worker → config push back to the gateway.
+- Reliability checks read the most recent window; quality checks read an older,
+  *matured* window, because labels arrive late.
+- `minimum_positive_labels` exists because recall's denominator is positive
+  examples: at a 2% fraud rate a window can hold hundreds of labels and only two
+  frauds.
+- Every result is a `PolicyEvaluation` row with the observed value, the limit, the
+  interval, the p-value, the method and an explanation.
+- `POST /api/deployments/{id}/evaluate`, `GET .../policy-evaluations`,
+  `GET /api/policy/defaults`. Thresholds can be overridden per rollout
+  (`policy_config` on create).
 
-### Deployment lifecycle
+Design notes: [Policy engine](docs/DESIGN_NOTES.md#policy-engine).
 
-```bash
-curl -X POST localhost:8000/api/deployments -H 'Idempotency-Key: <uuid>' -d '{...}'
-```
+</details>
 
-- `POST /api/deployments`, `GET /api/deployments[/{id}]`,
-  `POST /api/deployments/{id}/promote`, `POST /api/deployments/{id}/rollback`.
-- State machine (invalid transitions return 409):
+<details>
+<summary><b>Automation</b>: the worker, manual holds, operator actions</summary>
 
-  ```
-  PENDING -> DEPLOYING -> CANARY_RUNNING -> EVALUATING -> PROMOTING -> PROMOTED
-                                                        -> ROLLING_BACK -> ROLLED_BACK
-                                                        -> INCONCLUSIVE -> (promote/rollback)
-  any in-flight state -> FAILED
-  ```
+- **PASS** → next traffic step, or promote at 100%. **FAIL** → roll back.
+  **INCONCLUSIVE** → retry up to `max_inconclusive_retries`, then freeze.
+- `POST /api/deployments/{id}/pause-automation` and `/resume-automation` take one
+  rollout out of the worker's hands without stopping the worker for everyone else;
+  manual promote and rollback still work.
+- Manual actions carry an `X-Operator` header (set from the dashboard's header);
+  the name lands on the audit trail. It's an audit hint, not authentication.
 
-- Every transition is recorded as a `DeploymentEvent` (the audit trail).
+Design notes: [Automated promotion & rollback](docs/DESIGN_NOTES.md#automated-promotion--rollback),
+[Manual automation hold](docs/DESIGN_NOTES.md#manual-automation-hold).
 
-### Reliability and quality metrics
+</details>
 
-- `POST /api/deployments/{id}/metrics` — the router calls this after every forward.
-- `GET /api/deployments/{id}/metrics?window_seconds=300` — p50/p95/p99 latency,
-  error rate, plus precision/recall/false-positive-rate (`null` only when nothing
-  in the window is labeled yet), `labeled_sample_count`, `label_coverage`,
-  `positive_label_count` (recall's real denominator - see [Known
-  limitations](#known-limitations)), and label-delay percentiles - see [Label
-  ingestion](docs/DESIGN_NOTES.md#label-ingestion).
-- `GET /api/deployments/{id}/comparison?window_seconds=300` — same, `canary - stable`.
-- `POST /api/labels` / `POST /api/labels/batch` — the platform's one real
-  ground-truth ingestion surface; see [Label
-  ingestion](docs/DESIGN_NOTES.md#label-ingestion) and [Known
-  limitations](#known-limitations).
+<details>
+<summary><b>Ground-truth labels</b>: delayed, partial, idempotent</summary>
 
-### Operator dashboard
+- `prediction_id` is minted once by the model service and carried through the
+  gateway into the metric row: the key a late label uses to find its prediction.
+- `POST /api/labels` and `/api/labels/batch`: idempotent (200 on a repeat),
+  conflict-detecting (409 and an audit event for a different label), and tolerant
+  of arriving before the metric (202, stored and joined later).
+- The benchmark load generator labels its own requests, late and for only 80% of
+  them, through this same API. Nothing writes labels into the database directly.
 
-Next.js Client Components calling the control plane directly
-(`NEXT_PUBLIC_API_URL`, CORS via `MODELOPS_CORS_ALLOW_ORIGINS`).
+Design notes: [Label ingestion](docs/DESIGN_NOTES.md#label-ingestion).
 
-- **Overview** (`/`), **Models** (`/models`), **Deployments** (`/deployments`,
-  `/deployments/[id]` with Canary Analysis charts), **Benchmarks** (`/benchmarks`).
-- **Live updates**: `GET /api/stream` is a Server-Sent Events feed with one `change`
-  event per new deployment event or policy result. The dashboard refetches exactly
-  what changed; polling stays as a fallback and tightens when the stream drops.
-- **Fleet summary**: `GET /api/fleet/summary` returns outcome counts split by who
-  decided (policy engine or operator), the automation rate, median time to decision
-  and per-day history. The Overview KPIs are built from it.
-- **Policy thresholds per rollout**: the rollout form starts from
-  `GET /api/policy/defaults` and sends a `policy_config` only for what the operator
-  changed; the detail page shows the thresholds the rollout is judged by, with custom
-  values marked.
-- **Metrics over time**: `GET /api/deployments/{id}/metrics/timeseries` buckets p95
-  latency and error rate per version across the whole rollout; the chart overlays
-  traffic steps, the final decision and the rollout's own policy limits.
-- **Operator name**: manual actions send an `X-Operator` header (set from the
-  header menu) and the name is stored on the events they write. It's an audit hint,
-  not authentication.
+</details>
 
-### Observability
+<details>
+<summary><b>Dashboard</b>: pages and live updates</summary>
 
-Every service exports Prometheus metrics at `/metrics`, and every prediction is
-an OpenTelemetry trace from the router through to the model's own inference
-span. Details: [observability/README.md](observability/README.md).
+- **Overview**, **Deployments** (list and rollout detail), **Gateway**, **Models**
+  (versions, evaluations and the rollout form with policy thresholds),
+  **Benchmarks**, and a ⌘K command palette.
+- **Live**: `GET /api/stream` is a Server-Sent Events feed of new events and policy
+  results; the dashboard refetches exactly what changed and falls back to polling
+  if the stream drops.
+- `GET /api/fleet/summary` (outcomes, who decided, automation rate, median time to
+  decision) and `GET /api/deployments/{id}/metrics/timeseries` (the Over time chart).
+- API types are generated from the control plane's OpenAPI schema
+  (`npm run gen:api`); CI fails if they drift.
 
-- **Grafana** (http://localhost:3001, no login) opens on **ModelOps · Rollouts**:
-  - headline numbers (predictions/s, error rate, p95, live rollouts, decisions,
-    worker heartbeat) and any firing alert;
-  - canary vs stable per model: traffic split, latency, error rate, latency
-    heatmap, with the alert thresholds drawn in and decisions marked on every
-    graph;
-  - the control loop: decisions, policy verdicts, failing gates, worker actions,
-    reconcile results.
+</details>
 
-  **ModelOps · Services** covers rate, errors and latency per service and route,
-  and model inference time per container.
-- **Metrics**: request counts and latency histograms per route template, routed
-  predictions and upstream latency per model/version, the applied traffic split,
-  decisions by outcome and trigger, policy verdicts per gate, reconcile results
-  and errors, and worker sweeps, actions and heartbeat.
-- **Traces** (http://localhost:16686): router → readiness check → model service
-  `/predict` → `model.inference`, plus the router's metric push to the control
-  plane; worker sweeps trace evaluate → promote/rollback → router config push.
-  On when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (compose sets it).
-- **Alerts** (`observability/prometheus/rules.yml`): service down, worker
-  stalled, a version's error rate or p95 too high, reconcile failing.
+<details>
+<summary><b>Observability</b>: metrics, dashboards, alerts, traces</summary>
 
-### Evidence-based policy engine
+- Every service exports Prometheus metrics at `/metrics`: requests and latency per
+  route, routed predictions and upstream latency per model and version, the applied
+  split, breaker state, rate-limited requests, decisions, policy verdicts, reconcile
+  results, worker sweeps and heartbeat.
+- **Grafana** (no login): *ModelOps · Rollouts* (headline numbers, control loop,
+  gateway, canary vs stable per model) and *ModelOps · Services*.
+- **Alerts** (`observability/prometheus/rules.yml`): service down, worker stalled,
+  error rate or p95 too high, reconcile failing.
+- **Traces** in Jaeger: router → readiness → model `/predict` → `model.inference`,
+  and worker sweep → evaluate → promote/rollback → router push.
 
-```bash
-curl -X POST localhost:8000/api/deployments/<id>/evaluate
-curl localhost:8000/api/deployments/<id>/policy-evaluations
-```
+Details: [observability/README.md](observability/README.md).
 
-- Seven checks (`minimum_requests`, `latency_p95_increase`, `max_error_rate`,
-  `minimum_labeled_samples`, `minimum_label_coverage`, `minimum_positive_labels`,
-  `minimum_recall`), each persisted as its own `PolicyEvaluation` row. The
-  quality checks read an older, matured window than the reliability checks -
-  see [Policy
-  engine](docs/DESIGN_NOTES.md#policy-engine).
-- **Statistical decisions.** Error rate, latency and recall carry a confidence
-  interval and a p-value (Wilson score, bootstrap p95 ratio, Mann-Whitney U,
-  exact binomial). A check fails only when the whole interval is past the
-  limit; past the limit but inside the noise is INCONCLUSIVE, so a canary isn't
-  rolled back on two unlucky requests. `confidence_level` is part of the policy
-  ([details](docs/DESIGN_NOTES.md#policy-engine)).
-- Overall verdict: **FAIL beats INCONCLUSIVE beats PASS**
-  ([why](docs/DESIGN_NOTES.md#policy-engine)).
-- Records what the policies found - a human still calls `/promote`/`/rollback`.
+</details>
 
-### Autonomous promotion and rollback
+<details>
+<summary><b>API at a glance</b></summary>
 
-```bash
-docker compose up backend router model-serving-v1 model-serving-v2-good worker
-```
+| Endpoint | |
+|---|---|
+| `POST /api/deployments` | Start a rollout (`Idempotency-Key` supported) |
+| `GET /api/deployments[/{id}]` | List / read, with events and the applied split |
+| `POST /api/deployments/{id}/evaluate` | Run every policy check now |
+| `POST /api/deployments/{id}/promote` · `/rollback` | Operator decisions |
+| `POST /api/deployments/{id}/pause-automation` · `/resume-automation` | Manual hold |
+| `GET /api/deployments/{id}/timeline` | Events and policy results, oldest first |
+| `GET /api/deployments/{id}/metrics?window_seconds=300` | p50/p95/p99, errors, precision/recall, label coverage |
+| `GET /api/deployments/{id}/metrics/timeseries` | Per-version series across the rollout |
+| `POST /api/labels` · `/api/labels/batch` | Ground truth |
+| `POST /api/router/reconcile` · `GET /api/router/observed` | Desired vs observed |
+| `GET /api/router/gateway` | Live gateway stats |
+| `GET /api/stream` | Server-Sent Events |
+| `POST /api/benchmarks/run` · `GET /api/benchmarks/current` | Dashboard benchmarks |
 
-`app/worker/` is a separate, stateless process that acts on `/evaluate` results
-through the control plane's own REST API - the same endpoints a human would call.
+Full schema: http://localhost:8000/docs.
 
-- **PASS** → advance traffic (`10% → 25% → 50% → 100%`) or promote at 100%.
-- **FAIL** → rollback.
-- **INCONCLUSIVE** → retry up to `max_inconclusive_retries`, then freeze (a human
-  can still promote/rollback a frozen deployment).
-- `triggered_by=manual|automatic` distinguishes human vs. worker actions in the
-  event log.
-- `POST /api/deployments/{id}/pause-automation` / `/resume-automation` - a
-  manual hold (Kubernetes' `spec.paused`, Argo Rollouts' manual pause) that
-  stops the worker from touching a specific deployment without stopping the
-  operator from acting on it manually. `POST /api/deployments` also accepts
-  `automation_paused: true` to create a deployment already held. See
-  [Manual automation hold](docs/DESIGN_NOTES.md#manual-automation-hold) for
-  why this exists - it closed a real, reproducible CI race, not a
-  hypothetical one.
-
-### Repeatable benchmark suite
-
-```bash
-make benchmark-baseline        # or: benchmark-latency-failure, benchmark-error-failure,
-                                #     benchmark-quality-failure, benchmark-success
-make benchmark-all             # all five, sequentially
-```
-
-Drives five repeatable end-to-end scenarios against a running stack using Locust,
-each in its own isolated `model_name`. **Only one benchmark runs at a time** - the
-router holds a single active traffic split.
-
-- Two scenarios use the fault-injection containers (`model-serving-v2-good-*-fault`)
-  via the runtime `PUT /fault-injection` endpoint, always reset in a `finally`
-  block even on crash.
-- `quality-failure` and `success` use deliberately loosened latency/error
-  thresholds, so harness noise can't false-trigger a rollback, to demonstrate the
-  automation paths honestly. Ground-truth labels for both are generated by the
-  Locust load definition itself and submitted through the real `POST
-  /api/labels` ingestion path, delayed and with partial coverage - see [Known
-  limitations](#known-limitations).
-- Each run writes `backend/benchmark-results/{scenario}.{json,md}` with
-  time-to-detect / time-to-action measurements.
-- A run first rolls back any rollout still holding its own `benchmark-*` model
-  (the expected `quality-failure` freeze, or a run killed half-way), which would
-  otherwise block the new deployment with a 409. Real models are never touched.
-
-**From the dashboard**: the same five scenarios can be started and watched live
-from `/benchmarks` (`POST /api/benchmarks/run`, polls `GET
-/api/benchmarks/current`) instead of the CLI - useful for a live demo. `POST /run`
-returns **409** while another run is active, and the UI disables every scenario's
-button proactively rather than just reacting to that.
-
-### Explainable incident timeline
-
-Every deployment's `DeploymentEvent` (state transitions, worker actions) and
-`PolicyEvaluation` (per-check results) rows, merged into one chronological story.
-
-```bash
-curl localhost:8000/api/deployments/<id>/timeline
-```
-
-- Each item is tagged `"event"` or `"policy_evaluation"` in the same response,
-  sorted oldest-first.
-- Every policy item carries a derived, human-readable `explanation` - not just
-  `INCONCLUSIVE`, but *why*: "insufficient data" (not enough traffic yet) is
-  called out as a distinct reason from "insufficient labeled data" (the quality
-  window hasn't matured enough ground truth yet - see `minimum_labeled_samples`/
-  `minimum_label_coverage`), and a `minimum_requests` check that's stuck because
-  the canary is already at 100% traffic says so explicitly, naming the real
-  platform limit instead of leaving a human to guess
-  ([why](docs/DESIGN_NOTES.md#policy-engine)).
-- `DeploymentOut` also gains a derived `is_benchmark` field (`model_name` prefix,
-  no new column) - the dashboard shows a **Benchmark** badge wherever a deployment
-  came from the benchmark suite rather than a real rollout, and the manual
-  Promote/Rollback buttons show a warning while the deployment is in a status the
-  automated worker also acts on.
-
-### Engineering quality and feedback
-
-The project is intentionally demoable end to end: the architecture, API behavior,
-resource footprint, troubleshooting notes, and real-stack CI are documented here,
-while the trade-offs are captured in [the design notes](docs/DESIGN_NOTES.md).
-
-Delayed ground-truth labels arrive through the same API a production feedback
-source would use:
-
-```bash
-curl -X POST localhost:8000/api/labels \
-  -d '{"prediction_id": "...", "actual_label": 1, "occurred_at": "2026-08-14T12:00:00Z"}'
-curl -X POST localhost:8000/api/labels/batch -d '[...]'
-```
-
-Closes the platform's biggest honesty gap: `minimum_recall` can now genuinely
-resolve to `PASS` or `FAIL`, not just `INCONCLUSIVE` forever.
-
-- `prediction_id` is minted once, in `app/serving/`, and carried unmodified
-  through the router into `PredictionMetric` - the join key a delayed label uses
-  to find its way back to the exact prediction it grades.
-- `POST /api/labels`/`POST /api/labels/batch` is the platform's one real
-  ground-truth ingestion surface. Idempotent (`200` on a repeated identical
-  label), conflict-detecting (`409` + an audit event on a genuinely different
-  label for the same `prediction_id`), and tolerant of arriving before its
-  metric (`202`, stored durably and joined when the metric arrives) -
-  see [Label ingestion](docs/DESIGN_NOTES.md#label-ingestion).
-- The policy engine now evaluates quality checks (`minimum_labeled_samples`,
-  `minimum_label_coverage`, `minimum_positive_labels`, `minimum_recall`)
-  against an older, *matured* window than reliability checks, since labels
-  arrive delayed - see [Policy engine](docs/DESIGN_NOTES.md#policy-engine).
-  `minimum_positive_labels` exists because `minimum_labeled_samples`/
-  `minimum_label_coverage` alone aren't enough: recall's real denominator is
-  *positive-class* examples, and a low-positive-rate dataset can clear both of
-  those checks while the window still holds only 1-3 positives - see [Known
-  limitations](#known-limitations).
-- The benchmark suite's Locust load definition now generates real labels
-  itself (sampled from the same test dataset the models were evaluated on) and
-  reports them, delayed and with partial coverage, through the real ingestion
-  path - no more direct-DB synthetic backfill anywhere in the platform,
-  benchmarks, or CI.
-- CI gained two scenarios that were never possible before: a quality-based
-  automatic promote and a quality-based automatic rollback, driven by real (if
-  synthetic-sourced) recall computed over a *stratified* request stream - see
-  [Known limitations](#known-limitations) for why the stratification is
-  necessary and what it does and doesn't claim.
-
-### Desired state, observed state, and reconciliation
-
-```bash
-curl -X POST localhost:8000/api/router/reconcile   # what the worker calls every poll cycle
-curl localhost:8000/api/router/observed            # read-only, never pushes anything
-```
-
-The database commits the desired allocation first; the router then receives a
-best-effort update. A periodic reconcile repairs drift after a failed push or
-router restart, while stale routing generations are rejected. See
-[Desired/observed reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation)
-for the full boundary and its trade-offs.
-
-- `TrafficAllocation.revision` is monotonic and model-scoped; `POST /router/config`
-  on the router rejects an
-  equal-or-stale revision with `409` - not silently accepting it.
-- Desired state (the DB) commits *first*; the router push happens after and is
-  now best-effort - neither a stale-revision `409` nor a genuinely unreachable
-  router marks a deployment `FAILED` anymore, since the desired state is
-  already correct and durable either way.
-- The worker triggers one reconcile tick per poll cycle
-  (`POST /api/router/reconcile`) - the control plane (which owns the
-  `RouterGateway`) does the actual desired-vs-observed diff and re-push; the
-  worker itself never talks to the router directly, same boundary as every
-  other automated action.
-- A correction is recorded as a `router_reconciled` `DeploymentEvent`; an
-  already-in-sync tick writes nothing, so the timeline isn't spammed every 15s.
-- Dashboard: the deployment detail page shows desired vs. observed revision
-  for the currently router-managed deployment, with a visible warning while
-  they differ.
-- CI scenario 5 is the platform's one real proof of self-healing: it restarts
-  the router mid-rollout, confirms it genuinely lost its config, and waits for
-  the worker's own reconcile tick - not a human, not a replay - to catch it
-  back up.
-
-### Correctness guarantees
-
-Two details keep the control loop honest across restarts and delayed data:
-
-```bash
-curl localhost:8000/api/router-config/fraud-model   # now finds a PROMOTED/
-                                                     # ROLLED_BACK deployment's
-                                                     # final allocation too
-```
-
-- **Terminal-state reconciliation.** The reconciler and the router's startup
-  sync use the authoritative final allocation for `PROMOTED` and `ROLLED_BACK`
-  deployments, so a restart cannot silently restore a bootstrap split after a
-  rollout has completed.
-  `service.get_authoritative_allocation` closes the gap: a `PROMOTED`/
-  `ROLLED_BACK` deployment's final `TrafficAllocation` stays authoritative for
-  its model - deliberately excluding `FAILED`, which never reached a
-  legitimate outcome - see [Desired/observed
-  reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for why
-  it's a separate function from `get_active_deployment` rather than a widened
-  version of it.
-- **Model-scoped routing generation.** `RoutingGeneration` prevents a delayed
-  update from an older deployment from resurrecting stale traffic for the same
-  model, even when the deployment IDs differ.
-- **Durable ground-truth labels.** `GroundTruthLabel` is written on ingestion
-  regardless of metric arrival order; quality aggregation joins it against
-  `PredictionMetric` at read time. Delayed labels are therefore durable without
-  relying on a timing-sensitive write-time handoff.
+</details>
 
 ## Development
 
 ```bash
-make dev             # bring up the whole stack via docker compose
-make test            # backend tests (pytest) - 357 tests
-make coverage        # same, plus an HTML report at backend/htmlcov/index.html
-make lint            # backend (ruff, mypy) + frontend (eslint, tsc) lint/type-check
-make ci-smoke-test   # the same real-stack check CI runs - needs `make dev` running
-make e2e             # Playwright browser tests against the running stack
-make check-observability  # Prometheus targets, alerts, dashboards, traces - needs `make dev`
-make dashboards      # regenerate the Grafana dashboard JSON from its generator
-make down            # stop the services
-cd frontend && npm run gen:api   # regenerate the dashboard's API types after an API change
+make test                 # backend tests (pytest)
+make lint                 # ruff + mypy --strict, eslint + tsc
+make e2e                  # Playwright against the running stack
+make ci-smoke-test        # the real-stack scenarios CI runs
+make check-observability  # targets scraped, alerts and dashboards loaded, traces arriving
+make dashboards           # regenerate the Grafana JSON from its generator
+cd frontend && npm run gen:api   # regenerate the dashboard's API types
 ```
 
-The dashboard's API types aren't written by hand: `npm run gen:api` exports the
-control plane's OpenAPI schema to `frontend/openapi.json` and generates
-`frontend/src/lib/api-schema.ts` from it; `src/lib/types.ts` only re-exports
-those, plus the few shapes OpenAPI can't describe (the SSE payload, free-form
-registry JSON). The `api-contract` CI job regenerates both and fails if they
-differ from what's committed. It installs FastAPI and pydantic at the versions in
-`backend/constraints-api-contract.txt`, so a new release of either can't change
-the rendered schema, and fail the check, on a commit that changed no API.
+CI runs four jobs on every push:
 
-**CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs four jobs on
-every push/PR:
+| Job | What it checks |
+|---|---|
+| `backend` | ruff, `mypy --strict`, 359 pytest tests |
+| `frontend` | eslint, `tsc --noEmit`, `next build` |
+| `api-contract` | Regenerates the OpenAPI schema and TypeScript types and fails on any diff (FastAPI and pydantic pinned in `backend/constraints-api-contract.txt`) |
+| `integration` | Boots the **real** stack and runs six scenarios against it, the observability check and the Playwright suite |
 
-| Job | What it checks | Runtime |
-|---|---|---|
-| `backend` | `ruff`, `mypy --strict`, `pytest` (357 tests, mocked collaborators) | seconds |
-| `frontend` | `eslint`, `tsc --noEmit`, `next build` | seconds |
-| `api-contract` | Regenerates the OpenAPI schema and the dashboard's TypeScript types; fails if either differs from what's committed | seconds |
-| `integration` | Builds and boots the **real** stack (8 HTTP-exposed services + the worker, plus Prometheus, Grafana and Jaeger), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s six scenarios, [`check_observability.py`](backend/scripts/check_observability.py) (every target scraped, alerts and dashboards loaded, the smoke test's decisions counted, traces reaching a model service) and the Playwright suite in [`frontend/e2e`](frontend/e2e) - gated on the three jobs above passing first | a few minutes |
+The integration scenarios use the real worker, not a stand-in:
 
-The `integration` job's six scenarios, in order: **(1)** a fast manual create →
-evaluate → promote path, created with `automation_paused=True` so the always-on
-worker can't race the scenario's own manual `/evaluate` call - see
-[Manual automation hold](docs/DESIGN_NOTES.md#manual-automation-hold), added
-after this exact race caused a real, reproducible CI flake; **(2)** inject real
-latency into a canary and wait for the **actual automated worker** (not a
-manual call standing in for it) to detect the resulting policy FAIL and roll
-back on its own; **(3)** a healthy canary, waiting for the worker to really
-walk it through every traffic stage (10% → 25% → 50% → 100%) and promote it on
-a genuine `minimum_recall` PASS; **(4)** a deliberately weak canary, same real
-delayed label flow as (3), rolled back automatically on a genuine
-`minimum_recall` FAIL; **(5)** a real `docker compose restart router` mid-rollout
-- the router genuinely loses its config, and the worker's own reconcile tick
-(not a human, not a replay) pushes it back to the DB's desired revision on its
-own; **(6)** manually promotes the deployment scenario 5 leaves running, then
-restarts the router *again* - this time confirming its startup sync alone
-restores the promoted split, proving the terminal-state reconciliation fix
-(scenario 5 only ever restarts the router mid-rollout, never after a rollout
-has finished) - see [Desired/observed
-reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for both.
-Scenarios 2-5 only finish in reasonable CI time because the worker's poll
-interval is turned down to 2s for this job specifically
-(`WORKER_POLL_INTERVAL_SECONDS` in the workflow file - defaults to 15s for real use
-and for local `make dev`, unaffected unless that env var is set); scenario 6
-doesn't depend on it at all, since it only needs the router's own startup
-sync, not a reconcile tick.
+1. manual create → evaluate → promote;
+2. injected latency, detected and rolled back by the worker;
+3. a healthy canary walked through every traffic step and promoted on a real recall PASS;
+4. a weak canary rolled back on a real recall FAIL;
+5. `docker compose restart router` mid-rollout, repaired by the worker's reconcile tick;
+6. a router restart after promotion, restored by the router's own startup sync.
 
-The `integration` job exists because every real bug found in this project (see
-[Troubleshooting](#troubleshooting)) was found by running the actual stack, not by
-a unit test with mocked collaborators - unit tests keep that class of regression
-from coming back, but they can't catch it in the first place.
+Every real bug in this project was found by running the actual stack, which is why
+that job exists.
 
-## Resource footprint
+<details>
+<summary>Project layout</summary>
 
-Measured with `docker stats --no-stream` on the actual target hardware (Apple
-Silicon MacBook, native `linux/arm64` containers - no emulation, both `python:3.12-
-slim` and `node:22-slim` publish arm64 images, so nothing extra is needed on
-Apple Silicon):
+```
+backend/
+  app/
+    control_plane/   deployments, traffic allocation, metrics, labels, SSE, reconcile
+    policy/          checks, statistics (stats.py), explanations
+    worker/          promotion / rollback / reconcile loop
+    router/          gateway: routing, breaker, rate limit, telemetry
+    serving/         one model version per process, fault injection
+    benchmarks/      dashboard-triggered benchmark runs
+    observability/   Prometheus and OpenTelemetry setup
+  scripts/           dataset, training, benchmarks (Locust), CI smoke test
+  alembic/           migrations (run at startup)
+frontend/
+  src/app/           pages: overview, deployments, gateway, models, benchmarks
+  src/components/    UI and the animated flow / chart components
+  e2e/               Playwright tests
+observability/       Prometheus rules, Grafana dashboards and their generator
+docs/DESIGN_NOTES.md the why behind each design decision
+```
 
-| Service | Measured RSS |
+</details>
+
+<details>
+<summary>Resource footprint</summary>
+
+Measured with `docker stats` on an Apple Silicon MacBook (native arm64 images):
+
+| Service | RSS |
 |---|---|
 | `frontend` (Next.js dev server) | ~1.0 GiB |
-| 5× `model-serving-*` | ~165 MiB each (~830 MiB total) |
+| 5× `model-serving-*` | ~165 MiB each |
 | `backend` | ~99 MiB |
 | `router` | ~66 MiB |
 | `worker` | ~32 MiB |
-| **All 9 containers together** | **~2.0 GiB** |
+| **All 9 ModelOps containers** | **~2.0 GiB** |
 
-That's containers only - Docker Desktop's own Linux VM reserves memory on top of
-this regardless of what's running inside it (check Docker Desktop's Resources
-settings; the default is usually several GB). Even accounting for that, the whole
-stack plus a browser and an editor fits comfortably on a 16 GB machine. The
-frontend's ~1 GiB is by far the largest single consumer - that's Next.js's dev
-server (Turbopack) with hot-reload watching every source file, not something this
-project's code does; `next build && next start` would use meaningfully less but
-loses hot reload, which is why `make dev` uses `next dev`.
+The frontend is the biggest consumer because `make dev` runs `next dev` with hot
+reload.
+
+</details>
 
 ## Known limitations
 
-Labels flow delayed through the platform's real ingestion surface (`POST
-/api/labels`). Their source is still the synthetic dataset's known labels,
-though - this is not a real production feedback loop (see the
-`benchmark-success` bullet below for exactly how that's kept honest).
+- **Labels are real API traffic, but synthetic data.** Ground truth flows late and
+  partial through `POST /api/labels`, but its source is the synthetic dataset's known
+  labels, not a production feedback loop.
+- **Quality scenarios are stratified.** CI and the `success` benchmark send 30–50%
+  fraud cases, so a short window holds enough positives for recall to be a
+  measurement rather than noise. The demo load uses the natural ~2% rate.
+- **Single router, periodic reconcile.** Drift is closed on the next worker cycle
+  (15 s by default), and the reconciler assumes one router instance.
+- **A frozen rollout blocks its model.** An INCONCLUSIVE rollout still counts as
+  active until someone promotes or rolls it back (the benchmark runner does this for
+  its own models).
+- **Local-only observability.** Grafana has no login, Jaeger keeps traces in memory,
+  and there's no Alertmanager, so alerts show in Grafana but notify no one.
+- **`--reload` in development.** Saving a file under `backend/app` or
+  `backend/scripts` during a dashboard benchmark restarts the control plane and ends
+  the run; it's marked FAILED ("interrupted") on the next start.
+- **At 100% canary**, `minimum_requests` can't be met for the stable side; the
+  timeline says so explicitly, and the benchmark feeds the idle side health-check
+  traffic.
 
-- The `minimum_recall` policy check can genuinely resolve to `PASS` or `FAIL` now,
-  once the quality data-sufficiency gate (`minimum_labeled_samples` +
-  `minimum_label_coverage` + `minimum_positive_labels`) has passed - see [Policy
-  engine](docs/DESIGN_NOTES.md#policy-engine) for the two-window evaluation this
-  requires. Before that gate passes, `minimum_recall` stays `INCONCLUSIVE`, and
-  since `INCONCLUSIVE` beats `PASS`, a canary that never accumulates enough
-  labeled *positive-class* data still can't be automatically promoted -
-  `minimum_labeled_samples` alone isn't sufficient for that, since recall's
-  real denominator is positive examples, not labeled samples in general.
-- CI's two quality-driven scenarios (`ci_smoke_test.py`) send a *stratified*
-  request stream (`QUALITY_SCENARIO_POSITIVE_RATIO`, default 50% positive) so
-  the quality window's recall is computed over enough positive examples to be
-  a real measurement, not noise - at the dataset's natural ~2% positive rate, a
-  short CI window typically contains only 1-3 positives, and a genuinely
-  healthy model can appear to fail recall purely from that sample-size noise
-  (confirmed during live verification before the `minimum_positive_labels` gate
-  and the stratified stream were added). After
-  the fix, these two scenarios were verified across 5 consecutive
-  scenario-3/scenario-4 pairs (10 outcomes total), all correct - see [Policy
-  engine](docs/DESIGN_NOTES.md#policy-engine) for why stratification is sound
-  for recall specifically, and where it stops being sound. This stratification
-  is CI/benchmark-only; the Locust demo load samples requests at the dataset's
-  natural, unstratified rate.
-- The `benchmark-success` scenario and the Locust load generator's label feeder
-  both source ground truth from the synthetic test dataset's known labels, not
-  real production traffic - but they submit it through the same ingestion path
-  (`POST /api/labels(/batch)`) a real deployment would use, delayed and with
-  partial coverage, not a direct database write. This is called out explicitly
-  wherever it applies (the scenario's own report, and its card on the dashboard).
-- The observability stack is set up for one laptop. Grafana has no login
-  (anonymous admin on :3001), Jaeger keeps traces in memory only, and there's no
-  Alertmanager, so alerts show in Grafana and Prometheus but go nowhere.
-  Prometheus counters restart at zero with their service. The dashboards use
-  `rate()`/`increase()`, which handle that; the decision history that has to
-  survive a restart is in the database (`GET /api/fleet/summary`).
-- The backend runs with `--reload`, which also watches `backend/scripts/`. Saving
-  a file there or in `backend/app/` mid-benchmark restarts the control plane and
-  kills the run's subprocess. On the next startup the run is marked `FAILED`
-  ("interrupted"), so it no longer blocks later runs.
-- `uq_deployments_active_per_model` (the DB-level invariant backing "one active
-  deployment per model") also covers `INCONCLUSIVE` - a deployment frozen after
-  `max_inconclusive_retries` still counts as active and blocks a new deployment
-  for that `model_name` until it's manually promoted or rolled back.
-- Reconciliation is periodic, not instant - drift between the DB's desired
-  traffic split and the router's observed one (a failed push, a router
-  restart) is closed on the worker's next poll cycle
-  (`WORKER_POLL_INTERVAL_SECONDS`, 15s by default), not the moment it happens.
-  See [Desired/observed
-  reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation).
-- The reconciler assumes a single router instance. Every tick it compares each
-  model's authoritative allocation in the DB against that model's entry in one
-  `GET /router/configs` response and re-pushes where they differ - there's no
-  notion of multiple router replicas each with their own (possibly different)
-  observed state to reconcile independently.
-- A sustained router outage is surfaced (a one-time `router_unreachable`/
-  `router_recovered` timeline event, and a `reachable` flag the dashboard
-  turns into a visible warning), not silently swallowed - see [Desired/observed
-  reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for why
-  that visibility matters once router push failures stopped marking a
-  deployment `FAILED`.
-- The router's desired-state lookup (reconciler and startup sync alike) is
-  authoritative for a model even once its rollout has finished or frozen -
-  `PROMOTED`/`ROLLED_BACK`'s final `TrafficAllocation`, and an `INCONCLUSIVE`
-  deployment's frozen one, all stay the router's desired state, not just the
-  in-flight `CANARY_RUNNING`/`EVALUATING` case - except `FAILED`, which never
-  reaches a legitimate outcome and is deliberately excluded from that
-  fallback. See [Desired/observed
-  reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation) for why
-  that distinction exists and what a router restart does when *no* deployment
-  for a model has ever reached one of those states (the router's own
-  bootstrap default, unchanged).
-- Ground-truth labels are written unconditionally to their own table
-  (`GroundTruthLabel`) the moment they're ingested, regardless of whether a
-  matching `PredictionMetric` exists yet - quality metrics are computed by
-  joining the two at read time, not by copying a value across at write time.
-  `POST /api/labels` returning `202` means "no matching metric yet", not "not
-  yet durably recorded" - the label is already safely stored either way. See
-  [Desired/observed reconciliation](docs/DESIGN_NOTES.md#desiredobserved-reconciliation)
-  for the write-time race this closes.
-
-Beyond that specific gap, a number of features were deliberately left out of scope
-for this project rather than half-built - see [docs/DESIGN_NOTES.md's Future
-vision](docs/DESIGN_NOTES.md#future-vision) for what they are and why now wasn't
-the time for them (multi-model support, a real inference gateway, cost/drift/data-
-quality/availability policies, a model approval workflow, and dev/staging/prod
-environment separation).
+More on what was deliberately left out: [Future vision](docs/DESIGN_NOTES.md#future-vision).
 
 ## Production evolution
 
-This project optimizes for running on one laptop and being easy to read end to
-end. If it had to actually run in production, here's what would change first, and
-why:
-
 | Today | In production | Why |
 |---|---|---|
-| SQLite | PostgreSQL | SQLite's writer lock serializes every write across the whole database - fine for one backend process on one machine, but a real deployment runs multiple backend replicas and needs real concurrent writes, proper connection pooling, and point-in-time recovery. |
-| One `worker` process | Distributed workers + leader election / row-level locking | A single worker is a single point of failure and a throughput ceiling. Multiple workers competing for the same deployments need real mutual exclusion (e.g. `SELECT ... FOR UPDATE`, or a leader-election library) instead of the single-process assumption baked into today's polling loop. |
-| Router `POST`s metrics to the backend directly | Kafka / an event stream | A direct HTTP call from the hot path couples the router's request latency to the control plane's availability and DB write latency, even though it's fire-and-forget today. An event stream decouples producer from consumer, survives a control-plane outage without losing data, and lets more than one consumer (metrics, alerting, a future data-quality pipeline) read the same stream independently. |
-| Docker Compose | Kubernetes | Compose has no rolling restarts, no horizontal autoscaling, no built-in service mesh/mTLS, and no multi-node scheduling - fine for one host, not for a platform serving real traffic across a fleet. |
-| Local filesystem model registry | Object storage (S3/GCS) + MLflow (or similar) | `backend/artifacts/` is a bind mount on one machine - it doesn't survive that machine dying, isn't versioned beyond a directory name, and can't be read by workers on other hosts. A model registry needs to be a shared, versioned, network-accessible store, and MLflow (or an equivalent) adds experiment tracking and lineage this project never needed for a single demo pipeline. |
-| No auth | OIDC + RBAC | Every endpoint here is open on purpose, to keep the demo frictionless. A real control plane needs to know *who* is promoting/rolling back a model (for the audit trail this project already builds - see the Timeline) and *whether they're allowed to* - separate permissions for "can view metrics" vs. "can promote to 100% traffic" at minimum. |
+| SQLite | PostgreSQL | One writer at a time is fine for one process; replicas need real concurrency, pooling and point-in-time recovery. |
+| One worker | Several workers with leader election or row locks | A single worker is a single point of failure; several need mutual exclusion per rollout. |
+| Gateway posts metrics over HTTP | Kafka or another event stream | Decouples the hot path from the control plane's availability and lets several consumers read the same stream. |
+| Docker Compose | Kubernetes | Rolling restarts, autoscaling, multi-node scheduling, mTLS. |
+| Local model directory | Object storage + a model registry | Shared, versioned, survives the machine. |
+| No auth | OIDC + RBAC | "Can view" and "can promote to 100%" are different permissions; the audit trail is already there. |
 
 ## Troubleshooting
 
-Real problems hit while building this project, not a generic checklist:
+<details>
+<summary>Real problems hit while building this, and their fixes</summary>
 
-- **A deployment's `minimum_requests` check stays `INCONCLUSIVE` forever once the
-  canary reaches 100% traffic.** Not a bug: the stable side receives ~0 traffic at
-  that point and can never accumulate enough samples to pass. The Timeline's
-  explanation for this check names it explicitly ("stable side has not received
-  enough traffic... the canary is already at 100%... not a bug") - see [Known
-  limitations](#known-limitations) and
-  [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md#policy-engine).
-- **Timestamps read hours off, or elapsed-time counters show huge numbers.**
-  SQLite's `DateTime(timezone=True)` isn't actually enforced by the driver - a
-  value written as UTC can round-trip as an offset-*naive* string. Anything that
-  parses a timestamp from the API (Python or JS) has to explicitly assume UTC when
-  no offset is present, rather than trusting the local `datetime`/`Date` parser's
-  default. Fixed in both directions: `parse_timestamp` in
-  `scripts/benchmarks/report.py` (Python) and `parseApiDate` in
-  `frontend/src/lib/format.ts` (JS) - if you add a new place that parses an API
-  timestamp, use one of those instead of `datetime.fromisoformat`/`new Date()`
-  directly.
-- **The worker process dies during a control-plane restart or migration.** A
-  transient connection error mid-sweep used to propagate out of `run_once()` and
-  crash the whole worker loop. Fixed by wrapping the sweep in try/except inside
-  `run_forever()` (`app/worker/loop.py`) - a transient outage gets logged and
-  retried next cycle instead of taking the process down; there's nothing in-memory
-  to lose since the worker re-derives all state from the control plane every cycle.
-- **`make benchmark-*` exits nonzero even though the scenario "worked."** Locust
-  exits nonzero by default whenever *any* request fails - which is the expected,
-  desired outcome for the `latency-failure`/`error-failure` scenarios (that's the
-  whole point of injecting a fault). Fixed with `--exit-code-on-error 0` in
-  `scripts/benchmarks/load_runner.py`; the scenario's actual pass/fail comes from
-  comparing `observed_outcome` to `expected_outcome`, not Locust's exit code.
-- **`git push` rejected with `GH007: Your push would publish a private email
-  address`.** GitHub's "keep my email private" setting blocks pushes whose commit
-  author/committer email isn't the `@users.noreply.github.com` address - and it
-  checks *both* fields, so `git commit --amend --author=...` alone isn't enough;
-  the committer identity (drawn from `user.email` at commit time) needs fixing
-  too, e.g. `GIT_COMMITTER_EMAIL=<id>+<username>@users.noreply.github.com git
-  commit --amend --author="<name> <same address>"`.
-- **Almost shipped a circular `depends_on` in `docker-compose.yml`.** The router
-  depends on the backend being reachable at startup, and it was tempting to also
-  add the reverse (backend depends_on router) when wiring up a feature that needed
-  the router - `docker compose config` catches this immediately (nonzero exit),
-  worth running after editing the dependency graph.
+- **Timestamps hours off.** SQLite doesn't enforce `DateTime(timezone=True)`, so UTC
+  values can come back without an offset. Parse API timestamps with `parseApiDate`
+  (frontend) or `parse_timestamp` (benchmarks), never `new Date()` /
+  `datetime.fromisoformat` directly.
+- **Worker died during a control-plane restart.** A connection error escaped the
+  sweep; the loop now logs it and retries next cycle. The worker keeps no state, so
+  nothing is lost.
+- **`make benchmark-*` exited non-zero on a "successful" failure scenario.** Locust
+  fails on any failed request by default, which is the point of a fault scenario.
+  The runner uses `--exit-code-on-error 0` and compares the observed outcome
+  instead.
+- **Backend reload hung for minutes.** A folded YAML `command:` with deeper-indented
+  continuation lines kept its newlines, so `--timeout-graceful-shutdown` ran as a
+  separate shell command and open SSE connections held the reload until their
+  300 s limit.
+- **A benchmark failed with 409.** A previous run of the same scenario was frozen
+  INCONCLUSIVE. The runner now rolls back its own stale rollout first.
+- **`git push` rejected with GH007.** GitHub's private-email setting checks both
+  author and committer; set both to the `@users.noreply.github.com` address.
+
+</details>
+
+---
+
+<div align="center"><sub>MIT licensed · design rationale in <a href="docs/DESIGN_NOTES.md">docs/DESIGN_NOTES.md</a></sub></div>
