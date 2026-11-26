@@ -24,8 +24,10 @@ export interface ThresholdField {
   max?: number;
   step: number;
   integer?: boolean;
-  get: (c: PolicyConfig) => number;
-  set: (c: PolicyConfig, v: number) => PolicyConfig;
+  /** Left empty, the check is switched off (sent as null). */
+  optional?: boolean;
+  get: (c: PolicyConfig) => number | null;
+  set: (c: PolicyConfig, v: number | null) => PolicyConfig;
 }
 
 export const GATE_FIELDS: ThresholdField[] = [
@@ -37,7 +39,7 @@ export const GATE_FIELDS: ThresholdField[] = [
     min: 0,
     step: 1,
     get: (c) => c.latency.p95_max_increase_percent,
-    set: (c, v) => ({ ...c, latency: { p95_max_increase_percent: v } }),
+    set: (c, v) => ({ ...c, latency: { p95_max_increase_percent: v ?? 0 } }),
   },
   {
     key: "errors",
@@ -48,7 +50,7 @@ export const GATE_FIELDS: ThresholdField[] = [
     max: 100,
     step: 0.5,
     get: (c) => c.reliability.max_error_rate_percent,
-    set: (c, v) => ({ ...c, reliability: { max_error_rate_percent: v } }),
+    set: (c, v) => ({ ...c, reliability: { max_error_rate_percent: v ?? 0 } }),
   },
   {
     key: "recall",
@@ -59,7 +61,19 @@ export const GATE_FIELDS: ThresholdField[] = [
     max: 1,
     step: 0.01,
     get: (c) => c.quality.minimum_recall,
-    set: (c, v) => ({ ...c, quality: { minimum_recall: v } }),
+    set: (c, v) => ({ ...c, quality: { minimum_recall: v ?? 0 } }),
+  },
+  {
+    key: "drift",
+    label: "Max feature drift (PSI)",
+    hint: "Canary inputs vs its training data, per feature. Empty switches it off.",
+    unit: "",
+    min: 0,
+    step: 0.05,
+    optional: true,
+    // Rollouts created before the drift check have no "drift" in their snapshot.
+    get: (c) => (c.drift as PolicyConfig["drift"] | undefined)?.max_feature_psi ?? null,
+    set: (c, v) => ({ ...c, drift: { max_feature_psi: v } }),
   },
 ];
 
@@ -73,7 +87,7 @@ export const EVIDENCE_FIELDS: ThresholdField[] = [
     step: 10,
     integer: true,
     get: (c) => c.minimum_requests,
-    set: (c, v) => ({ ...c, minimum_requests: v }),
+    set: (c, v) => ({ ...c, minimum_requests: v ?? 0 }),
   },
   {
     key: "evaluation_window_seconds",
@@ -84,7 +98,7 @@ export const EVIDENCE_FIELDS: ThresholdField[] = [
     step: 30,
     integer: true,
     get: (c) => c.evaluation_window_seconds,
-    set: (c, v) => ({ ...c, evaluation_window_seconds: v }),
+    set: (c, v) => ({ ...c, evaluation_window_seconds: v ?? 0 }),
   },
   {
     key: "confidence_level",
@@ -95,7 +109,7 @@ export const EVIDENCE_FIELDS: ThresholdField[] = [
     max: 0.999,
     step: 0.01,
     get: (c) => c.confidence_level,
-    set: (c, v) => ({ ...c, confidence_level: v }),
+    set: (c, v) => ({ ...c, confidence_level: v ?? 0 }),
   },
   {
     key: "minimum_labeled_samples",
@@ -106,7 +120,7 @@ export const EVIDENCE_FIELDS: ThresholdField[] = [
     step: 5,
     integer: true,
     get: (c) => c.minimum_labeled_samples,
-    set: (c, v) => ({ ...c, minimum_labeled_samples: v }),
+    set: (c, v) => ({ ...c, minimum_labeled_samples: v ?? 0 }),
   },
   {
     key: "minimum_label_coverage",
@@ -117,7 +131,7 @@ export const EVIDENCE_FIELDS: ThresholdField[] = [
     max: 1,
     step: 0.05,
     get: (c) => c.minimum_label_coverage,
-    set: (c, v) => ({ ...c, minimum_label_coverage: v }),
+    set: (c, v) => ({ ...c, minimum_label_coverage: v ?? 0 }),
   },
   {
     key: "minimum_positive_labels",
@@ -128,7 +142,7 @@ export const EVIDENCE_FIELDS: ThresholdField[] = [
     step: 5,
     integer: true,
     get: (c) => c.minimum_positive_labels,
-    set: (c, v) => ({ ...c, minimum_positive_labels: v }),
+    set: (c, v) => ({ ...c, minimum_positive_labels: v ?? 0 }),
   },
   {
     key: "label_maturity_seconds",
@@ -139,7 +153,7 @@ export const EVIDENCE_FIELDS: ThresholdField[] = [
     step: 15,
     integer: true,
     get: (c) => c.label_maturity_seconds,
-    set: (c, v) => ({ ...c, label_maturity_seconds: v }),
+    set: (c, v) => ({ ...c, label_maturity_seconds: v ?? 0 }),
   },
   {
     key: "max_inconclusive_retries",
@@ -150,7 +164,7 @@ export const EVIDENCE_FIELDS: ThresholdField[] = [
     step: 1,
     integer: true,
     get: (c) => c.max_inconclusive_retries,
-    set: (c, v) => ({ ...c, max_inconclusive_retries: v }),
+    set: (c, v) => ({ ...c, max_inconclusive_retries: v ?? 0 }),
   },
 ];
 
@@ -158,12 +172,14 @@ const ALL_FIELDS = [...GATE_FIELDS, ...EVIDENCE_FIELDS];
 
 export type ThresholdDrafts = Record<string, string>;
 
-function parse(field: ThresholdField, raw: string): number | null {
-  if (raw.trim() === "") return null;
+/** The typed value, null for an optional field left empty (switched off), or
+ * undefined when it isn't valid. */
+function parse(field: ThresholdField, raw: string): number | null | undefined {
+  if (raw.trim() === "") return field.optional ? null : undefined;
   const value = Number(raw);
-  if (!Number.isFinite(value)) return null;
-  if (field.integer && !Number.isInteger(value)) return null;
-  if (value < field.min || (field.max != null && value > field.max)) return null;
+  if (!Number.isFinite(value)) return undefined;
+  if (field.integer && !Number.isInteger(value)) return undefined;
+  if (value < field.min || (field.max != null && value > field.max)) return undefined;
   return value;
 }
 
@@ -177,7 +193,7 @@ export function resolveThresholds(defaults: PolicyConfig, drafts: ThresholdDraft
     const raw = drafts[field.key];
     if (raw == null) continue;
     const value = parse(field, raw);
-    if (value == null) {
+    if (value === undefined) {
       invalid.add(field.key);
       continue;
     }
@@ -213,7 +229,7 @@ function FieldRow({
           {field.label}
         </Label>
         {changed ? (
-          <span className="font-mono text-[10px] text-muted-foreground tabular">default {fallback}</span>
+          <span className="font-mono text-[10px] text-muted-foreground tabular">default {fallback ?? "off"}</span>
         ) : null}
       </div>
       <div className="relative">
@@ -221,7 +237,8 @@ function FieldRow({
           id={id}
           inputMode="decimal"
           className={cn("h-8 pr-9 font-mono text-sm tabular", changed && "border-canary/60")}
-          value={drafts[field.key] ?? String(fallback)}
+          value={drafts[field.key] ?? (fallback == null ? "" : String(fallback))}
+          placeholder={field.optional ? "off" : undefined}
           aria-invalid={invalid}
           onChange={(event) => onChange(field.key, event.target.value)}
         />
@@ -282,7 +299,7 @@ export function PolicyThresholds({
         <div id="policy-thresholds" className="space-y-4 border-t px-3 py-3">
           <section className="space-y-2">
             <h4 className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">Decision gates</h4>
-            <div className="grid gap-3 sm:grid-cols-3">
+            <div className="grid gap-3 sm:grid-cols-2">
               {GATE_FIELDS.map((field) => (
                 <FieldRow
                   key={field.key}

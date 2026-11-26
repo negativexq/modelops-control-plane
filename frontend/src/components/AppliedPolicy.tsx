@@ -22,14 +22,14 @@ export function AppliedPolicy({ config }: { config: PolicyConfig | null }) {
           {custom ? (
             <span
               className="rounded bg-canary/15 px-1.5 text-[10px] text-canary"
-              title={`Default is ${defaults ? field.get(defaults) : "?"}${field.unit}`}
+              title={`Default is ${defaults ? (field.get(defaults) ?? "off") : "?"}${field.unit}`}
             >
               custom
             </span>
           ) : null}
           <span className={cn("font-mono text-xs tabular", custom && "text-foreground")}>
-            {value}
-            {field.unit ? <span className="text-muted-foreground"> {field.unit}</span> : null}
+            {value ?? "off"}
+            {field.unit && value != null ? <span className="text-muted-foreground"> {field.unit}</span> : null}
           </span>
         </dd>
       </div>

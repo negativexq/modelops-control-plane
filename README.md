@@ -89,7 +89,8 @@ and the moment the worker rolled it back.
 
 Each policy check stores the interval it measured, not just a verdict. The strip
 shows the confidence interval against the limit: entirely past it means **FAIL**,
-straddling it means **INCONCLUSIVE**.
+straddling it means **INCONCLUSIVE**. The explanation says which look of the rollout
+the interval belongs to, and `feature_drift` names the feature that moved most.
 
 ![Policy checks with observed values, confidence intervals drawn against each limit, p-values and plain-English explanations](docs/screenshots/policy-evidence.png)
 
@@ -182,12 +183,15 @@ crash or restart loses nothing.
 | `max_error_rate` | Canary 5xx share | Wilson score interval, exact binomial test |
 | `latency_p95_increase` | Canary p95 vs stable p95, over successful responses | Bootstrap interval of the p95 ratio, one-sided Mann-Whitney U |
 | `minimum_recall` | Recall over matured labels | Wilson score interval, exact binomial test |
+| `feature_drift` | Canary inputs vs its training data, per feature, no labels needed | PSI corrected for sample size, chi-square test with Bonferroni across features |
 | `minimum_requests` | Traffic on both sides | gate |
 | `minimum_labeled_samples` · `minimum_label_coverage` · `minimum_positive_labels` | Is there enough ground truth to judge quality? | gates |
 
 The overall verdict is **FAIL > INCONCLUSIVE > PASS**: one failing check rolls the
 canary back, one undecided check holds it where it is. Thresholds and the
-confidence level (95% by default) are set per rollout.
+confidence level (95% by default) are set per rollout. The level covers the whole
+rollout, not each evaluation: the first look is held to 97.5%, later ones to more,
+so checking every cycle doesn't add up to a likely false rollback.
 
 ### Rollout lifecycle
 
