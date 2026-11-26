@@ -1560,14 +1560,205 @@
     },
     {
       "type": "row",
-      "title": "Canary vs stable \u00b7 $model",
+      "title": "Gateway",
       "collapsed": false,
       "panels": [],
-      "repeat": "model",
       "id": 15,
       "gridPos": {
         "x": 0,
         "y": 25,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "type": "state-timeline",
+      "title": "Circuit breakers",
+      "description": "Each version's breaker in the router. It opens after consecutive unreachable / not-ready answers, fails requests fast with 503 while open, then lets one trial request through (half-open).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (version) (modelops_router_breaker_state)",
+          "legendFormat": "{{version}}",
+          "refId": "A",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "#3fb950"
+              },
+              {
+                "value": 1,
+                "color": "#d29922"
+              },
+              {
+                "value": 2,
+                "color": "#f85149"
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "closed",
+                  "index": 0
+                },
+                "1": {
+                  "text": "half-open",
+                  "index": 1
+                },
+                "2": {
+                  "text": "open",
+                  "index": 2
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 70,
+            "lineWidth": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8,
+        "alignValue": "left",
+        "legend": {
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "id": 16,
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 12,
+        "h": 7
+      }
+    },
+    {
+      "interval": "1m",
+      "type": "timeseries",
+      "title": "Rate-limited requests",
+      "description": "Predictions the router answered 429 because the model's token bucket was empty (ROUTER_RATE_LIMIT_RPS; off by default).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (model) (increase(modelops_router_rate_limited_total[$__interval]))",
+          "legendFormat": "{{model}}",
+          "refId": "A",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "barAlignment": 0,
+            "axisBorderShow": false,
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "links": [],
+          "min": 0,
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#d29922"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 17,
+      "gridPos": {
+        "x": 12,
+        "y": 26,
+        "w": 12,
+        "h": 7
+      }
+    },
+    {
+      "type": "row",
+      "title": "Canary vs stable \u00b7 $model",
+      "collapsed": false,
+      "panels": [],
+      "repeat": "model",
+      "id": 18,
+      "gridPos": {
+        "x": 0,
+        "y": 33,
         "w": 24,
         "h": 1
       }
@@ -1637,10 +1828,10 @@
           "sort": "desc"
         }
       },
-      "id": 16,
+      "id": 19,
       "gridPos": {
         "x": 0,
-        "y": 26,
+        "y": 34,
         "w": 12,
         "h": 9
       }
@@ -1717,10 +1908,10 @@
           "sort": "desc"
         }
       },
-      "id": 17,
+      "id": 20,
       "gridPos": {
         "x": 12,
-        "y": 26,
+        "y": 34,
         "w": 12,
         "h": 9
       }
@@ -1843,10 +2034,10 @@
           "sort": "desc"
         }
       },
-      "id": 18,
+      "id": 21,
       "gridPos": {
         "x": 0,
-        "y": 35,
+        "y": 43,
         "w": 12,
         "h": 9
       }
@@ -1937,10 +2128,10 @@
           "sort": "desc"
         }
       },
-      "id": 19,
+      "id": 22,
       "gridPos": {
         "x": 12,
-        "y": 35,
+        "y": 43,
         "w": 12,
         "h": 9
       }
@@ -2007,10 +2198,10 @@
           "le": 1e-09
         }
       },
-      "id": 20,
+      "id": 23,
       "gridPos": {
         "x": 0,
-        "y": 44,
+        "y": 52,
         "w": 12,
         "h": 9
       }
@@ -2111,10 +2302,10 @@
           "sort": "desc"
         }
       },
-      "id": 21,
+      "id": 24,
       "gridPos": {
         "x": 12,
-        "y": 44,
+        "y": 52,
         "w": 12,
         "h": 9
       }

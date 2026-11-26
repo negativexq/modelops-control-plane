@@ -798,6 +798,71 @@ def rollouts() -> dict[str, Any]:
         8,
     )
 
+    # Gateway ------------------------------------------------------------------
+    L.row("Gateway")
+    L.add(
+        {
+            "type": "state-timeline",
+            "title": "Circuit breakers",
+            "description": "Each version's breaker in the router. It opens after "
+            "consecutive unreachable / not-ready answers, fails requests fast with 503 "
+            "while open, then lets one trial request through (half-open).",
+            "datasource": DS,
+            "targets": [target("max by (version) (modelops_router_breaker_state)", "{{version}}")],
+            "fieldConfig": {
+                "defaults": {
+                    "color": {"mode": "thresholds"},
+                    "thresholds": thresholds((None, GREEN), (1, ORANGE), (2, RED)),
+                    "mappings": [
+                        {
+                            "type": "value",
+                            "options": {
+                                "0": {"text": "closed", "index": 0},
+                                "1": {"text": "half-open", "index": 1},
+                                "2": {"text": "open", "index": 2},
+                            },
+                        }
+                    ],
+                    "custom": {"fillOpacity": 70, "lineWidth": 0},
+                },
+                "overrides": [],
+            },
+            "options": {
+                "showValue": "never",
+                "mergeValues": True,
+                "rowHeight": 0.8,
+                "alignValue": "left",
+                "legend": {"showLegend": False},
+                "tooltip": {"mode": "single"},
+            },
+        },
+        12,
+        7,
+    )
+    L.add(
+        timeseries(
+            "Rate-limited requests",
+            [
+                target(
+                    "sum by (model) (increase(modelops_router_rate_limited_total[$__interval]))",
+                    "{{model}}",
+                )
+            ],
+            bars=True,
+            stack=True,
+            legend_calcs=("sum",),
+            interval="1m",
+            decimals=0,
+            description="Predictions the router answered 429 because the model's token "
+            "bucket was empty (ROUTER_RATE_LIMIT_RPS; off by default).",
+            overrides=[{"matcher": {"id": "byFrameRefID", "options": "A"},
+                        "properties": [{"id": "color",
+                                        "value": {"mode": "fixed", "fixedColor": ORANGE}}]}],
+        ),
+        12,
+        7,
+    )
+
     # Canary vs stable ---------------------------------------------------------
     L.row("Canary vs stable · $model", repeat="model")
     version_link = [
