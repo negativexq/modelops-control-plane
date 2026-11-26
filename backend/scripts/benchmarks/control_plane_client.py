@@ -61,6 +61,12 @@ class ControlPlaneClient:
         result: dict[str, Any] = response.json()
         return result
 
+    def list_deployments(self) -> list[dict[str, Any]]:
+        response = self._client.get("/api/deployments")
+        response.raise_for_status()
+        result: list[dict[str, Any]] = response.json()
+        return result
+
     def get_deployment(self, deployment_id: str) -> dict[str, Any]:
         response = self._client.get(f"/api/deployments/{deployment_id}")
         response.raise_for_status()

@@ -456,6 +456,9 @@ router holds a single active traffic split.
   limitations](#known-limitations).
 - Each run writes `backend/benchmark-results/{scenario}.{json,md}` with
   time-to-detect / time-to-action measurements.
+- A run first rolls back any rollout still holding its own `benchmark-*` model
+  (the expected `quality-failure` freeze, or a run killed half-way), which would
+  otherwise block the new deployment with a 409. Real models are never touched.
 
 **From the dashboard**: the same five scenarios can be started and watched live
 from `/benchmarks` (`POST /api/benchmarks/run`, polls `GET

@@ -123,6 +123,31 @@ def _feed_stable_side_health_checks(
         stop_event.wait(interval_seconds)
 
 
+# A benchmark deployment left in one of these blocks the next run of the same
+# scenario: the control plane allows one live-or-frozen rollout per model (409).
+_STALE_STATUSES = {"CANARY_RUNNING", "EVALUATING", "INCONCLUSIVE"}
+
+
+def _release_stale_deployments(client: ControlPlaneClient, model_name: str) -> list[str]:
+    """Rolls back any rollout still holding `model_name` from an earlier run - an
+    expected INCONCLUSIVE freeze, or a run that was killed mid-way. Only ever
+    touches the scenario's own `benchmark-*` model, never real ones."""
+    if not model_name.startswith("benchmark-"):
+        return []
+    released = []
+    for deployment in client.list_deployments():
+        if deployment["model_name"] == model_name and deployment["status"] in _STALE_STATUSES:
+            logger.info(
+                "rolling back stale %s deployment %s for %s",
+                deployment["status"],
+                deployment["id"],
+                model_name,
+            )
+            client.rollback(deployment["id"])
+            released.append(deployment["id"])
+    return released
+
+
 def _wait_for_outcome(
     client: ControlPlaneClient, deployment_id: str, expected_outcome: str, max_wait_seconds: float
 ) -> dict[str, object]:
@@ -171,6 +196,7 @@ def run_scenario(
 
     try:
         with ControlPlaneClient(control_plane_url) as client:
+            _release_stale_deployments(client, scenario.model_name)
             deployment = client.create_deployment(
                 model_name=scenario.model_name,
                 stable_version=scenario.stable_version,
