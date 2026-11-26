@@ -18,6 +18,9 @@ class StatisticalEvidence(BaseModel):
     p_value: float | None = None
     confidence_level: float | None = None
     stat_method: str | None = None
+    # Which evaluation of the rollout this check came from (1 = first) when
+    # sequential testing raised confidence_level above the policy's own.
+    sequential_look: int | None = None
 
 
 class PolicyCheckOut(StatisticalEvidence):

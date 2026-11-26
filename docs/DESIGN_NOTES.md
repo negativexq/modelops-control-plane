@@ -361,7 +361,7 @@ error-rate, latency and recall checks each carry a confidence interval
 | | Verdict |
 |---|---|
 | point estimate within the limit | PASS |
-| point estimate past the limit, **whole interval** past it | FAIL |
+| point estimate past the limit, **whole interval** past it, and the test significant at the same level | FAIL |
 | point estimate past the limit, interval reaches back inside | INCONCLUSIVE |
 
 | Check | Interval | p-value (one-sided, "the limit is breached") |
@@ -387,9 +387,45 @@ Why the latency test scales stable first: Mann-Whitney on raw latencies asks
 from order statistics because a 95th-percentile upper bound from order
 statistics needs ~60+ samples per side to exist at all.
 
-Each row stores `ci_low`, `ci_high`, `p_value`, `confidence_level` and
-`stat_method`; the dashboard's policy table draws the interval against the
-limit, and the timeline explanation quotes it.
+Each row stores `ci_low`, `ci_high`, `p_value`, `confidence_level`,
+`stat_method` and `sequential_look`. The dashboard's policy table draws the
+interval against the limit, and the timeline explanation quotes it.
+
+**Sequential testing: the confidence level covers the whole rollout, not each
+look.** The worker re-evaluates a running canary every cycle, over a window that
+mostly overlaps the previous one. Each evaluation is a fresh chance to call noise
+a breach. If every look were tested at 95%, a canary whose true error rate sits
+right at the limit would be rolled back by luck about 18% of the time over 40
+looks, not 2.5% (`tests/test_policy_sequential.py` simulates exactly this). So
+the error budget `alpha = 1 - confidence_level` is spent across looks:
+
+- look *k* of a rollout is held to `1 - alpha / (k (k + 1))`, so 97.5%, then
+  99.2%, 99.6%, and so on (`stats.look_confidence`);
+- the shares add up to exactly `alpha` however many looks there are. By the
+  union bound, the chance of a false FAIL over the whole rollout stays within
+  the configured level, no matter how much the windows overlap;
+- a look counts only if it got past `minimum_requests`, because an evaluation
+  that tested nothing spent nothing. Manual evaluations count too: a human can
+  act on them as well.
+
+A FAIL also needs the one-sided test to be significant at the look's level, not
+just the interval. The interval says how big the breach is. The exact binomial
+and Mann-Whitney tests are what actually hold the error rate in the far tail
+that late looks reach, where a Wilson interval runs slightly optimistic and a
+2,000-resample bootstrap runs out of resolution. In the same simulation the
+corrected false-rollback rate comes out around 1%.
+
+The cost is detection speed on marginal breaches. A canary at twice the limit
+is still caught on the first look or two. One that sits barely past the limit
+for a long rollout can stay INCONCLUSIVE until `max_inconclusive_retries`
+freezes it for a human, which is the honest outcome when the evidence is thin.
+The budget is per check: three checks per look can each spend their own `alpha`.
+`POLICY_SEQUENTIAL_TESTING=false` restores per-look testing.
+
+An always-valid mixture SPRT (mSPRT) would be tighter, but it is defined for a
+cumulative stream, not a sliding window. It fits error rate and recall, not a
+bootstrapped p95. Alpha spending works the same way for all three checks, on
+the windows the engine already reads.
 
 Overall verdict (`app/policy/engine.py::overall_result`): **FAIL beats
 INCONCLUSIVE beats PASS**. One failing check fails the whole evaluation; an
@@ -866,19 +902,13 @@ reasoning survives even if nobody's actively looking at this file.
   doubling inference load for the mirrored share. The comparison logic already
   exists; what's missing is a fire-and-forget path in the gateway that can never
   slow down or fail the real request.
-- **Sequential testing across evaluations.** The worker re-evaluates a running
-  canary every cycle, and each evaluation treats its window as if it were the
-  only look. Over many looks, a healthy canary gets more chances to fail by luck
-  than the confidence level suggests. An always-valid method (mSPRT, or an alpha
-  budget spent across a rollout's evaluations) would keep the false-rollback
-  rate at what the threshold says. The thresholds and benchmark expectations
-  would need re-deriving with it.
 - **Segment-level analysis.** Every check today is computed over all of a
   version's traffic. A canary can be fine overall and much worse for one slice
   (a merchant category, a region, the high-amount tail). Per-segment checks need
   a declared segment key in the request, plus a multiple-comparison correction so
-  ten segments don't mean ten chances at a false FAIL. That is the same problem as
-  sequential testing, just across slices instead of across time.
+  ten segments don't mean ten chances at a false FAIL. That is the problem
+  [sequential testing](#policy-engine) already solves across time, here across
+  slices instead.
 - **Notifications on decisions.** An automatic rollback or a frozen rollout
   shows up on the timeline and in Grafana, but nobody is told. Alertmanager for
   the existing alert rules, plus a webhook on worker decisions (rollback, freeze,

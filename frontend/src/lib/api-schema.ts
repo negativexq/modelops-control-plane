@@ -1264,6 +1264,8 @@ export interface components {
             /** Policy Name */
             policy_name: string;
             result: components["schemas"]["PolicyEvaluationResult"];
+            /** Sequential Look */
+            sequential_look: number | null;
             /** Stat Method */
             stat_method: string | null;
             /** Threshold */
@@ -1337,6 +1339,11 @@ export interface components {
              *     }
              */
             reliability?: components["schemas"]["ReliabilityPolicy-Input"];
+            /**
+             * Sequential Testing
+             * @default true
+             */
+            sequential_testing?: boolean;
         };
         /**
          * PolicyConfig
@@ -1406,6 +1413,11 @@ export interface components {
              *     }
              */
             reliability: components["schemas"]["ReliabilityPolicy-Output"];
+            /**
+             * Sequential Testing
+             * @default true
+             */
+            sequential_testing: boolean;
         };
         /** PolicyEvaluationOut */
         PolicyEvaluationOut: {
@@ -1431,6 +1443,8 @@ export interface components {
             /** Policy Name */
             policy_name: string;
             result: components["schemas"]["PolicyEvaluationResult"];
+            /** Sequential Look */
+            sequential_look: number | null;
             /** Stat Method */
             stat_method: string | null;
             /** Threshold */
@@ -1605,6 +1619,8 @@ export interface components {
             /** Policy Name */
             policy_name: string;
             result: components["schemas"]["PolicyEvaluationResult"];
+            /** Sequential Look */
+            sequential_look: number | null;
             /** Threshold */
             threshold: number | null;
             /**

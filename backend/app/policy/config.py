@@ -65,6 +65,11 @@ class PolicyConfig(BaseModel):
     # this level lies past the limit; past the limit but inside the noise is
     # INCONCLUSIVE (see app/policy/stats.py and engine.py's _decide_* helpers).
     confidence_level: float = Field(default=0.95, ge=0.5, le=0.999)
+    # Spend the confidence level's error budget across a rollout's repeated
+    # evaluations instead of granting it to each one, so re-checking a healthy
+    # canary every worker cycle can't add up to a likely false rollback - see
+    # app/policy/stats.py's look_confidence.
+    sequential_testing: bool = True
     latency: LatencyPolicy = LatencyPolicy()
     reliability: ReliabilityPolicy = ReliabilityPolicy()
     quality: QualityPolicy = QualityPolicy()
@@ -84,6 +89,7 @@ class PolicySettings(BaseSettings):
     minimum_label_coverage: float = 0.5
     minimum_positive_labels: int = 30
     confidence_level: float = 0.95
+    sequential_testing: bool = True
     latency_p95_max_increase_percent: float = 20.0
     reliability_max_error_rate_percent: float = 5.0
     quality_minimum_recall: float = 0.8
@@ -98,6 +104,7 @@ class PolicySettings(BaseSettings):
             minimum_label_coverage=self.minimum_label_coverage,
             minimum_positive_labels=self.minimum_positive_labels,
             confidence_level=self.confidence_level,
+            sequential_testing=self.sequential_testing,
             latency=LatencyPolicy(p95_max_increase_percent=self.latency_p95_max_increase_percent),
             reliability=ReliabilityPolicy(
                 max_error_rate_percent=self.reliability_max_error_rate_percent

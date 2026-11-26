@@ -23,12 +23,24 @@ export function formatPValue(p: number) {
   return `p = ${p.toFixed(p < 0.01 ? 3 : 2)}`;
 }
 
+/** 95% -> "95%", 0.99167 -> "99.2%", 0.99988 -> "99.988%": a level raised for a
+ * later look (sequential testing) must never round up to "100%". */
+function formatLevel(level: number): string {
+  const percent = level * 100;
+  const gap = 100 - percent;
+  for (let digits = 0; digits < 5; digits++) {
+    const text = percent.toFixed(digits);
+    if (Number(text) < 100 && Math.abs(Number(text) - percent) <= gap * 0.1) return `${text}%`;
+  }
+  return `${percent.toFixed(5)}%`;
+}
+
 export function ConfidenceStrip({
   check,
   format,
   className,
 }: {
-  check: Pick<TimelinePolicyItem, "ci_low" | "ci_high" | "observed_value" | "threshold" | "result" | "p_value" | "confidence_level">;
+  check: Pick<TimelinePolicyItem, "ci_low" | "ci_high" | "observed_value" | "threshold" | "result" | "p_value" | "confidence_level" | "sequential_look">;
   format: (v: number) => string;
   className?: string;
 }) {
@@ -45,8 +57,9 @@ export function ConfidenceStrip({
   max += span * 0.08;
   const x = (v: number) => PAD + ((v - min) / (max - min)) * (W - 2 * PAD);
   const tone = TONE[check.result];
-  const level = check.confidence_level != null ? `${Math.round(check.confidence_level * 100)}%` : "";
-  const label = `${level} CI ${format(low)} to ${format(high)}${check.p_value != null ? `, ${formatPValue(check.p_value)}` : ""}`;
+  const level = check.confidence_level != null ? formatLevel(check.confidence_level) : "";
+  const look = check.sequential_look != null ? `, look ${check.sequential_look}` : "";
+  const label = `${level} CI ${format(low)} to ${format(high)}${check.p_value != null ? `, ${formatPValue(check.p_value)}` : ""}${look}`;
 
   return (
     <div className={cn("flex flex-col items-end gap-0.5", className)} title={label}>

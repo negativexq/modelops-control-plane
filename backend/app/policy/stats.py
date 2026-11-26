@@ -43,6 +43,24 @@ def _z(confidence: float) -> float:
     return float(stats.norm.ppf(1 - (1 - confidence) / 2))
 
 
+def look_confidence(confidence: float, look: int) -> float:
+    """The confidence level the `look`-th evaluation of one rollout must reach.
+
+    The worker re-evaluates a running canary every cycle, and each evaluation is
+    a fresh chance to call noise a breach. Testing every look at the configured
+    level would let a healthy canary fail by luck far more often than that level
+    promises (about 18% instead of 2.5% over 40 looks in
+    tests/test_policy_sequential.py). So the rollout's error budget
+    alpha = 1 - confidence is spent across looks: look k gets
+    alpha / (k * (k + 1)). Those shares add up to exactly alpha however many
+    looks there are, so by the union bound the chance of a false FAIL over the
+    whole rollout stays within alpha, whatever the overlap between windows. The
+    price: early looks need a little more evidence, late looks a lot more."""
+    if look < 1:
+        raise ValueError("look numbers start at 1")
+    return 1 - (1 - confidence) / (look * (look + 1))
+
+
 def wilson_interval(successes: int, trials: int, confidence: float) -> Interval | None:
     """Two-sided Wilson score interval for a binomial proportion. Unlike the
     normal ("Wald") interval it stays inside [0, 1] and behaves at 0 or n

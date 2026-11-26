@@ -139,6 +139,7 @@ class TimelinePolicyItem(BaseModel):
     ci_high: float | None = None
     p_value: float | None = None
     confidence_level: float | None = None
+    sequential_look: int | None = None
     explanation: str
     # True when this check predates the traffic-context snapshot columns on
     # PolicyEvaluation (added in a later migration) and `explanation` therefore had

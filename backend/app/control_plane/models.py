@@ -273,6 +273,10 @@ class PolicyEvaluation(Base):
     p_value: Mapped[float | None] = mapped_column(Float, nullable=True)
     confidence_level: Mapped[float | None] = mapped_column(Float, nullable=True)
     stat_method: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Which evaluation of the rollout this was (1 = first) when sequential testing
+    # raised confidence_level above the policy's own - see
+    # app/policy/stats.py's look_confidence. NULL when it didn't.
+    sequential_look: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Snapshot of the deployment's own context AT THE MOMENT this check ran - not
     # derivable after the fact from the deployment's *current* state, which can
     # (and does) change later. Without this, a human reading an old PolicyEvaluation

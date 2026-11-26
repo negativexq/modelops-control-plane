@@ -1511,6 +1511,17 @@
           "result": {
             "$ref": "#/components/schemas/PolicyEvaluationResult"
           },
+          "sequential_look": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sequential Look"
+          },
           "stat_method": {
             "anyOf": [
               {
@@ -1540,6 +1551,7 @@
           "p_value",
           "confidence_level",
           "stat_method",
+          "sequential_look",
           "policy_name",
           "metric_name",
           "observed_value",
@@ -1619,6 +1631,11 @@
             "default": {
               "max_error_rate_percent": 5.0
             }
+          },
+          "sequential_testing": {
+            "default": true,
+            "title": "Sequential Testing",
+            "type": "boolean"
           }
         },
         "title": "PolicyConfig",
@@ -1694,6 +1711,11 @@
             "default": {
               "max_error_rate_percent": 5.0
             }
+          },
+          "sequential_testing": {
+            "default": true,
+            "title": "Sequential Testing",
+            "type": "boolean"
           }
         },
         "required": [
@@ -1705,6 +1727,7 @@
           "minimum_label_coverage",
           "minimum_positive_labels",
           "confidence_level",
+          "sequential_testing",
           "latency",
           "reliability",
           "quality"
@@ -1789,6 +1812,17 @@
           "result": {
             "$ref": "#/components/schemas/PolicyEvaluationResult"
           },
+          "sequential_look": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sequential Look"
+          },
           "stat_method": {
             "anyOf": [
               {
@@ -1818,6 +1852,7 @@
           "p_value",
           "confidence_level",
           "stat_method",
+          "sequential_look",
           "id",
           "policy_name",
           "metric_name",
@@ -2291,6 +2326,17 @@
           "result": {
             "$ref": "#/components/schemas/PolicyEvaluationResult"
           },
+          "sequential_look": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sequential Look"
+          },
           "threshold": {
             "anyOf": [
               {
@@ -2327,6 +2373,7 @@
           "ci_high",
           "p_value",
           "confidence_level",
+          "sequential_look",
           "explanation",
           "is_estimated"
         ],

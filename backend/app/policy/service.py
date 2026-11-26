@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.control_plane import metrics_service, telemetry
@@ -30,6 +30,22 @@ def _weight_for(deployment: Deployment, version: str) -> float | None:
         if target["version"] == version:
             return float(target["weight"])
     return None
+
+
+def _next_look(db: Session, deployment_id: str) -> int:
+    """Which evaluation of this rollout the next one is, for sequential testing
+    (app/policy/stats.py's look_confidence). Only evaluations that got past
+    minimum_requests ran a test, so only they count: max_error_rate is written
+    by every one of those and by no other."""
+    previous = db.scalar(
+        select(func.count())
+        .select_from(PolicyEvaluation)
+        .where(
+            PolicyEvaluation.deployment_id == deployment_id,
+            PolicyEvaluation.policy_name == "max_error_rate",
+        )
+    )
+    return (previous or 0) + 1
 
 
 def run_evaluation(
@@ -68,7 +84,9 @@ def run_evaluation(
         ),
     )
 
-    checks = evaluate_policies(stable, canary, canary_quality, config, samples)
+    checks = evaluate_policies(
+        stable, canary, canary_quality, config, samples, look=_next_look(db, deployment.id)
+    )
     # Snapshot the deployment's own context right now, once, for every check in this
     # evaluation - not derivable later from the deployment's *current* state, which
     # will keep changing after this call returns (traffic ramps, gets promoted,
@@ -92,8 +110,9 @@ def run_evaluation(
                 ci_low=check.ci_low,
                 ci_high=check.ci_high,
                 p_value=check.p_value,
-                confidence_level=config.confidence_level if check.method else None,
+                confidence_level=check.confidence_level,
                 stat_method=check.method,
+                sequential_look=check.look,
                 evaluation_window_seconds=config.evaluation_window_seconds,
                 stable_weight=stable_weight,
                 canary_weight=canary_weight,

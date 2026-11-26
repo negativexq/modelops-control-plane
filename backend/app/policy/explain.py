@@ -36,6 +36,7 @@ def explain_policy_check(
     ci_low: float | None = None,
     ci_high: float | None = None,
     confidence_level: float | None = None,
+    sequential_look: int | None = None,
 ) -> str:
     """Human-readable explanation of one policy check. `canary_weight` is context
     used only to make a minimum_requests INCONCLUSIVE concrete when the canary is
@@ -58,7 +59,7 @@ def explain_policy_check(
         return _explain_minimum_requests(
             observed_value, threshold, result, canary_weight, is_estimated
         )
-    ci = _Ci(ci_low, ci_high, confidence_level)
+    ci = _Ci(ci_low, ci_high, confidence_level, sequential_look)
     if policy_name == "latency_p95_increase":
         return _explain_latency(observed_value, threshold, result, ci)
     if policy_name == "max_error_rate":
@@ -78,18 +79,33 @@ def explain_policy_check(
     return f"{policy_name}: {result.value.lower()}."
 
 
+def _fmt_level(level: float) -> str:
+    """95% -> "95%", 99.17% -> "99.2%", 99.988% -> "99.99%": enough digits that
+    a raised sequential level never rounds up to a meaningless "100%"."""
+    percent = level * 100
+    gap = 100 - percent
+    for digits in range(5):
+        text = f"{percent:.{digits}f}"
+        if float(text) < 100 and abs(float(text) - percent) <= gap * 0.1:
+            return f"{text}%"
+    return f"{percent:.5f}%"
+
+
 @dataclass(frozen=True)
 class _Ci:
     low: float | None
     high: float | None
     level: float | None
+    look: int | None = None
 
     def text(self, fmt: str) -> str:
-        """" (95% CI 3.1-9.8%)", or "" for rows without an interval."""
+        """" (95% CI 3.1 to 9.8%)", or "" for rows without an interval. A level
+        raised by sequential testing says which look it was for."""
         if self.low is None or self.high is None:
             return ""
-        level = f"{self.level * 100:.0f}% " if self.level is not None else ""
-        return f" ({level}CI {fmt.format(self.low)} to {fmt.format(self.high)})"
+        level = f"{_fmt_level(self.level)} " if self.level is not None else ""
+        look = f", look {self.look}" if self.look is not None else ""
+        return f" ({level}CI {fmt.format(self.low)} to {fmt.format(self.high)}{look})"
 
 
 _NOISE = (

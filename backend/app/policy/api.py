@@ -69,8 +69,9 @@ def evaluate_deployment(
                 ci_low=check.ci_low,
                 ci_high=check.ci_high,
                 p_value=check.p_value,
-                confidence_level=effective_config.confidence_level if check.method else None,
+                confidence_level=check.confidence_level,
                 stat_method=check.method,
+                sequential_look=check.look,
             )
             for check in checks
         ],

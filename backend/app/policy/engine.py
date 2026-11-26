@@ -24,6 +24,27 @@ class PolicyCheckResult:
     ci_high: float | None = None
     p_value: float | None = None
     method: str | None = None
+    # The level this check's interval and test were held to: the policy's
+    # confidence_level, raised for later looks when sequential testing is on
+    # (see stats.look_confidence). None for checks without statistics.
+    confidence_level: float | None = None
+    # Which evaluation of this rollout produced the check (1 = first), when
+    # sequential testing set the level above.
+    look: int | None = None
+
+
+@dataclass(frozen=True)
+class Evidence:
+    """The level one evaluation's statistical checks must reach."""
+
+    confidence_level: float
+    look: int | None = None
+
+    @property
+    def one_sided_alpha(self) -> float:
+        """A two-sided interval at confidence_level leaves this much in each
+        tail, so it's the matching error rate for a one-sided test."""
+        return (1 - self.confidence_level) / 2
 
 
 @dataclass(frozen=True)
@@ -35,29 +56,45 @@ class LatencySamples:
     canary: list[float]
 
 
+def _significant(p_value: float | None, evidence: Evidence) -> bool:
+    return p_value is not None and p_value <= evidence.one_sided_alpha
+
+
 def _decide_upper_limit(
-    observed: float, limit: float, interval: stats.Interval | None
+    observed: float,
+    limit: float,
+    interval: stats.Interval | None,
+    p_value: float | None,
+    evidence: Evidence,
 ) -> PolicyEvaluationResult:
     """For a metric that must stay at or below `limit` (error rate, latency
-    increase). FAIL needs the whole confidence interval above the limit: the
-    breach must be real, not noise. Above the limit but not confidently so is
+    increase). FAIL needs the whole confidence interval above the limit and the
+    one-sided test of "the limit is breached" to be significant at the same
+    level: the breach must be real, not noise. The interval says how big the
+    breach is; the test is what keeps the false-FAIL rate at the level promised
+    (a Wilson or bootstrap interval alone can be a little optimistic in the far
+    tail that late looks use). Above the limit but not confidently so is
     INCONCLUSIVE - wait for more traffic instead of rolling back a release that
     may be fine. At or below the limit passes."""
     if observed <= limit:
         return PASS
-    if interval is not None and interval.low > limit:
+    if interval is not None and interval.low > limit and _significant(p_value, evidence):
         return FAIL
     return INCONCLUSIVE
 
 
 def _decide_lower_limit(
-    observed: float, limit: float, interval: stats.Interval | None
+    observed: float,
+    limit: float,
+    interval: stats.Interval | None,
+    p_value: float | None,
+    evidence: Evidence,
 ) -> PolicyEvaluationResult:
     """Mirror of _decide_upper_limit for a metric that must stay at or above
     `limit` (recall)."""
     if observed >= limit:
         return PASS
-    if interval is not None and interval.high < limit:
+    if interval is not None and interval.high < limit and _significant(p_value, evidence):
         return FAIL
     return INCONCLUSIVE
 
@@ -80,7 +117,7 @@ def _evaluate_latency(
     stable: MetricsSummary,
     canary: MetricsSummary,
     policy: LatencyPolicy,
-    confidence: float,
+    evidence: Evidence,
     samples: LatencySamples | None,
 ) -> PolicyCheckResult:
     if not stable.p95_latency_ms or canary.p95_latency_ms is None:
@@ -104,22 +141,27 @@ def _evaluate_latency(
             result=FAIL if increase_percent > limit else PASS,
         )
 
-    interval = stats.p95_increase_interval(samples.stable, samples.canary, confidence)
+    interval = stats.p95_increase_interval(
+        samples.stable, samples.canary, evidence.confidence_level
+    )
+    p_value = stats.latency_shift_p_value(samples.stable, samples.canary, limit)
     return PolicyCheckResult(
         policy_name="latency_p95_increase",
         metric_name="p95_latency_increase_percent",
         observed_value=increase_percent,
         threshold=limit,
-        result=_decide_upper_limit(increase_percent, limit, interval),
+        result=_decide_upper_limit(increase_percent, limit, interval, p_value, evidence),
         ci_low=interval.low if interval else None,
         ci_high=interval.high if interval else None,
-        p_value=stats.latency_shift_p_value(samples.stable, samples.canary, limit),
+        p_value=p_value,
         method="bootstrap_p95_ratio+mann_whitney",
+        confidence_level=evidence.confidence_level,
+        look=evidence.look,
     )
 
 
 def _evaluate_reliability(
-    canary: MetricsSummary, policy: ReliabilityPolicy, confidence: float
+    canary: MetricsSummary, policy: ReliabilityPolicy, evidence: Evidence
 ) -> PolicyCheckResult:
     if canary.error_rate is None:
         return PolicyCheckResult(
@@ -133,20 +175,25 @@ def _evaluate_reliability(
     error_rate_percent = canary.error_rate * 100
     limit = policy.max_error_rate_percent
     errors = round(canary.error_rate * canary.sample_count)
-    interval = stats.wilson_interval(errors, canary.sample_count, confidence)
+    interval = stats.wilson_interval(errors, canary.sample_count, evidence.confidence_level)
     interval_percent = (
         stats.Interval(interval.low * 100, interval.high * 100) if interval else None
     )
+    p_value = stats.binomial_p_above(errors, canary.sample_count, limit / 100)
     return PolicyCheckResult(
         policy_name="max_error_rate",
         metric_name="error_rate_percent",
         observed_value=error_rate_percent,
         threshold=limit,
-        result=_decide_upper_limit(error_rate_percent, limit, interval_percent),
+        result=_decide_upper_limit(
+            error_rate_percent, limit, interval_percent, p_value, evidence
+        ),
         ci_low=interval_percent.low if interval_percent else None,
         ci_high=interval_percent.high if interval_percent else None,
-        p_value=stats.binomial_p_above(errors, canary.sample_count, limit / 100),
+        p_value=p_value,
         method="wilson+binomial",
+        confidence_level=evidence.confidence_level,
+        look=evidence.look,
     )
 
 
@@ -199,7 +246,7 @@ def _evaluate_minimum_positive_labels(
 
 
 def _evaluate_quality(
-    canary_quality: MetricsSummary, policy: QualityPolicy, confidence: float
+    canary_quality: MetricsSummary, policy: QualityPolicy, evidence: Evidence
 ) -> PolicyCheckResult:
     if canary_quality.recall is None:
         # No labeled canary predictions in the quality window - genuinely nothing
@@ -217,22 +264,36 @@ def _evaluate_quality(
 
     positives = canary_quality.positive_label_count
     true_positives = round(canary_quality.recall * positives)
-    interval = stats.wilson_interval(true_positives, positives, confidence)
+    interval = stats.wilson_interval(true_positives, positives, evidence.confidence_level)
+    p_value = stats.binomial_p_below(true_positives, positives, policy.minimum_recall)
     return PolicyCheckResult(
         policy_name="minimum_recall",
         metric_name="recall",
         observed_value=canary_quality.recall,
         threshold=policy.minimum_recall,
-        result=_decide_lower_limit(canary_quality.recall, policy.minimum_recall, interval),
+        result=_decide_lower_limit(
+            canary_quality.recall, policy.minimum_recall, interval, p_value, evidence
+        ),
         ci_low=interval.low if interval else None,
         ci_high=interval.high if interval else None,
-        p_value=stats.binomial_p_below(true_positives, positives, policy.minimum_recall),
+        p_value=p_value,
         method="wilson+binomial",
+        confidence_level=evidence.confidence_level,
+        look=evidence.look,
     )
 
 
+def evidence_for(config: PolicyConfig, look: int | None) -> Evidence:
+    """The level this evaluation's checks are held to. `look` is which
+    evaluation of the rollout this is (1 = first); None, or sequential testing
+    switched off, means the policy's confidence_level as configured."""
+    if look is None or not config.sequential_testing:
+        return Evidence(config.confidence_level)
+    return Evidence(stats.look_confidence(config.confidence_level, look), look)
+
+
 def evaluate_quality_policies(
-    canary_quality: MetricsSummary, config: PolicyConfig
+    canary_quality: MetricsSummary, config: PolicyConfig, look: int | None = None
 ) -> list[PolicyCheckResult]:
     """The quality-window half of one evaluation: does the canary have enough
     *labeled* data - and, within that, enough *positive-class* data - in its
@@ -262,7 +323,7 @@ def evaluate_quality_policies(
     if any(check.result != PASS for check in gate_checks):
         return gate_checks
 
-    quality_check = _evaluate_quality(canary_quality, config.quality, config.confidence_level)
+    quality_check = _evaluate_quality(canary_quality, config.quality, evidence_for(config, look))
     return [*gate_checks, quality_check]
 
 
@@ -272,8 +333,13 @@ def evaluate_policies(
     canary_quality: MetricsSummary,
     config: PolicyConfig,
     latency_samples: LatencySamples | None = None,
+    look: int | None = None,
 ) -> list[PolicyCheckResult]:
     """Run every policy check for one evaluation.
+
+    `look` is which evaluation of this rollout this is, counting only the ones
+    that got past minimum_requests (1 = first). With sequential testing on, it
+    sets how much evidence a FAIL needs - see stats.look_confidence.
 
     `stable`/`canary` are the *reliability* window (now-window, now) -
     minimum_requests, latency, error rate. `canary_quality` is the *quality*
@@ -288,13 +354,12 @@ def evaluate_policies(
     if minimum_requests_check.result != PASS:
         return [minimum_requests_check]
 
+    evidence = evidence_for(config, look)
     return [
         minimum_requests_check,
-        _evaluate_latency(
-            stable, canary, config.latency, config.confidence_level, latency_samples
-        ),
-        _evaluate_reliability(canary, config.reliability, config.confidence_level),
-        *evaluate_quality_policies(canary_quality, config),
+        _evaluate_latency(stable, canary, config.latency, evidence, latency_samples),
+        _evaluate_reliability(canary, config.reliability, evidence),
+        *evaluate_quality_policies(canary_quality, config, look),
     ]
 
 

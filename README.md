@@ -44,7 +44,7 @@ human on its own, and every decision is explained in plain English.
 | | |
 |---|---|
 | 🚦 **Ramps traffic gradually** | A canary climbs `10% → 25% → 50%`, one tested step at a time, and a pass at 50% promotes it, through a real gateway with sticky routing, a circuit breaker per version and rate limits. |
-| 📐 **Decides with statistics** | Error rate, p95 latency and recall each come with a confidence interval and a p-value. A check fails only when the whole interval is past the limit, so two unlucky requests can't roll back a good model. |
+| 📐 **Decides with statistics** | Error rate, p95 latency and recall each come with a confidence interval and a p-value. A check fails only when the whole interval is past the limit, so two unlucky requests can't roll back a good model. The error budget is spent across a rollout's repeated evaluations, so re-checking every cycle can't add up to a likely false rollback either. |
 | 🏷️ **Judges quality, not just uptime** | Ground-truth labels arrive late and incomplete, through a real ingestion API. Quality checks wait for a matured window and enough positive examples before they speak. |
 | 🤖 **Acts on its own, explains itself** | A worker promotes, rolls back or freezes the rollout for a human. Every check writes a sentence saying why, and the timeline tells the whole story. |
 | 🔁 **Heals drift** | The database holds the desired traffic split, the router holds the observed one. A reconciler repairs any difference, even after the router restarts and forgets everything. |

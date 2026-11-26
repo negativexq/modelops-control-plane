@@ -89,7 +89,7 @@ export const EVIDENCE_FIELDS: ThresholdField[] = [
   {
     key: "confidence_level",
     label: "Confidence level",
-    hint: "A breach fails only when its whole interval is past the limit.",
+    hint: "A breach fails only when its whole interval is past the limit. Spent across the rollout's evaluations, so later ones need more evidence.",
     unit: "",
     min: 0.5,
     max: 0.999,
