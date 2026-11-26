@@ -813,23 +813,21 @@ is demonstrating the core canary-rollout loop clearly, not being a complete
 platform. Listed here instead of as TODOs scattered through the code so the
 reasoning survives even if nobody's actively looking at this file.
 
-- **Multi-model support.** Every service today assumes one logical model
-  (`fraud-model`) with several versions. Nothing in the schema *requires* that -
-  `Deployment.model_name` is already a free-text field, and the router already
-  keys `ROUTER_VERSION_HOSTS` per model - but the dashboard has no model picker,
-  and nothing stops two deployments for different models from racing over the
-  same router config slot (see `RouterConfigStore`'s single-slot design, Sprint 3).
-  Supporting this for real means the router holding one active config *per model*,
-  not one globally - a real change to a component that's otherwise been stable
-  since Sprint 3, not worth destabilizing for a demo with one model.
-- **A real inference gateway** (request validation independent of each serving
-  container's dynamic schema, response caching, batching, rate limiting,
-  authentication on `/predict` itself). Today the router is deliberately dumb - it
-  forwards bodies unmodified and lets each serving container's own pydantic model
-  reject bad input (see [Traffic router](#traffic-router) above). A gateway is a
-  meaningfully different component with its own request lifecycle and its own
-  failure modes; bolting gateway concerns onto the router would blur the one job
-  it has now (pick a target, forward, don't lie about failures).
+- **The rest of the gateway.** The router now has the gateway concerns that bear
+  on a rollout: one traffic config per model (`RouterConfigStore`, routed at
+  `/router/models/{model}/predict`), sticky routing, a circuit breaker per
+  version, a per-model rate limit and request IDs (see `app/router/gateway.py`).
+  What's still missing has nothing to do with deciding a canary:
+  - authentication on `/predict` itself;
+  - request validation independent of each serving container's dynamic schema;
+  - response caching;
+  - request batching.
+
+  Bodies are still forwarded unmodified, and each serving container's own
+  pydantic model rejects bad input. Caching and batching in particular would
+  change what the canary analysis measures: a cached answer has no model latency,
+  and a batched one shares its latency with its neighbours. They need the metrics
+  to say which kind of response each one was before they can land.
 - **Cost, drift, data-quality, and availability policies.** The policy engine's
   four checks (Sprint 7) only ever asked "is this canary statistically safe right
   now, from the traffic it's already seeing?" Cost ($/inference), drift (feature
@@ -861,3 +859,28 @@ reasoning survives even if nobody's actively looking at this file.
   evolution](../README.md#production-evolution)'s Kubernetes row) more than it
   needs new application code; simulating it with a flag inside this single-stack
   demo would misrepresent what real environment isolation actually requires.
+- **Shadow traffic before the canary.** The gateway would mirror a copy of live
+  requests to the new version and discard its answers. That way latency, errors
+  and (once labels arrive) quality are measured before a single user is served by
+  it. It would fit as a stage 0 in front of `TRAFFIC_STAGES`, at the cost of
+  doubling inference load for the mirrored share. The comparison logic already
+  exists; what's missing is a fire-and-forget path in the gateway that can never
+  slow down or fail the real request.
+- **Sequential testing across evaluations.** The worker re-evaluates a running
+  canary every cycle, and each evaluation treats its window as if it were the
+  only look. Over many looks, a healthy canary gets more chances to fail by luck
+  than the confidence level suggests. An always-valid method (mSPRT, or an alpha
+  budget spent across a rollout's evaluations) would keep the false-rollback
+  rate at what the threshold says. The thresholds and benchmark expectations
+  would need re-deriving with it.
+- **Segment-level analysis.** Every check today is computed over all of a
+  version's traffic. A canary can be fine overall and much worse for one slice
+  (a merchant category, a region, the high-amount tail). Per-segment checks need
+  a declared segment key in the request, plus a multiple-comparison correction so
+  ten segments don't mean ten chances at a false FAIL. That is the same problem as
+  sequential testing, just across slices instead of across time.
+- **Notifications on decisions.** An automatic rollback or a frozen rollout
+  shows up on the timeline and in Grafana, but nobody is told. Alertmanager for
+  the existing alert rules, plus a webhook on worker decisions (rollback, freeze,
+  promote), would close that gap. A freeze in particular is a request for a human,
+  and today that request waits for someone to look.
