@@ -42,7 +42,7 @@ function Node({ icon: Icon, title, children, tone }: { icon: typeof Radio; title
 function Link({ rps, label }: { rps: number; label: string }) {
   const duration = beamDuration(rps);
   return (
-    <div className="flex h-full min-w-6 flex-col items-center justify-center gap-1">
+    <div className="hidden h-full min-w-6 flex-col items-center justify-center gap-1 @3xl:flex">
       <svg viewBox="0 0 100 8" preserveAspectRatio="none" className="h-2 w-full" aria-hidden>
         <path d="M0,4 L100,4" stroke="var(--border)" strokeWidth={3} vectorEffect="non-scaling-stroke" />
         <path
@@ -91,11 +91,9 @@ export function ControlLoop({ deployment, model }: { deployment: DeploymentOut; 
   const lastEvent = [...deployment.events].sort((a, b) => parseApiDate(b.created_at).getTime() - parseApiDate(a.created_at).getTime())[0];
 
   return (
-    <div className="space-y-1" data-testid="control-loop">
-      <div
-        className="grid items-stretch"
-        style={{ gridTemplateColumns: "minmax(0,1fr) minmax(2.5rem,0.45fr) minmax(0,1fr) minmax(2.5rem,0.45fr) minmax(0,1.5fr) minmax(2.5rem,0.45fr) minmax(0,1.2fr)" }}
-      >
+    <div className="space-y-1 @container" data-testid="control-loop">
+      {/* Narrow cards (container query): a 2-up grid without the connecting beams. */}
+      <div className="grid grid-cols-2 gap-2 @3xl:grid-cols-[minmax(0,1fr)_minmax(2.5rem,0.45fr)_minmax(0,1fr)_minmax(2.5rem,0.45fr)_minmax(0,1.5fr)_minmax(2.5rem,0.45fr)_minmax(0,1.2fr)] @3xl:items-stretch @3xl:gap-0">
         <Node icon={Radio} title="Gateway" tone="text-success">
           <p>one metric per request</p>
           <p className="font-mono text-foreground tabular">{rps.toFixed(1)} /s</p>
@@ -135,7 +133,7 @@ export function ControlLoop({ deployment, model }: { deployment: DeploymentOut; 
         </Node>
       </div>
       {/* The way back: the worker's decision becomes the gateway's next split. */}
-      <div className="relative h-7">
+      <div className="relative hidden h-7 @3xl:block">
         <svg viewBox="0 0 100 24" preserveAspectRatio="none" className="absolute inset-0 h-full w-full" aria-hidden>
           <path d="M92,0 L92,14 Q92,20 86,20 L14,20 Q8,20 8,14 L8,0" fill="none" stroke="var(--border)" strokeWidth={3} vectorEffect="non-scaling-stroke" />
           <path

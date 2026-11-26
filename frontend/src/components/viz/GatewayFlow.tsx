@@ -1,9 +1,9 @@
 "use client";
 
+import type { CSSProperties } from "react";
 import { Cpu, Gauge, Radio, ShieldAlert, ShieldCheck, ShieldHalf, Users, Waypoints } from "lucide-react";
 import type { DeploymentOut, GatewayModel, GatewayPolicy, GatewayVersion } from "@/lib/types";
 import { formatMs } from "@/lib/format";
-import { isLive } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 
 /**
@@ -26,8 +26,9 @@ export function beamDuration(rps: number) {
 }
 
 function roleOf(version: string, deployment: DeploymentOut | undefined, index: number) {
-  // Once a rollout is over, whatever is still serving is the stable version.
-  if (deployment && !isLive(deployment.status)) return "stable";
+  // A promotion makes the canary the new stable. Any other state (live, frozen
+  // INCONCLUSIVE, rolled back) keeps the deployment's own roles.
+  if (deployment?.status === "PROMOTED") return "stable";
   if (deployment) {
     if (version === deployment.canary_version) return "canary";
     if (version === deployment.stable_version) return "stable";
@@ -119,7 +120,7 @@ function VersionNode({ v, role }: { v: GatewayVersion; role: "stable" | "canary"
         </span>
         <span className="font-mono text-sm font-medium tabular">{(v.weight * 100).toFixed(0)}%</span>
       </div>
-      <div className="mt-1.5 grid grid-cols-[1fr_1fr_1fr_auto] gap-2">
+      <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1.5">
         <Stat label="req/s" value={v.requests_per_second.toFixed(1)} />
         <Stat label="p95" value={v.p95_latency_ms == null ? "—" : formatMs(v.p95_latency_ms)} />
         <Stat label="errors" value={pct(v.error_rate)} tone={failing > 0 ? "text-danger" : undefined} />
@@ -157,72 +158,83 @@ export function GatewayFlow({
   const windowTotal = versions.reduce((s, v) => s + v.window_requests, 0);
   const anyOpen = versions.some((v) => v.breaker === "open");
 
+  // min-height, not height: the row grows with its tallest node instead of
+  // clipping it, and the beams (preserveAspectRatio="none") stretch along with
+  // it. In a card narrower than the row needs (container query), the nodes stack
+  // and the beams are dropped rather than squashed or scrolled out of view.
   return (
-    <div
-      className="grid items-center gap-0"
-      style={{ height: H, gridTemplateColumns: "minmax(7.5rem,auto) minmax(2rem,1fr) minmax(11rem,auto) minmax(3rem,1.4fr) minmax(16rem,1.6fr)" }}
-      data-testid={`gateway-flow-${model.model_name}`}
-    >
-      {/* Clients */}
-      <div className="z-10 rounded-lg border bg-card px-3 py-2 shadow-sm">
-        <p className="flex items-center gap-1.5 text-xs font-medium">
-          <Users className="size-3.5 text-muted-foreground" /> Clients
-        </p>
-        <p className="mt-1 font-mono text-lg leading-none font-semibold tabular">{totalRps.toFixed(1)}</p>
-        <p className="text-[10px] text-muted-foreground">req/s · last 10s</p>
-        {model.sticky_requests_total > 0 ? (
-          <p className="mt-1 text-[10px] text-muted-foreground" title="Requests with X-Routing-Key, pinned to one version by weighted rendezvous hashing">
-            {model.sticky_requests_total} sticky
+    <div className="@container">
+      <div
+        className="flex flex-col gap-3 @2xl:grid @2xl:min-h-(--lane-h) @2xl:grid-cols-[minmax(7.5rem,auto)_minmax(2rem,1fr)_minmax(11rem,auto)_minmax(3rem,1.4fr)_minmax(16rem,1.6fr)] @2xl:items-stretch @2xl:gap-0"
+        style={{ "--lane-h": `${H}px` } as CSSProperties}
+        data-testid={`gateway-flow-${model.model_name}`}
+      >
+        {/* Clients */}
+        <div className="z-10 self-start rounded-lg border @2xl:self-center bg-card px-3 py-2 shadow-sm">
+          <p className="flex items-center gap-1.5 text-xs font-medium">
+            <Users className="size-3.5 text-muted-foreground" /> Clients
           </p>
-        ) : null}
-      </div>
+          <p className="mt-1 font-mono text-lg leading-none font-semibold tabular">{totalRps.toFixed(1)}</p>
+          <p className="text-[10px] text-muted-foreground">req/s · last 10s</p>
+          {model.sticky_requests_total > 0 ? (
+            <p className="mt-1 text-[10px] text-muted-foreground" title="Requests with X-Routing-Key, pinned to one version by weighted rendezvous hashing">
+              {model.sticky_requests_total} sticky
+            </p>
+          ) : null}
+        </div>
 
-      <svg viewBox={`0 0 100 ${H}`} preserveAspectRatio="none" className="h-full w-full" aria-hidden>
-        <Beam from={mid} to={mid} height={H} width={2 + Math.min(4, totalRps / 5)} color="var(--foreground)" rps={totalRps} idle={windowTotal === 0} />
-      </svg>
+        <div className="relative hidden @2xl:block">
+        <svg viewBox={`0 0 100 ${H}`} preserveAspectRatio="none" className="absolute inset-0 h-full w-full" aria-hidden>
+          <Beam from={mid} to={mid} height={H} width={2 + Math.min(4, totalRps / 5)} color="var(--foreground)" rps={totalRps} idle={windowTotal === 0} />
+        </svg>
+        </div>
 
-      {/* Gateway */}
-      <div className={cn("z-10 rounded-xl border bg-card px-3 py-2.5 shadow-sm", anyOpen && "border-danger/40")}>
-        <p className="flex items-center gap-1.5 text-xs font-medium">
-          <Radio className="size-3.5 text-success" /> Gateway
-          <span className="ml-auto font-mono text-[10px] text-muted-foreground">r{model.revision}</span>
-        </p>
-        <ul className="mt-1.5 space-y-1 text-[11px] text-muted-foreground">
-          <li className="flex items-center gap-1.5" title="Token bucket per model; over budget answers 429 with Retry-After">
-            <Gauge className="size-3" />
-            {policy.rate_limit_rps > 0 ? `${policy.rate_limit_rps} req/s limit` : "no rate limit"}
-            {model.rate_limited_total > 0 ? <span className="text-warning">· {model.rate_limited_total} limited</span> : null}
-          </li>
-          <li className="flex items-center gap-1.5" title="Consecutive unreachable/not-ready answers that open a version's breaker, and how long it stays open">
-            <ShieldCheck className="size-3" />
-            breaker {policy.breaker_failure_threshold}× / {policy.breaker_cooldown_seconds}s
-          </li>
-          <li className="flex items-center gap-1.5" title="Same X-Routing-Key, same version - and ramping the canary only moves keys onto it">
-            <Waypoints className="size-3" /> sticky by X-Routing-Key
-          </li>
-        </ul>
-      </div>
+        {/* Gateway */}
+        <div className={cn("z-10 self-start rounded-xl border @2xl:self-center bg-card px-3 py-2.5 shadow-sm", anyOpen && "border-danger/40")}>
+          <p className="flex items-center gap-1.5 text-xs font-medium">
+            <Radio className="size-3.5 text-success" /> Gateway
+            <span className="ml-auto font-mono text-[10px] text-muted-foreground">r{model.revision}</span>
+          </p>
+          <ul className="mt-1.5 space-y-1 text-[11px] text-muted-foreground">
+            <li className="flex items-center gap-1.5" title="Token bucket per model; over budget answers 429 with Retry-After">
+              <Gauge className="size-3" />
+              {policy.rate_limit_rps > 0 ? `${policy.rate_limit_rps} req/s limit` : "no rate limit"}
+              {model.rate_limited_total > 0 ? <span className="text-warning">· {model.rate_limited_total} limited</span> : null}
+            </li>
+            <li className="flex items-center gap-1.5" title="Consecutive unreachable/not-ready answers that open a version's breaker, and how long it stays open">
+              <ShieldCheck className="size-3" />
+              breaker {policy.breaker_failure_threshold}× / {policy.breaker_cooldown_seconds}s
+            </li>
+            <li className="flex items-center gap-1.5" title="Same X-Routing-Key, same version - and ramping the canary only moves keys onto it">
+              <Waypoints className="size-3" /> sticky by X-Routing-Key
+            </li>
+          </ul>
+        </div>
 
-      <svg viewBox={`0 0 100 ${H}`} preserveAspectRatio="none" className="h-full w-full" aria-hidden>
-        {versions.map((v, i) => (
-          <Beam
-            key={v.version}
-            from={mid}
-            to={slot * i + slot / 2}
-            height={H}
-            width={v.weight === 0 ? 0.6 : 1 + v.weight * 5}
-            color={roleOf(v.version, deployment, i) === "stable" ? "var(--stable)" : "var(--canary)"}
-            rps={v.requests_per_second}
-            broken={v.breaker === "open"}
-            idle={v.weight === 0}
-          />
-        ))}
-      </svg>
+        <div className="relative hidden @2xl:block">
+        <svg viewBox={`0 0 100 ${H}`} preserveAspectRatio="none" className="absolute inset-0 h-full w-full" aria-hidden>
+          {versions.map((v, i) => (
+            <Beam
+              key={v.version}
+              from={mid}
+              to={slot * i + slot / 2}
+              height={H}
+              width={v.weight === 0 ? 0.6 : 1 + v.weight * 5}
+              color={roleOf(v.version, deployment, i) === "stable" ? "var(--stable)" : "var(--canary)"}
+              rps={v.requests_per_second}
+              broken={v.breaker === "open"}
+              idle={v.weight === 0}
+            />
+          ))}
+        </svg>
+        </div>
 
-      <div className="z-10 flex h-full flex-col justify-around gap-2">
-        {versions.map((v, i) => (
-          <VersionNode key={v.version} v={v} role={roleOf(v.version, deployment, i)} />
-        ))}
+        <div className="z-10 flex flex-col justify-around gap-2 py-1">
+          {versions.map((v, i) => (
+            <VersionNode key={v.version} v={v} role={roleOf(v.version, deployment, i)} />
+          ))}
+        </div>
+
       </div>
     </div>
   );

@@ -138,8 +138,8 @@ export default function GatewayPage() {
               <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
                 {idle.map((m) => (
                   <div key={m.model_name} className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs">
-                    <span className="truncate font-mono">{m.model_name}</span>
-                    <span className="font-mono text-muted-foreground tabular">
+                    <span className="min-w-0 truncate font-mono" title={m.model_name}>{m.model_name}</span>
+                    <span className="shrink-0 truncate font-mono text-muted-foreground tabular">
                       {m.versions.map((v) => `${v.version} ${(v.weight * 100).toFixed(0)}%`).join(" · ")}
                     </span>
                   </div>
