@@ -135,6 +135,9 @@ Then check:
 - Frontend: http://localhost:3000
 - Router: http://localhost:8080/router/health
 
+The control plane's SQLite database lives on the `backend-db` volume, so it
+survives container rebuilds; `docker compose down -v` starts from an empty one.
+
 ## Screenshots
 
 **Deployment detail** - canary traffic split, quality metrics (label coverage,

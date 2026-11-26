@@ -17,9 +17,13 @@ services:
       # Migrations run at startup (`alembic upgrade head` below); mounted so a new
       # one applies on restart without rebuilding the image.
       - ./backend/alembic:/app/alembic:ro
+      # The SQLite file lives on a named volume, so recreating the container
+      # (a compose change, a rebuild) keeps every deployment and evaluation.
+      # `docker compose down -v` is the way to start from an empty database.
+      - backend-db:/app/db
     environment:
       MODELOPS_ENVIRONMENT: development
-      MODELOPS_DATABASE_URL: sqlite:///./modelops.db
+      MODELOPS_DATABASE_URL: sqlite:///./db/modelops.db
       CONTROL_PLANE_ROUTER_BASE_URL: http://router:8000
       # Dashboard-triggered benchmarks (app/benchmarks/): spawns
       # scripts.benchmarks.run_benchmark as a subprocess of this same container, so
@@ -36,10 +40,12 @@ services:
       # the worker's calls) follow their parent's decision.
       OTEL_TRACES_SAMPLER: parentbased_traceidratio
       OTEL_TRACES_SAMPLER_ARG: "0.1"
+    # One indent level throughout: in a folded (>) block, deeper-indented lines
+    # keep their newlines, and sh -c would run each line as its own command.
     command: >
       sh -c "alembic upgrade head &&
-             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-             --timeout-graceful-shutdown 3"
+      uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      --timeout-graceful-shutdown 3"
     depends_on:
       - model-serving-v2-good-latency-fault
       - model-serving-v2-good-error-fault
@@ -265,3 +271,6 @@ services:
       # In-memory storage is unbounded by default - under benchmark load it grew
       # past 4 GB. The oldest traces are dropped beyond this.
       MEMORY_MAX_TRACES: "20000"
+
+volumes:
+  backend-db:
