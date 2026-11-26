@@ -554,7 +554,8 @@ reload.
   the run; it's marked FAILED ("interrupted") on the next start.
 - **At 100% canary**, `minimum_requests` can't be met for the stable side; the
   timeline says so explicitly, and the benchmark feeds the idle side health-check
-  traffic.
+  traffic: real predictions sent straight to stable's container, timed, so its
+  latency stays comparable with the canary's.
 
 More on what was deliberately left out: [Future vision](docs/DESIGN_NOTES.md#future-vision).
 

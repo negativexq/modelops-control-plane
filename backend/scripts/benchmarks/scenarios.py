@@ -74,7 +74,9 @@ _DEFAULT_RELIABILITY_POLICY = {"max_error_rate_percent": 5.0}
 # run_benchmark.py's _feed_stable_side_health_checks) while canary's window still
 # held a residue of real, CPU-contended request latency, an apples-to-oranges
 # comparison that's a transient artifact of this benchmark harness, not a real
-# regression.
+# regression. (Those health checks used to post made-up 8-20 ms latencies; they
+# now time real predictions against stable's serving container, so they slow
+# down with a busy host the way the canary's traffic does.)
 # These scenarios use a very generous threshold so only an actual injected fault
 # (400ms in latency-failure, ~20-40x any real model's inference time observed here)
 # can trigger a latency FAIL - not routine, unfaked variance or harness artifacts.
@@ -217,10 +219,12 @@ SCENARIOS: dict[str, Scenario] = {
             "quality": {"minimum_recall": 0.7},
         },
         expected_outcome="promote",
-        # ~30% fraud rows: enough positives in each 15s quality window at 10%
-        # canary to clear minimum_positive_labels. Recall is TP / positives, so
-        # oversampling positives doesn't flatter it.
-        positive_ratio=0.3,
+        # Half fraud rows: a 15s quality window at 10% canary holds ~120 labeled
+        # predictions, so ~60 positives against minimum_positive_labels=20. At 30%
+        # a passing run cleared it with 20-21, and any late labels froze the
+        # rollout at 10%. Recall is TP / positives, so oversampling positives
+        # doesn't flatter it.
+        positive_ratio=0.5,
         load_duration_seconds=150,
         max_wait_seconds=240,
         needs_stable_side_health_checks=True,

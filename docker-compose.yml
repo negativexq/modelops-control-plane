@@ -33,6 +33,7 @@ services:
       BENCHMARK_CONTROL_PLANE_URL: http://localhost:8000
       BENCHMARK_LATENCY_FAULT_URL: http://model-serving-v2-good-latency-fault:8000
       BENCHMARK_ERROR_FAULT_URL: http://model-serving-v2-good-error-fault:8000
+      BENCHMARK_STABLE_URL: http://model-serving-v1:8000
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       OTEL_SERVICE_NAME: control-plane
       # Most root traces here are the dashboard polling the API - keep 1 in 10.

@@ -18,9 +18,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import os
-import random
 import threading
 import time
 from pathlib import Path
@@ -93,6 +93,26 @@ def _reset_fault_injection(target: FaultTarget | None) -> None:
         )
 
 
+# The stable version's own serving container, probed directly by the stable-side
+# health checks below. Host-mapped port by default (CLI runs); the backend service
+# overrides it with the docker-internal hostname (dashboard-triggered runs).
+STABLE_SERVING_URL = os.environ.get("BENCHMARK_STABLE_URL", "http://localhost:8001")
+_DATASET = Path(__file__).resolve().parents[2] / "data" / "test.csv"
+_NON_FEATURE_COLUMNS = {"transaction_id", "customer_id", "label"}
+
+
+def _probe_payload() -> dict[str, object]:
+    """One real row of the held-out test set, as a /predict body. Inference time
+    doesn't depend on which row, so a single fixed one is enough for a probe."""
+    with _DATASET.open(newline="") as f:
+        row = next(csv.DictReader(f))
+    return {
+        key: value if key == "merchant_category" else float(value)
+        for key, value in row.items()
+        if key not in _NON_FEATURE_COLUMNS
+    }
+
+
 def _feed_stable_side_health_checks(
     client: ControlPlaneClient,
     deployment_id: str,
@@ -100,27 +120,41 @@ def _feed_stable_side_health_checks(
     stop_event: threading.Event,
     interval_seconds: float = 5.0,
     batch_size: int = 15,
+    serving_url: str = STABLE_SERVING_URL,
 ) -> None:
-    """Runs until `stop_event` is set, periodically posting a small batch of plain
-    (unlabeled) healthy metrics for `stable_version` - found necessary via manual
-    end-to-end verification: once the canary reaches 100% traffic, the router
-    sends stable zero real requests, so minimum_requests (which requires BOTH
-    sides to have enough samples) would stay unmet forever and the deployment
-    could never reach the final PROMOTE step. This simulates the kind of
-    background health-check/synthetic-monitoring traffic real systems commonly
-    send to an idle standby instance - it carries no `actual_label`, unlike the
-    real (canary-side) traffic the Locust label feeder generates.
+    """Runs until `stop_event` is set, periodically sending a small batch of real
+    predictions straight to the stable version's serving container and recording
+    each one's measured latency and status as an (unlabeled) metric for
+    `stable_version`. Found necessary via manual end-to-end verification: once the
+    canary reaches 100% traffic, the router sends stable zero real requests, so
+    minimum_requests (which requires BOTH sides to have enough samples) would stay
+    unmet forever and the deployment could never reach the final PROMOTE step.
+    This simulates the background health-check/synthetic-monitoring traffic real
+    systems send to an idle standby instance.
+
+    The latencies are measured, not made up: these probes are all stable has in
+    its window at 100% canary, and the latency check compares them with the
+    canary's real latencies. Invented 8-20 ms values made a busy host look like a
+    canary regression (canary p95 ~450 ms against a "stable" p95 of 19 ms: +2195%,
+    past even the success scenario's 2000% limit) and rolled back a healthy model.
+    Measured probes slow down with the host exactly like real traffic does.
     """
-    rng = random.Random(1234)
-    while not stop_event.is_set():
-        for _ in range(batch_size):
-            client.post_metric(
-                deployment_id,
-                stable_version,
-                latency_ms=rng.uniform(8, 20),
-                status_code=200,
-            )
-        stop_event.wait(interval_seconds)
+    payload = _probe_payload()
+    with httpx.Client(base_url=serving_url, timeout=10.0) as serving:
+        while not stop_event.is_set():
+            for _ in range(batch_size):
+                started = time.perf_counter()
+                try:
+                    status_code = serving.post("/predict", json=payload).status_code
+                except httpx.HTTPError:
+                    status_code = 503
+                client.post_metric(
+                    deployment_id,
+                    stable_version,
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                    status_code=status_code,
+                )
+            stop_event.wait(interval_seconds)
 
 
 # A benchmark deployment left in one of these blocks the next run of the same
