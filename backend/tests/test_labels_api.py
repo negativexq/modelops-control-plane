@@ -3,10 +3,12 @@ from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.control_plane.models import (
     Deployment,
+    DeploymentEvent,
     DeploymentStatus,
     GroundTruthLabel,
     PredictionMetric,
@@ -237,6 +239,79 @@ def test_batch_endpoint_reports_per_item_status(
         "batch-pending": "pending",
         "batch-conflict": "conflict",
     }
+
+
+def test_batch_resolves_a_repeated_prediction_id_in_order(
+    client: TestClient, db_session: Session, deployment: Deployment
+) -> None:
+    """Same outcomes as sending the items one by one: the first of a repeated id
+    is recorded, a repeat with the same label is a no-op, a different one a
+    conflict - audited on the deployment, and never overwriting the label."""
+    _add_metric(db_session, deployment.id, "dup")
+
+    response = client.post(
+        "/api/labels/batch",
+        json=[_label_payload("dup", 1), _label_payload("dup", 1), _label_payload("dup", 0)],
+    )
+    assert [item["status"] for item in response.json()] == ["applied", "no_op", "conflict"]
+    label = _get_label(db_session, "dup")
+    assert label is not None and label.actual_label == 1
+    events = db_session.query(DeploymentEvent).filter_by(event_type="label_conflict").all()
+    assert len(events) == 1 and events[0].deployment_id == deployment.id
+
+
+def test_batch_writes_every_label_in_one_commit(
+    client: TestClient, db_session: Session, deployment: Deployment
+) -> None:
+    for i in range(3):
+        _add_metric(db_session, deployment.id, f"one-commit-{i}")
+    commits = 0
+    real_commit = db_session.commit
+
+    def counting_commit() -> None:
+        nonlocal commits
+        commits += 1
+        real_commit()
+
+    db_session.commit = counting_commit  # type: ignore[method-assign]
+    payload = [_label_payload(f"one-commit-{i}", 1) for i in range(3)]
+    payload += [_label_payload(f"no-metric-{i}", 0) for i in range(47)]
+    statuses = [item["status"] for item in client.post("/api/labels/batch", json=payload).json()]
+
+    assert commits == 1
+    assert statuses == ["applied"] * 3 + ["pending"] * 47
+    assert db_session.query(GroundTruthLabel).count() == 50
+
+
+def test_batch_falls_back_to_one_by_one_when_a_concurrent_writer_wins(
+    client: TestClient, db_session: Session, deployment: Deployment
+) -> None:
+    """Another writer inserting one of the batch's prediction_ids between the
+    lookup and the commit trips the unique constraint; the batch is then redone
+    item by item, which treats that row like any already-recorded label."""
+    _add_metric(db_session, deployment.id, "raced")
+    real_commit = db_session.commit
+    raced = False
+
+    def commit_after_a_concurrent_insert() -> None:
+        nonlocal raced
+        if not raced:
+            raced = True
+            db_session.rollback()
+            concurrent = GroundTruthLabel(
+                prediction_id="raced", actual_label=1, occurred_at=datetime.now(UTC)
+            )
+            db_session.add(concurrent)
+            real_commit()
+            raise IntegrityError("INSERT", {}, Exception("UNIQUE constraint failed"))
+        real_commit()
+
+    db_session.commit = commit_after_a_concurrent_insert  # type: ignore[method-assign]
+    response = client.post(
+        "/api/labels/batch", json=[_label_payload("raced", 1), _label_payload("fresh", 0)]
+    )
+    assert [item["status"] for item in response.json()] == ["no_op", "pending"]
+    assert db_session.query(GroundTruthLabel).count() == 2
 
 
 # --- Labeling a prediction from a terminal deployment -----------------------------

@@ -248,6 +248,18 @@ the platform's *pipeline* takes to learn a label, independent of how the
 label producer chooses to report `occurred_at`. Both are persisted the
 moment the row is created, regardless of arrival order.
 
+`POST /api/labels/batch` is one transaction (`label_service.ingest_labels`):
+one lookup for the batch's existing labels, one for their metrics, one commit.
+It used to run the single-label path per item, a commit each, which held a
+batch of 50 to ~150 ms on an idle host. Under a benchmark's load (~80 labels/s,
+with the router writing a metric per prediction into the same SQLite file) the
+feeder fell behind, labels landed after the quality window had moved past their
+predictions, and a healthy canary sat INCONCLUSIVE at 10% until it froze. A
+batch of 50 now takes ~12 ms. The per-item outcomes are unchanged, including a
+`prediction_id` repeated within one batch; if a concurrent writer inserts one of
+the batch's ids between the lookup and the commit, the unique constraint trips
+and the batch is redone item by item.
+
 ## Policy engine
 
 `app/policy/` turns a comparison window into a PASS/FAIL/INCONCLUSIVE verdict, per

@@ -35,20 +35,28 @@ _STATUS_CODE_FOR_OUTCOME: dict[LabelIngestOutcome, int] = {
 }
 
 
-def _ingest_one(db: Session, payload: LabelIn) -> tuple[LabelReportItem, int]:
-    try:
-        outcome = label_service.ingest_label(
-            db, payload.prediction_id, payload.actual_label, payload.occurred_at
-        )
-    except LabelConflictError as exc:
+def _report(
+    prediction_id: str, outcome: LabelIngestOutcome | LabelConflictError
+) -> tuple[LabelReportItem, int]:
+    if isinstance(outcome, LabelConflictError):
         report = LabelReportItem(
-            prediction_id=payload.prediction_id, status="conflict", detail=str(exc)
+            prediction_id=prediction_id, status="conflict", detail=str(outcome)
         )
         return report, 409
     return (
-        LabelReportItem(prediction_id=payload.prediction_id, status=outcome.value),
+        LabelReportItem(prediction_id=prediction_id, status=outcome.value),
         _STATUS_CODE_FOR_OUTCOME[outcome],
     )
+
+
+def _ingest_one(db: Session, payload: LabelIn) -> tuple[LabelReportItem, int]:
+    try:
+        outcome: LabelIngestOutcome | LabelConflictError = label_service.ingest_label(
+            db, payload.prediction_id, payload.actual_label, payload.occurred_at
+        )
+    except LabelConflictError as exc:
+        outcome = exc
+    return _report(payload.prediction_id, outcome)
 
 
 @router.post("", response_model=LabelReportItem)
@@ -63,4 +71,10 @@ def ingest_labels_batch(payload: list[LabelIn], db: DbDep) -> list[LabelReportIt
     """Always 200 overall - each item carries its own status (including
     "conflict"), so a feeder sending a mixed batch gets a full report instead of
     the whole batch aborting on the first problem row."""
-    return [_ingest_one(db, item)[0] for item in payload]
+    outcomes = label_service.ingest_labels(
+        db, [(item.prediction_id, item.actual_label, item.occurred_at) for item in payload]
+    )
+    return [
+        _report(item.prediction_id, outcome)[0]
+        for item, outcome in zip(payload, outcomes, strict=True)
+    ]
