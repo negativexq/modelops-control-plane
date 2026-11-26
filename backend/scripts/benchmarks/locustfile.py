@@ -51,6 +51,9 @@ LABEL_COVERAGE = float(os.environ.get("BENCHMARK_LABEL_COVERAGE", "0.8"))
 # Which model's split to load. Empty means the router's default model.
 MODEL_NAME = os.environ.get("BENCHMARK_MODEL_NAME", "")
 PREDICT_PATH = f"/router/models/{MODEL_NAME}/predict" if MODEL_NAME else "/router/predict"
+# Set per scenario (Scenario.positive_ratio); empty keeps the natural fraud rate.
+_POSITIVE_RATIO_ENV = os.environ.get("BENCHMARK_POSITIVE_RATIO", "")
+POSITIVE_RATIO = float(_POSITIVE_RATIO_ENV) if _POSITIVE_RATIO_ENV else None
 _LABEL_FLUSH_INTERVAL_SECONDS = 2.0
 _LABEL_FLUSH_BATCH_SIZE = 50
 
@@ -98,9 +101,9 @@ def _sample_row(positive_ratio: float | None = None) -> tuple[dict[str, Any], in
     TP+FN) statistically meaningless regardless of how many labeled samples
     clear minimum_labeled_samples/minimum_label_coverage - see
     app/policy/engine.py's minimum_positive_labels gate and
-    docs/DESIGN_NOTES.md. Left at its default (`None`, natural dataset ratio)
-    for RouterUser's own demo traffic below - real production traffic isn't
-    stratified either, and this is a deliberate, visible knob, not a hidden one.
+    docs/DESIGN_NOTES.md. RouterUser below uses the scenario's
+    BENCHMARK_POSITIVE_RATIO, natural ratio when unset - real production traffic
+    isn't stratified, so this is a deliberate, visible knob, not a hidden one.
     """
     if positive_ratio is None:
         return random.choice(_DATASET_ROWS)
@@ -168,9 +171,17 @@ class _LabelFeeder:
         self._flush_once()
 
     def _flush_once(self) -> None:
-        due = self._due_batch()
+        """Send every matured label, one batch at a time. Sending a single batch
+        per tick capped delivery at 50 labels / 2s - well under what the load
+        produces (~80/s at the default rate), so the backlog grew for the whole
+        run and labels landed minutes late, after the quality window had moved
+        past their predictions."""
+        while self._send(self._due_batch()):
+            pass
+
+    def _send(self, due: list[tuple[str, int]]) -> bool:
         if not due:
-            return
+            return False
         now_iso = datetime.now(UTC).isoformat()
         body = [
             {"prediction_id": prediction_id, "actual_label": actual_label, "occurred_at": now_iso}
@@ -180,6 +191,7 @@ class _LabelFeeder:
             self._client.post("/api/labels/batch", json=body)
         except httpx.HTTPError:
             pass  # best-effort; a dropped label batch just lowers observed coverage
+        return True
 
 
 _feeder = _LabelFeeder()
@@ -200,7 +212,7 @@ class RouterUser(HttpUser):
 
     @task
     def predict(self) -> None:
-        payload, true_label = _sample_row()
+        payload, true_label = _sample_row(POSITIVE_RATIO)
         response = self.client.post(PREDICT_PATH, json=payload, name="/router/predict")
         if response.status_code != 200:
             return

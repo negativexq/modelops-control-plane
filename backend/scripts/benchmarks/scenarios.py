@@ -46,6 +46,10 @@ class Scenario:
     # health-check traffic to keep satisfying minimum_requests on both sides, see
     # run_benchmark.py's _feed_stable_side_health_checks.
     needs_stable_side_health_checks: bool = False
+    # Share of fraud (positive) rows in the generated load; None = the dataset's
+    # natural ~2%. A short window at 10% canary holds only a handful of positives
+    # at the natural rate, so minimum_positive_labels could never pass.
+    positive_ratio: float | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
     # User-facing disclaimer for the dashboard's scenario cards (app/benchmarks/) -
     # None for scenarios that reflect real, unmodified platform behavior
@@ -203,12 +207,21 @@ SCENARIOS: dict[str, Scenario] = {
             "minimum_requests": 20,
             "evaluation_window_seconds": 15,
             "max_inconclusive_retries": 20,
+            # Labels land after BENCHMARK_LABEL_DELAY_SECONDS (10s); the default
+            # 60s maturity would leave the quality window empty for the first
+            # minute of a 15s-step rollout.
+            "label_maturity_seconds": 15,
+            "minimum_positive_labels": 20,
             "latency": _GENEROUS_LATENCY_POLICY,
             "reliability": _GENEROUS_RELIABILITY_POLICY,
             "quality": {"minimum_recall": 0.7},
         },
         expected_outcome="promote",
-        load_duration_seconds=90,
+        # ~30% fraud rows: enough positives in each 15s quality window at 10%
+        # canary to clear minimum_positive_labels. Recall is TP / positives, so
+        # oversampling positives doesn't flatter it.
+        positive_ratio=0.3,
+        load_duration_seconds=150,
         max_wait_seconds=240,
         needs_stable_side_health_checks=True,
         notes=(

@@ -51,6 +51,7 @@ def start_locust(
     label_delay_seconds: float = 10.0,
     label_coverage: float = 0.8,
     model_name: str | None = None,
+    positive_ratio: float | None = None,
 ) -> subprocess.Popen[bytes]:
     """Launches Locust in the background (headless) so the caller can poll the
     control plane concurrently while load is in flight.
@@ -95,6 +96,8 @@ def start_locust(
         "BENCHMARK_LABEL_COVERAGE": str(label_coverage),
         # The router serves several models; send load to this one's split.
         "BENCHMARK_MODEL_NAME": model_name or "",
+        # Share of fraud rows in the load; empty = the dataset's natural ~2%.
+        "BENCHMARK_POSITIVE_RATIO": "" if positive_ratio is None else str(positive_ratio),
     }
     return subprocess.Popen(
         cmd,

@@ -199,6 +199,7 @@ def run_scenario(
                 label_delay_seconds=label_delay_seconds,
                 label_coverage=label_coverage,
                 model_name=scenario.model_name,
+                positive_ratio=scenario.positive_ratio,
             )
 
             final_deployment = _wait_for_outcome(
