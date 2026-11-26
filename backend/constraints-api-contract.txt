@@ -1,0 +1,10 @@
+# The packages whose versions shape the generated OpenAPI schema, pinned for the
+# api-contract CI job only (see .github/workflows/ci.yml). A new FastAPI or
+# pydantic release can change how the same code is rendered (titles, nullable
+# unions, defaults); unpinned, that would fail the contract check on a commit
+# that changed no API. Bump these on purpose, regenerate with `npm run gen:api`
+# in frontend/, and commit the result together.
+fastapi==0.165.0
+starlette==1.10.0
+pydantic==2.14.4
+pydantic-core==2.50.5

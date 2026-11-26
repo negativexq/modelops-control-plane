@@ -622,7 +622,9 @@ control plane's OpenAPI schema to `frontend/openapi.json` and generates
 `frontend/src/lib/api-schema.ts` from it; `src/lib/types.ts` only re-exports
 those, plus the few shapes OpenAPI can't describe (the SSE payload, free-form
 registry JSON). The `api-contract` CI job regenerates both and fails if they
-differ from what's committed.
+differ from what's committed. It installs FastAPI and pydantic at the versions in
+`backend/constraints-api-contract.txt`, so a new release of either can't change
+the rendered schema, and fail the check, on a commit that changed no API.
 
 **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs four jobs on
 every push/PR:
