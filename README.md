@@ -49,6 +49,7 @@ to actually run at scale.
 | Frontend / dashboard | Next.js + TypeScript + Tailwind + Recharts |
 | Model serving | scikit-learn + joblib, one FastAPI process per model version |
 | Load generation | Locust (benchmark suite) |
+| Observability | Prometheus + Grafana (metrics, dashboards, alerts), OpenTelemetry + Jaeger (traces) |
 | Runtime | Docker + Docker Compose |
 
 ### Services & ports
@@ -63,7 +64,10 @@ to actually run at scale.
 | `model-serving-v2-quality-bad` | 8003 | Deliberately weak model, for the quality-regression scenario |
 | `model-serving-v2-good-latency-fault` | 8004 | Same artifact as v2-good, runtime-toggleable latency fault |
 | `model-serving-v2-good-error-fault` | 8005 | Same artifact as v2-good, runtime-toggleable error fault |
-| `worker` | *(internal only)* | Automated promotion/rollback loop, no HTTP surface |
+| `worker` | *(internal; `:9100/metrics`)* | Automated promotion/rollback loop, no API of its own |
+| `grafana` | 3001 | Dashboards: **ModelOps · Rollouts** and **ModelOps · Services** |
+| `prometheus` | 9090 | Scrapes every service's `/metrics`, evaluates alert rules |
+| `jaeger` | 16686 | Traces (OTLP receiver on 4318) |
 
 The control plane's database is the durable **desired state** for traffic
 allocation (`Deployment` + `TrafficAllocation`, each revisioned); the router's
@@ -331,6 +335,34 @@ Next.js Client Components calling the control plane directly
   header menu) and the name is stored on the events they write. It's an audit hint,
   not authentication.
 
+### Observability
+
+Every service exports Prometheus metrics at `/metrics`, and every prediction is
+an OpenTelemetry trace from the router through to the model's own inference
+span. Details: [observability/README.md](observability/README.md).
+
+- **Grafana** (http://localhost:3001, no login) opens on **ModelOps · Rollouts**:
+  - headline numbers (predictions/s, error rate, p95, live rollouts, decisions,
+    worker heartbeat) and any firing alert;
+  - canary vs stable per model: traffic split, latency, error rate, latency
+    heatmap, with the alert thresholds drawn in and decisions marked on every
+    graph;
+  - the control loop: decisions, policy verdicts, failing gates, worker actions,
+    reconcile results.
+
+  **ModelOps · Services** covers rate, errors and latency per service and route,
+  and model inference time per container.
+- **Metrics**: request counts and latency histograms per route template, routed
+  predictions and upstream latency per model/version, the applied traffic split,
+  decisions by outcome and trigger, policy verdicts per gate, reconcile results
+  and errors, and worker sweeps, actions and heartbeat.
+- **Traces** (http://localhost:16686): router → readiness check → model service
+  `/predict` → `model.inference`, plus the router's metric push to the control
+  plane; worker sweeps trace evaluate → promote/rollback → router config push.
+  On when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (compose sets it).
+- **Alerts** (`observability/prometheus/rules.yml`): service down, worker
+  stalled, a version's error rate or p95 too high, reconcile failing.
+
 ### Evidence-based policy engine
 
 ```bash
@@ -542,11 +574,13 @@ curl localhost:8000/api/router-config/fraud-model   # now finds a PROMOTED/
 
 ```bash
 make dev             # bring up the whole stack via docker compose
-make test            # backend tests (pytest) - 311 tests
+make test            # backend tests (pytest) - 326 tests
 make coverage        # same, plus an HTML report at backend/htmlcov/index.html
 make lint            # backend (ruff, mypy) + frontend (eslint, tsc) lint/type-check
 make ci-smoke-test   # the same real-stack check CI runs - needs `make dev` running
 make e2e             # Playwright browser tests against the running stack
+make check-observability  # Prometheus targets, alerts, dashboards, traces - needs `make dev`
+make dashboards      # regenerate the Grafana dashboard JSON from its generator
 make down            # stop the services
 cd frontend && npm run gen:api   # regenerate the dashboard's API types after an API change
 ```
@@ -563,10 +597,10 @@ every push/PR:
 
 | Job | What it checks | Runtime |
 |---|---|---|
-| `backend` | `ruff`, `mypy --strict`, `pytest` (311 tests, mocked collaborators) | seconds |
+| `backend` | `ruff`, `mypy --strict`, `pytest` (326 tests, mocked collaborators) | seconds |
 | `frontend` | `eslint`, `tsc --noEmit`, `next build` | seconds |
 | `api-contract` | Regenerates the OpenAPI schema and the dashboard's TypeScript types; fails if either differs from what's committed | seconds |
-| `integration` | Builds and boots the **real** 9-container stack (8 HTTP-exposed services + the worker, which has no HTTP surface), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s six scenarios followed by the Playwright suite in [`frontend/e2e`](frontend/e2e) - gated on the three jobs above passing first | a few minutes |
+| `integration` | Builds and boots the **real** stack (8 HTTP-exposed services + the worker, plus Prometheus, Grafana and Jaeger), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s six scenarios, [`check_observability.py`](backend/scripts/check_observability.py) (every target scraped, alerts and dashboards loaded, the smoke test's decisions counted, traces reaching a model service) and the Playwright suite in [`frontend/e2e`](frontend/e2e) - gated on the three jobs above passing first | a few minutes |
 
 The `integration` job's six scenarios, in order: **(1)** a fast manual create →
 evaluate → promote path, created with `automation_paused=True` so the always-on
@@ -661,6 +695,16 @@ though - this is not a real production feedback loop (see the
   (`POST /api/labels(/batch)`) a real deployment would use, delayed and with
   partial coverage, not a direct database write. This is called out explicitly
   wherever it applies (the scenario's own report, and its card on the dashboard).
+- The observability stack is set up for one laptop. Grafana has no login
+  (anonymous admin on :3001), Jaeger keeps traces in memory only, and there's no
+  Alertmanager, so alerts show in Grafana and Prometheus but go nowhere.
+  Prometheus counters restart at zero with their service. The dashboards use
+  `rate()`/`increase()`, which handle that; the decision history that has to
+  survive a restart is in the database (`GET /api/fleet/summary`).
+- The backend runs with `--reload`, which also watches `backend/scripts/`. Saving
+  a file there or in `backend/app/` mid-benchmark restarts the control plane and
+  kills the run's subprocess. On the next startup the run is marked `FAILED`
+  ("interrupted"), so it no longer blocks later runs.
 - `uq_deployments_active_per_model` (the DB-level invariant backing "one active
   deployment per model") also covers `INCONCLUSIVE` - a deployment frozen after
   `max_inconclusive_retries` still counts as active and blocks a new deployment

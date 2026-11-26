@@ -21,6 +21,9 @@ class WorkerSettings(BaseSettings):
     # (pre-Sprint-8 data) and gating on "how often is a re-evaluation due" still
     # needs a number.
     default_evaluation_window_seconds: int = 300
+    # Prometheus scrape port (GET /metrics on its own tiny HTTP server - the
+    # worker has no web app). 0 turns it off, e.g. for tests.
+    metrics_port: int = 9100
 
 
 worker_settings = WorkerSettings()

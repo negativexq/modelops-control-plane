@@ -1,7 +1,8 @@
 .PHONY: dev test lint down backend-install frontend-install \
 	generate-data train-models evaluate-models prepare-models migrate \
 	benchmark-baseline benchmark-latency-failure benchmark-error-failure \
-	benchmark-quality-failure benchmark-success benchmark-all ci-smoke-test e2e coverage
+	benchmark-quality-failure benchmark-success benchmark-all ci-smoke-test e2e coverage \
+	check-observability dashboards
 
 dev:
 	docker compose up --build
@@ -37,6 +38,15 @@ ci-smoke-test: backend-install
 
 e2e:
 	cd frontend && npx playwright test
+
+# Prometheus targets, alert rules, Grafana dashboards, decision counters, traces -
+# against the running stack (CI runs it after ci-smoke-test).
+check-observability: backend-install
+	cd backend && .venv/bin/python -m scripts.check_observability
+
+# Regenerate observability/grafana/dashboards/*.json from build_dashboards.py.
+dashboards:
+	python3 observability/grafana/build_dashboards.py
 
 generate-data: backend-install
 	cd backend && .venv/bin/python scripts/generate_dataset.py

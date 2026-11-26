@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.benchmarks import service
+from app.control_plane.models import BenchmarkRun, BenchmarkRunStatus
 from app.db import get_db
 from app.main import app
 
@@ -287,3 +288,21 @@ def test_list_runs_orders_newest_first(
     listing = client.get("/api/benchmarks").json()
     ids = [r["id"] for r in listing]
     assert ids.index(second_id) < ids.index(first_id)
+
+
+def test_restart_marks_an_orphaned_running_run_failed(
+    db_session: Session, client: TestClient
+) -> None:
+    """A run left RUNNING by a restart would otherwise block every later run."""
+    orphan = BenchmarkRun(scenario="baseline", status=BenchmarkRunStatus.RUNNING)
+    db_session.add(orphan)
+    db_session.commit()
+
+    with TestClient(app):  # a second startup, as after a restart
+        pass
+
+    db_session.refresh(orphan)
+    assert orphan.status == BenchmarkRunStatus.FAILED
+    assert orphan.completed_at is not None
+    assert "interrupted" in (orphan.error_message or "")
+    assert client.get("/api/benchmarks/current").json() is None

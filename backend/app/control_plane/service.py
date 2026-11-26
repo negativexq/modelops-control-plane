@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.exc import StaleDataError
 
+from app.control_plane import telemetry
 from app.control_plane.models import (
     TERMINAL_STATUSES,
     Deployment,
@@ -408,6 +409,7 @@ async def _push_best_effort(
             exc,
         )
         record_router_reachability_change(db, deployment_id, reachable=False)
+        telemetry.ROUTER_PUSH_FAILURES.labels(model_name).inc()
         return
     record_router_reachability_change(db, deployment_id, reachable=True)
 
@@ -591,6 +593,7 @@ async def promote_deployment(
 
     _commit(db, deployment)
     db.refresh(deployment)
+    telemetry.DECISIONS.labels(DeploymentStatus.PROMOTED.value, triggered_by).inc()
 
     await _push_best_effort(
         db, router_gateway, deployment.model_name, deployment.id, revision, targets
@@ -637,6 +640,7 @@ async def rollback_deployment(
 
     _commit(db, deployment)
     db.refresh(deployment)
+    telemetry.DECISIONS.labels(DeploymentStatus.ROLLED_BACK.value, triggered_by).inc()
 
     await _push_best_effort(
         db, router_gateway, deployment.model_name, deployment.id, revision, targets
@@ -715,7 +719,8 @@ def record_inconclusive(db: Session, deployment: Deployment, max_retries: int) -
         f"auto: evaluation inconclusive (attempt {attempt}/{max_retries})",
     )
 
-    if deployment.inconclusive_retry_count > max_retries:
+    frozen = deployment.inconclusive_retry_count > max_retries
+    if frozen:
         if deployment.status == DeploymentStatus.CANARY_RUNNING:
             _transition(
                 db,
@@ -733,6 +738,9 @@ def record_inconclusive(db: Session, deployment: Deployment, max_retries: int) -
 
     _commit(db, deployment)
     db.refresh(deployment)
+    if frozen:
+        # Only the worker reaches INCONCLUSIVE (see fleet.decision_actor).
+        telemetry.DECISIONS.labels(DeploymentStatus.INCONCLUSIVE.value, "automatic").inc()
     return deployment
 
 

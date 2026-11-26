@@ -1,12 +1,18 @@
 import asyncio
 import logging
+import time
 from datetime import UTC, datetime
 from typing import Any
 
+from opentelemetry import trace
+
+from app.worker import telemetry
 from app.worker.client import ActionConflictError, WorkerClient
 from app.worker.decide import WorkerAction, decide_action
 
 logger = logging.getLogger("worker")
+# No-op unless main.py configured a provider (OTEL_EXPORTER_OTLP_ENDPOINT).
+tracer = trace.get_tracer(__name__)
 
 ACTIVE_STATUSES = {"CANARY_RUNNING", "EVALUATING"}
 
@@ -89,6 +95,7 @@ async def process_deployment(
     logger.info(
         "deployment %s: %s -> %s", deployment_id, evaluation["overall_result"], action.value
     )
+    telemetry.ACTIONS.labels(action.value).inc()
     return action
 
 
@@ -117,23 +124,36 @@ async def run_once(client: WorkerClient, default_window_seconds: int) -> None:
     try/except, see docs/DESIGN_NOTES.md#automated-promotion--rollback for the
     worker-crash bug this pattern already exists to avoid.
     """
-    try:
-        await client.reconcile()
-    except Exception:
-        logger.exception("error during router reconcile - will retry next cycle")
-
-    deployments = await client.list_deployments()
-    active_ids = [
-        d["id"]
-        for d in deployments
-        if d["status"] in ACTIVE_STATUSES and not d.get("automation_paused")
-    ]
-
-    for deployment_id in active_ids:
+    start = time.perf_counter()
+    # One root span per sweep: every control-plane call it makes (and the
+    # router pushes those cause) nests under it, so a decision can be followed
+    # from the worker's evaluate call to the router's new split.
+    with tracer.start_as_current_span("worker.sweep") as span:
         try:
-            await process_deployment(client, deployment_id, default_window_seconds)
+            await client.reconcile()
         except Exception:
-            logger.exception("error processing deployment %s", deployment_id)
+            telemetry.ERRORS.labels("reconcile").inc()
+            logger.exception("error during router reconcile - will retry next cycle")
+
+        deployments = await client.list_deployments()
+        active_ids = [
+            d["id"]
+            for d in deployments
+            if d["status"] in ACTIVE_STATUSES and not d.get("automation_paused")
+        ]
+        telemetry.ACTIVE_ROLLOUTS.set(len(active_ids))
+        span.set_attribute("modelops.active_rollouts", len(active_ids))
+
+        for deployment_id in active_ids:
+            try:
+                await process_deployment(client, deployment_id, default_window_seconds)
+            except Exception:
+                telemetry.ERRORS.labels("deployment").inc()
+                logger.exception("error processing deployment %s", deployment_id)
+
+    telemetry.SWEEPS.inc()
+    telemetry.SWEEP_DURATION.observe(time.perf_counter() - start)
+    telemetry.LAST_SWEEP.set(time.time())
 
 
 async def run_forever(
@@ -148,5 +168,6 @@ async def run_forever(
             # (see run_once's docstring), so the only correct response is to log and
             # try again next cycle rather than exit and require an operator to
             # notice and restart the container.
+            telemetry.ERRORS.labels("sweep").inc()
             logger.exception("error during worker sweep - will retry next cycle")
         await asyncio.sleep(poll_interval_seconds)

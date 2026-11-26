@@ -41,6 +41,25 @@ def get_running_run(db: Session) -> BenchmarkRun | None:
     return db.execute(stmt).scalars().first()
 
 
+def fail_interrupted_runs(db: Session) -> int:
+    """Called once at startup. A run still RUNNING at that point lost the task
+    that was waiting on its subprocess - the control plane restarted (or
+    --reload fired) mid-run - so nothing will ever record its outcome, and
+    leaving it RUNNING would refuse every later run as "already in progress"."""
+    runs = db.execute(
+        select(BenchmarkRun).where(BenchmarkRun.status == BenchmarkRunStatus.RUNNING)
+    ).scalars().all()
+    for run in runs:
+        run.status = BenchmarkRunStatus.FAILED
+        run.completed_at = datetime.now(UTC)
+        run.error_message = (
+            "interrupted: the control plane restarted while this run was in progress"
+        )
+        logger.warning("benchmark run %s was interrupted by a restart, marked FAILED", run.id)
+    db.commit()
+    return len(runs)
+
+
 def get_run(db: Session, run_id: str) -> BenchmarkRun | None:
     return db.get(BenchmarkRun, run_id)
 

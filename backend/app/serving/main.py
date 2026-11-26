@@ -5,8 +5,13 @@ from typing import Any
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from prometheus_client import Histogram
 from pydantic import ValidationError
 
+from app.observability import tracing
+from app.observability.metrics import LATENCY_BUCKETS, instrument_app
 from app.serving.config import ServingSettings, serving_settings
 from app.serving.fault_injection import apply_fault_injection
 from app.serving.model_loader import LoadedModel, load_model
@@ -19,8 +24,16 @@ from app.serving.schemas import (
 
 logger = logging.getLogger("model_serving")
 
+INFERENCE_LATENCY = Histogram(
+    "modelops_serving_inference_seconds",
+    "Time spent in the model itself (feature frame + predict + predict_proba), "
+    "excluding request validation and any injected fault latency.",
+    ["model", "version"],
+    buckets=LATENCY_BUCKETS,
+)
 
-def create_app(settings: ServingSettings) -> FastAPI:
+
+def create_app(settings: ServingSettings, tracer_provider: TracerProvider | None = None) -> FastAPI:
     """Build a serving app bound to a single (model_name, model_version) pair.
 
     A factory (rather than a bare module-level app) so tests can spin up
@@ -28,6 +41,10 @@ def create_app(settings: ServingSettings) -> FastAPI:
     fault injection enabled - without relying on process-wide environment state.
     """
     app = FastAPI(title=f"ModelOps Serving - {settings.model_name}/{settings.model_version}")
+    provider = tracer_provider or tracing.configured_provider("model-serving")
+    instrument_app(app, "serving")
+    tracing.instrument_fastapi(app, provider)
+    tracer = tracing.tracer(__name__, provider)
 
     loaded_model: LoadedModel | None
     load_error: str | None
@@ -98,13 +115,32 @@ def create_app(settings: ServingSettings) -> FastAPI:
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.errors()) from exc
 
+        if settings.injected_latency_ms or settings.injected_error_rate:
+            # Makes a benchmark's deliberately slow or failing request obvious
+            # in its trace instead of looking like a real model problem.
+            trace.get_current_span().set_attributes(
+                {
+                    "modelops.fault.latency_ms": settings.injected_latency_ms,
+                    "modelops.fault.error_rate": settings.injected_error_rate,
+                }
+            )
         apply_fault_injection(settings)
 
-        start = time.perf_counter()
-        row = pd.DataFrame([validated.model_dump()])[loaded_model.features]
-        prediction = int(loaded_model.pipeline.predict(row)[0])
-        probability = float(loaded_model.pipeline.predict_proba(row)[0][1])
-        latency_ms = (time.perf_counter() - start) * 1000
+        with tracer.start_as_current_span("model.inference") as span:
+            span.set_attributes(
+                {
+                    "modelops.model": settings.model_name,
+                    "modelops.version": settings.model_version,
+                }
+            )
+            start = time.perf_counter()
+            row = pd.DataFrame([validated.model_dump()])[loaded_model.features]
+            prediction = int(loaded_model.pipeline.predict(row)[0])
+            probability = float(loaded_model.pipeline.predict_proba(row)[0][1])
+            elapsed = time.perf_counter() - start
+            span.set_attribute("modelops.prediction", prediction)
+        latency_ms = elapsed * 1000
+        INFERENCE_LATENCY.labels(settings.model_name, settings.model_version).observe(elapsed)
 
         logger.info(
             "prediction served model_name=%s model_version=%s latency_ms=%.3f prediction=%d",

@@ -1,0 +1,49 @@
+# Alerts the Grafana dashboards surface in their "Alerts" panel. No
+# Alertmanager in the compose stack - these show as firing in Prometheus and
+# Grafana, which is enough for a local control plane.
+groups:
+  - name: modelops
+    rules:
+      - alert: ModelOpsServiceDown
+        expr: up == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }} ({{ $labels.instance }}) is not answering /metrics"
+
+      - alert: ModelOpsWorkerStalled
+        # The worker sweeps every 15s by default; four missed sweeps means the
+        # control loop has stopped deciding anything.
+        expr: time() - modelops_worker_last_sweep_timestamp_seconds > 60
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "Worker hasn't finished a sweep for {{ $value | humanizeDuration }}"
+
+      - alert: ModelOpsVersionErrorRateHigh
+        expr: |
+          (
+            sum by (model, version) (rate(modelops_router_requests_total{status=~"5.."}[1m]))
+            / sum by (model, version) (rate(modelops_router_requests_total[1m]))
+          ) > 0.05
+          and sum by (model, version) (rate(modelops_router_requests_total[1m])) > 0.2
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.model }}/{{ $labels.version }} is failing {{ $value | humanizePercentage }} of requests"
+
+      - alert: ModelOpsVersionLatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, model, version) (rate(modelops_router_upstream_latency_seconds_bucket[1m]))
+          ) > 0.5
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.model }}/{{ $labels.version }} p95 latency is {{ $value | humanizeDuration }}"
+
+      - alert: ModelOpsReconcileFailing
+        expr: increase(modelops_reconcile_errors_total[5m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Router reconcile is failing ({{ $labels.reason }})"

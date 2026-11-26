@@ -1,0 +1,13 @@
+apiVersion: 1
+
+# Dashboards are files in observability/grafana/dashboards/, mounted read-only:
+# edit them there (or export from the UI and save over the file) - changes made
+# only in the Grafana UI are lost on the next container start.
+providers:
+  - name: modelops
+    folder: ModelOps
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

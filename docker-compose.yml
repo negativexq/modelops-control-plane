@@ -1,5 +1,8 @@
+# Every Python service (control plane, router, worker, model serving) runs the
+# same image with a different command; naming it once means one build, not eight.
 services:
   backend:
+    image: modelops-backend:dev
     build:
       context: ./backend
     ports:
@@ -26,6 +29,13 @@ services:
       BENCHMARK_CONTROL_PLANE_URL: http://localhost:8000
       BENCHMARK_LATENCY_FAULT_URL: http://model-serving-v2-good-latency-fault:8000
       BENCHMARK_ERROR_FAULT_URL: http://model-serving-v2-good-error-fault:8000
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_SERVICE_NAME: control-plane
+      # Most root traces here are the dashboard polling the API - keep 1 in 10.
+      # Requests that arrive inside a sampled trace (the router's metric push,
+      # the worker's calls) follow their parent's decision.
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: "0.1"
     command: >
       sh -c "alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -51,6 +61,7 @@ services:
   # Model serving: one container per (model_name, model_version).
   # Requires artifacts to exist first: `make prepare-models` from the repo root.
   model-serving-v1:
+    image: modelops-backend:dev
     build:
       context: ./backend
     ports:
@@ -62,9 +73,12 @@ services:
       MODEL_NAME: fraud-model
       MODEL_VERSION: v1
       ENVIRONMENT: development
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_SERVICE_NAME: model-serving-v1
     command: uvicorn app.serving.main:app --host 0.0.0.0 --port 8000 --reload
 
   model-serving-v2-good:
+    image: modelops-backend:dev
     build:
       context: ./backend
     ports:
@@ -76,9 +90,12 @@ services:
       MODEL_NAME: fraud-model
       MODEL_VERSION: v2-good
       ENVIRONMENT: development
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_SERVICE_NAME: model-serving-v2-good
     command: uvicorn app.serving.main:app --host 0.0.0.0 --port 8000 --reload
 
   model-serving-v2-quality-bad:
+    image: modelops-backend:dev
     build:
       context: ./backend
     ports:
@@ -90,6 +107,8 @@ services:
       MODEL_NAME: fraud-model
       MODEL_VERSION: v2-quality-bad
       ENVIRONMENT: development
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_SERVICE_NAME: model-serving-v2-quality-bad
     command: uvicorn app.serving.main:app --host 0.0.0.0 --port 8000 --reload
 
   # Benchmark-only fault-injectable instances (Sprint 9, made runtime-toggleable in
@@ -103,6 +122,7 @@ services:
   # it back off in a finally block afterward (see scripts/benchmarks/run_benchmark.py).
   # No docker CLI/socket access is needed anywhere to run a benchmark, on purpose.
   model-serving-v2-good-latency-fault:
+    image: modelops-backend:dev
     build:
       context: ./backend
     ports:
@@ -114,9 +134,12 @@ services:
       MODEL_NAME: fraud-model
       MODEL_VERSION: v2-good
       ENVIRONMENT: development
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_SERVICE_NAME: model-serving-v2-good-latency-fault
     command: uvicorn app.serving.main:app --host 0.0.0.0 --port 8000 --reload
 
   model-serving-v2-good-error-fault:
+    image: modelops-backend:dev
     build:
       context: ./backend
     ports:
@@ -128,6 +151,8 @@ services:
       MODEL_NAME: fraud-model
       MODEL_VERSION: v2-good
       ENVIRONMENT: development
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_SERVICE_NAME: model-serving-v2-good-error-fault
     command: uvicorn app.serving.main:app --host 0.0.0.0 --port 8000 --reload
 
   # Weighted traffic router: one {version, weight} split per model, served at
@@ -136,6 +161,7 @@ services:
   # control plane (the `backend` service) only ever pushes "version -> weight" via
   # PUT /router/config, never host/port.
   router:
+    image: modelops-backend:dev
     build:
       context: ./backend
     ports:
@@ -152,6 +178,12 @@ services:
       ROUTER_INITIAL_TARGETS: >-
         [{"version": "v1", "weight": 0.9}, {"version": "v2-good", "weight": 0.1}]
       ROUTER_CONTROL_PLANE_URL: http://backend:8000
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_SERVICE_NAME: model-router
+      # Every prediction starts a trace here; 1 in 10 is plenty to find slow or
+      # failing ones and keeps Jaeger's memory flat under benchmark load.
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: "0.1"
     command: uvicorn app.router.main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
       - model-serving-v1
@@ -163,6 +195,7 @@ services:
   # record-inconclusive) - no direct DB access, no in-memory rollout state, so
   # restarting it just resumes from whatever the control plane currently reports.
   worker:
+    image: modelops-backend:dev
     build:
       context: ./backend
     volumes:
@@ -174,7 +207,61 @@ services:
       # worker to actually act doesn't need to wait 15s+ per cycle - defaults to 15
       # for local `make dev`, unaffected unless this env var is set beforehand.
       WORKER_POLL_INTERVAL_SECONDS: "${WORKER_POLL_INTERVAL_SECONDS:-15}"
+      # GET /metrics for Prometheus (the worker has no other HTTP surface).
+      WORKER_METRICS_PORT: "9100"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_SERVICE_NAME: worker
     command: python -m app.worker.main
     depends_on:
       - backend
       - router
+
+  # --- Observability --------------------------------------------------------
+  # Every service above serves Prometheus metrics at /metrics (the worker on
+  # :9100) and exports traces to Jaeger over OTLP/HTTP. See
+  # observability/README.md for what each dashboard panel reads.
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus:/etc/prometheus:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    ports:
+      # 3000 is the dashboard's Next.js app.
+      - "3001:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      # Local development only: no login, anyone reaching :3001 can edit.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/modelops-overview.json
+      GF_USERS_DEFAULT_THEME: dark
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    depends_on:
+      - prometheus
+      - jaeger
+
+  # Traces: UI on :16686, OTLP/HTTP receiver on :4318 (what OTEL_EXPORTER_OTLP_ENDPOINT
+  # points at). In-memory storage - traces are gone after a restart.
+  jaeger:
+    image: jaegertracing/all-in-one:1.66.0
+    ports:
+      - "16686:16686"
+      - "4318:4318"
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      # In-memory storage is unbounded by default - under benchmark load it grew
+      # past 4 GB. The oldest traces are dropped beyond this.
+      MEMORY_MAX_TRACES: "20000"

@@ -14,13 +14,14 @@ without crossing that boundary.
 """
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.control_plane import service
+from app.control_plane import service, telemetry
 from app.control_plane.models import Deployment, DeploymentEvent
 from app.control_plane.router_gateway import RouterGateway, RouterUpdateError, StaleRevisionError
 
@@ -64,6 +65,7 @@ async def _reconcile_model(
     observed_revision = observed.get("revision", 0) if observed else 0
 
     if observed_deployment_id == desired_deployment.id and observed_revision == desired_revision:
+        telemetry.RECONCILE_RUNS.labels(model_name, "in_sync").inc()
         return ReconcileResult(reconciled=False, reason="already in sync", model_name=model_name)
 
     targets: list[dict[str, Any]] = desired_deployment.traffic_allocation.targets
@@ -76,6 +78,7 @@ async def _reconcile_model(
         # tick) already pushed this same or a newer revision between our GET and
         # this PUT - we're actually in sync now. Not an error, no event: nothing
         # this call did actually changed anything.
+        telemetry.RECONCILE_RUNS.labels(model_name, "in_sync").inc()
         return ReconcileResult(
             reconciled=False, reason="already in sync (race)", model_name=model_name
         )
@@ -86,6 +89,8 @@ async def _reconcile_model(
             exc,
         )
         service.record_router_reachability_change(db, desired_deployment.id, reachable=False)
+        telemetry.RECONCILE_RUNS.labels(model_name, "push_failed").inc()
+        telemetry.RECONCILE_ERRORS.labels("push_failed").inc()
         return ReconcileResult(reconciled=False, reason="router unreachable", model_name=model_name)
 
     db.add(
@@ -107,6 +112,7 @@ async def _reconcile_model(
         desired_revision,
     )
     db.commit()
+    telemetry.RECONCILE_RUNS.labels(model_name, "corrected").inc()
 
     return ReconcileResult(
         reconciled=True,
@@ -137,11 +143,14 @@ async def reconcile_router_state(
     reconciliation should be silent when there's nothing to reconcile, not spam
     the timeline every tick just for checking.
     """
+    telemetry.LAST_RECONCILE.set(time.time())
     desired = [d for d in all_authoritative_deployments(db) if d.traffic_allocation is not None]
     observed_list = await router_gateway.get_observed_configs()
     if observed_list is None:
         for deployment in desired:
             service.record_router_reachability_change(db, deployment.id, reachable=False)
+            telemetry.RECONCILE_RUNS.labels(deployment.model_name, "router_unreachable").inc()
+        telemetry.RECONCILE_ERRORS.labels("router_unreachable").inc()
         return [ReconcileResult(reconciled=False, reason="router unreachable")]
 
     observed_by_model = {

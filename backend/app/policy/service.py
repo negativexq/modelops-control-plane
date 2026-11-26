@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.control_plane import metrics_service
+from app.control_plane import metrics_service, telemetry
 from app.control_plane.models import Deployment, PolicyEvaluation, PolicyEvaluationResult
 from app.policy.config import PolicyConfig
 from app.policy.engine import PolicyCheckResult, evaluate_policies, overall_result
@@ -91,7 +91,11 @@ def run_evaluation(
         )
     db.commit()
 
-    return checks, overall_result(checks)
+    overall = overall_result(checks)
+    telemetry.POLICY_EVALUATIONS.labels(overall.value).inc()
+    for check in checks:
+        telemetry.POLICY_CHECKS.labels(check.policy_name, check.result.value).inc()
+    return checks, overall
 
 
 def list_policy_evaluations(db: Session, deployment_id: str) -> list[PolicyEvaluation]:

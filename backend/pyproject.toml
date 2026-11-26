@@ -19,6 +19,15 @@ dependencies = [
     # in turn shells out to `python -m locust` - so this needs to be a core runtime
     # dependency of the backend image, not just a dev/CLI tool.
     "locust>=2.31",
+    # Observability (app/observability/): Prometheus /metrics on every service,
+    # OpenTelemetry traces exported over OTLP/HTTP when OTEL_EXPORTER_OTLP_ENDPOINT
+    # is set.
+    "prometheus-client>=0.21",
+    "opentelemetry-api>=1.30",
+    "opentelemetry-sdk>=1.30",
+    "opentelemetry-exporter-otlp-proto-http>=1.30",
+    "opentelemetry-instrumentation-fastapi>=0.51b0",
+    "opentelemetry-instrumentation-httpx>=0.51b0",
 ]
 
 [project.optional-dependencies]

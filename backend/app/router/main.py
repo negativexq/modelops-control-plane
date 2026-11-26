@@ -9,7 +9,12 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
 
+from app.observability import tracing
+from app.observability.metrics import instrument_app
+from app.router import telemetry
 from app.router.client import UpstreamUnavailableError, check_ready, forward_predict
 from app.router.config import (
     RouterConfig,
@@ -58,16 +63,34 @@ async def _fetch_control_plane_allocations(
         return []
 
 
-def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None) -> FastAPI:
+def create_app(
+    settings: RouterSettings,
+    client: httpx.AsyncClient | None = None,
+    tracer_provider: TracerProvider | None = None,
+) -> FastAPI:
     """Build the traffic router app.
 
     `client` is injectable so tests can point the router at in-process fake serving
     apps (via httpx mounts/MockTransport) instead of real sockets. When omitted, a
     real httpx.AsyncClient is created and owned (and closed) by this app's lifespan.
+
+    `tracer_provider` defaults to the one configured from OTEL_* env vars (none
+    when tracing is off - see app/observability/tracing.py); tests pass their own.
     """
-    store = RouterConfigStore(settings.to_router_config())
+    provider = tracer_provider or tracing.configured_provider("model-router")
+    initial = settings.to_router_config()
+    store = RouterConfigStore(initial)
+    telemetry.record_split(initial, None)
     owns_client = client is None
     http_client = client if client is not None else httpx.AsyncClient()
+    # Injects traceparent into every outbound call - /ready, /predict and the
+    # metric push - so the model service's spans join the router's trace.
+    tracing.instrument_httpx(http_client, provider)
+
+    def _apply(config: RouterConfig) -> None:
+        previous = store.get(config.model_name)
+        store.set(config)
+        telemetry.record_split(config, previous)
 
     # Fire-and-forget metric pushes (see route_predict below). Tracked in a set with a
     # done-callback purely so asyncio keeps a strong reference until each task
@@ -107,13 +130,15 @@ def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None
             for synced in await _fetch_control_plane_allocations(
                 http_client, settings.control_plane_url, settings.upstream_timeout_seconds
             ):
-                store.set(synced)
+                _apply(synced)
                 logger.info("synced traffic allocation from control plane: %s", synced)
         yield
         if owns_client:
             await http_client.aclose()
 
     app = FastAPI(title="ModelOps Traffic Router", lifespan=lifespan)
+    instrument_app(app, "router")
+    tracing.instrument_fastapi(app, provider)
     app.state.pending_metric_tasks = pending_metric_tasks  # test introspection only
 
     def _resolve(version: str) -> str:
@@ -174,7 +199,7 @@ def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None
                 ),
             )
 
-        store.set(config)
+        _apply(config)
         logger.info(
             "router config updated: model=%s deployment=%s revision=%s targets=%s",
             config.model_name,
@@ -218,6 +243,14 @@ def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None
         config = _config_for(model_name)
         target = choose_target(config)
         base_url = _resolve(target.version)
+        trace.get_current_span().set_attributes(
+            {
+                "modelops.model": model_name,
+                "modelops.version": target.version,
+                "modelops.deployment_id": config.deployment_id or "",
+                "modelops.config_revision": config.revision,
+            }
+        )
 
         ready = await check_ready(http_client, base_url, settings.upstream_timeout_seconds)
         if not ready:
@@ -227,6 +260,7 @@ def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None
                 target.version,
                 base_url,
             )
+            telemetry.ROUTED_REQUESTS.labels(model_name, target.version, "503").inc()
             raise HTTPException(
                 status_code=503,
                 detail=f"Target '{target.version}' is not ready",
@@ -239,8 +273,14 @@ def create_app(settings: RouterSettings, client: httpx.AsyncClient | None = None
             )
         except UpstreamUnavailableError as exc:
             logger.warning("routing failed: %s", exc)
+            telemetry.ROUTED_REQUESTS.labels(model_name, target.version, "503").inc()
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        latency_ms = (time.perf_counter() - start) * 1000
+        elapsed = time.perf_counter() - start
+        latency_ms = elapsed * 1000
+        telemetry.UPSTREAM_LATENCY.labels(model_name, target.version).observe(elapsed)
+        telemetry.ROUTED_REQUESTS.labels(
+            model_name, target.version, str(response.status_code)
+        ).inc()
 
         try:
             body = response.json()

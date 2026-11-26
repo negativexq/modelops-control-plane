@@ -70,8 +70,8 @@ jobs:
             exit 1
           fi
 
-  # Brings up the real docker-compose stack (9 containers: 8 HTTP-exposed services
-  # + the worker, which has no HTTP surface) and exercises it over HTTP exactly like
+  # Brings up the real docker-compose stack (9 ModelOps containers: 8 HTTP-exposed
+  # services + the worker; plus Prometheus, Grafana and Jaeger) and exercises it over HTTP exactly like
   # a human demoing the platform would - including waiting for the real automated
   # worker to actually act (not a manual call standing in for it): a real automatic
   # rollback triggered by an injected latency fault, and a real automatic promotion
@@ -107,6 +107,12 @@ jobs:
         run: docker compose up -d --build
       - name: Run the integration smoke test
         run: .venv/bin/python -m scripts.ci_smoke_test
+        working-directory: backend
+      # Prometheus scrapes every service, the alert rules and Grafana dashboards
+      # load, the smoke test's real promote/rollback show up in the decision
+      # counters, and its predictions' traces reach a model service in Jaeger.
+      - name: Check metrics, dashboards and traces
+        run: .venv/bin/python -m scripts.check_observability
         working-directory: backend
       # Browser tests against the same live stack, after the smoke test so there's
       # real rollout history to render. They use their own model name (e2e-ui) and
