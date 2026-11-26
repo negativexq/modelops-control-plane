@@ -13,6 +13,7 @@ from app.control_plane.schemas import (
     ComparisonOut,
     CreateDeploymentRequest,
     DeploymentOut,
+    GatewayOut,
     MetricIn,
     MetricsOut,
     MetricsTimeseriesOut,
@@ -438,6 +439,17 @@ async def get_observed_router_state(router_gateway: RouterGatewayDep) -> Observe
     return ObservedRouterOut(
         reachable=True, configs=[ObservedModelConfig.model_validate(c) for c in observed]
     )
+
+
+@reconcile_router.get("/gateway")
+async def get_gateway_stats(router_gateway: RouterGatewayDep) -> GatewayOut:
+    """Read-only passthrough of the router's live gateway view - what the
+    dashboard's flow page animates from. Like /observed, `reachable` tells a
+    router that's down apart from one with no traffic."""
+    stats = await router_gateway.get_gateway_stats()
+    if stats is None:
+        return GatewayOut(reachable=False, policy=None, models=[])
+    return GatewayOut.model_validate({"reachable": True, **stats})
 
 
 @reconcile_router.post("/reconcile")

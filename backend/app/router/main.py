@@ -2,12 +2,13 @@ import asyncio
 import logging
 import random
 import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -23,9 +24,23 @@ from app.router.config import (
     TargetWeight,
     router_settings,
 )
+from app.router.gateway import BREAKER_STATE_VALUE, GatewayState, outcome_of, sticky_target
 from app.router.metrics import send_metric
 
 logger = logging.getLogger("model_router")
+
+REQUEST_ID_HEADER = "X-Request-ID"
+ROUTING_KEY_HEADER = "X-Routing-Key"
+
+
+class GatewayError(Exception):
+    """A request the gateway answers itself, without a model's response."""
+
+    def __init__(self, status_code: int, detail: str, retry_after: int | None = None) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+        self.retry_after = retry_after
 
 
 def choose_target(config: RouterConfig) -> TargetWeight:
@@ -78,6 +93,13 @@ def create_app(
     when tracing is off - see app/observability/tracing.py); tests pass their own.
     """
     provider = tracer_provider or tracing.configured_provider("model-router")
+    gateway = GatewayState(
+        breaker_failure_threshold=settings.breaker_failure_threshold,
+        breaker_cooldown_seconds=settings.breaker_cooldown_seconds,
+        ready_cache_seconds=settings.ready_cache_seconds,
+        rate_limit_rps=settings.rate_limit_rps,
+        rate_limit_burst=settings.rate_limit_burst,
+    )
     initial = settings.to_router_config()
     store = RouterConfigStore(initial)
     telemetry.record_split(initial, None)
@@ -140,6 +162,7 @@ def create_app(
     instrument_app(app, "router")
     tracing.instrument_fastapi(app, provider)
     app.state.pending_metric_tasks = pending_metric_tasks  # test introspection only
+    app.state.gateway = gateway  # test introspection only
 
     def _resolve(version: str) -> str:
         base_url = settings.resolve_base_url(version)
@@ -239,48 +262,109 @@ def create_app(
             "models": models,
         }
 
-    async def _route(model_name: str, payload: dict[str, Any]) -> JSONResponse:
+    async def _is_ready(version: str, base_url: str) -> bool:
+        cached = gateway.readiness.get(version)
+        if cached is not None:
+            return cached
+        ready = await check_ready(http_client, base_url, settings.upstream_timeout_seconds)
+        gateway.readiness.put(version, ready)
+        return ready
+
+    def _unanswered(
+        model_name: str,
+        config: RouterConfig,
+        version: str,
+        outcome: str,
+        started: float,
+        *,
+        trip_breaker: bool,
+    ) -> None:
+        """A request the picked version never answered. Counted against that
+        version and reported to the control plane as a 503 (with the time the
+        client waited for it), so a canary that's down shows up in its error
+        rate instead of just going quiet."""
+        breaker = gateway.breaker(version)
+        if trip_breaker:
+            breaker.record_failure()
+        telemetry.BREAKER_STATE.labels(version).set(BREAKER_STATE_VALUE[breaker.state])
+        telemetry.ROUTED_REQUESTS.labels(model_name, version, "503").inc()
+        waited_ms = (time.perf_counter() - started) * 1000
+        gateway.stats(model_name, version).record(outcome, None)
+        if config.deployment_id:
+            _emit_metric(config.deployment_id, version, waited_ms, 503, None, None)
+
+    async def _route(
+        model_name: str, payload: dict[str, Any], routing_key: str | None
+    ) -> tuple[JSONResponse, str]:
+        started = time.perf_counter()
         config = _config_for(model_name)
-        target = choose_target(config)
-        base_url = _resolve(target.version)
+        if not gateway.admit(model_name):
+            telemetry.RATE_LIMITED.labels(model_name).inc()
+            raise GatewayError(
+                429,
+                f"Rate limit for model '{model_name}' exceeded",
+                gateway.rate_limit_retry_after(model_name),
+            )
+        if routing_key:
+            target = sticky_target(config.targets, f"{config.deployment_id}:{routing_key}")
+            gateway.count_sticky(model_name)
+        else:
+            target = choose_target(config)
+        version = target.version
+        base_url = _resolve(version)
         trace.get_current_span().set_attributes(
             {
                 "modelops.model": model_name,
-                "modelops.version": target.version,
+                "modelops.version": version,
                 "modelops.deployment_id": config.deployment_id or "",
                 "modelops.config_revision": config.revision,
+                "modelops.sticky": routing_key is not None,
             }
         )
 
-        ready = await check_ready(http_client, base_url, settings.upstream_timeout_seconds)
-        if not ready:
+        breaker = gateway.breaker(version)
+        if not breaker.allow():
+            # Fail fast rather than queue more requests on a version that keeps
+            # failing - and never fail over: see app/router/gateway.py.
+            _unanswered(model_name, config, version, "rejected", started, trip_breaker=False)
+            raise GatewayError(
+                503,
+                f"Target '{version}' circuit breaker is open",
+                breaker.retry_after_seconds(),
+            )
+
+        if not await _is_ready(version, base_url):
             logger.warning(
                 "routing refused: target %s (%s) is not ready - rejecting request, "
                 "not rerouting to another target",
-                target.version,
+                version,
                 base_url,
             )
-            telemetry.ROUTED_REQUESTS.labels(model_name, target.version, "503").inc()
-            raise HTTPException(
-                status_code=503,
-                detail=f"Target '{target.version}' is not ready",
-            )
+            _unanswered(model_name, config, version, "gateway_error", started, trip_breaker=True)
+            raise GatewayError(503, f"Target '{version}' is not ready")
 
+        stats = gateway.stats(model_name, version)
+        stats.in_flight += 1
         start = time.perf_counter()
         try:
             response = await forward_predict(
-                http_client, target.version, base_url, payload, settings.upstream_timeout_seconds
+                http_client, version, base_url, payload, settings.upstream_timeout_seconds
             )
         except UpstreamUnavailableError as exc:
             logger.warning("routing failed: %s", exc)
-            telemetry.ROUTED_REQUESTS.labels(model_name, target.version, "503").inc()
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            # Don't trust a cached "ready" for a version that just refused a connection.
+            gateway.readiness.put(version, False)
+            _unanswered(model_name, config, version, "gateway_error", started, trip_breaker=True)
+            raise GatewayError(503, str(exc)) from exc
+        finally:
+            stats.in_flight -= 1
         elapsed = time.perf_counter() - start
         latency_ms = elapsed * 1000
-        telemetry.UPSTREAM_LATENCY.labels(model_name, target.version).observe(elapsed)
-        telemetry.ROUTED_REQUESTS.labels(
-            model_name, target.version, str(response.status_code)
-        ).inc()
+        breaker.record_success()
+        telemetry.BREAKER_STATE.labels(version).set(BREAKER_STATE_VALUE[breaker.state])
+        telemetry.UPSTREAM_LATENCY.labels(model_name, version).observe(elapsed)
+        telemetry.ROUTED_REQUESTS.labels(model_name, version, str(response.status_code)).inc()
+        stats.record(outcome_of(response.status_code), latency_ms)
 
         try:
             body = response.json()
@@ -288,30 +372,95 @@ def create_app(
             body = {"detail": response.text}
 
         if isinstance(body, dict):
-            body.setdefault("routed_to", target.version)
+            body.setdefault("routed_to", version)
 
         if config.deployment_id:
             prediction = body.get("prediction") if isinstance(body, dict) else None
             prediction_id = body.get("prediction_id") if isinstance(body, dict) else None
             _emit_metric(
                 config.deployment_id,
-                target.version,
+                version,
                 latency_ms,
                 response.status_code,
                 prediction,
                 prediction_id,
             )
 
-        return JSONResponse(status_code=response.status_code, content=body)
+        return JSONResponse(status_code=response.status_code, content=body), version
+
+    async def _handle(model_name: str, payload: dict[str, Any], request: Request) -> JSONResponse:
+        request_id = request.headers.get(REQUEST_ID_HEADER) or uuid.uuid4().hex
+        trace.get_current_span().set_attribute("modelops.request_id", request_id)
+        headers = {REQUEST_ID_HEADER: request_id}
+        try:
+            response, version = await _route(
+                model_name, payload, request.headers.get(ROUTING_KEY_HEADER)
+            )
+        except GatewayError as exc:
+            if exc.retry_after is not None:
+                headers["Retry-After"] = str(exc.retry_after)
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail, "request_id": request_id},
+                headers=headers,
+            )
+        response.headers.update({**headers, "X-Routed-To": version})
+        return response
 
     @app.post("/router/predict")
-    async def route_predict(payload: dict[str, Any]) -> JSONResponse:
+    async def route_predict(payload: dict[str, Any], request: Request) -> JSONResponse:
         """Routes for the default model (ROUTER_MODEL_NAME)."""
-        return await _route(settings.model_name, payload)
+        return await _handle(settings.model_name, payload, request)
 
     @app.post("/router/models/{model_name}/predict")
-    async def route_model_predict(model_name: str, payload: dict[str, Any]) -> JSONResponse:
-        return await _route(model_name, payload)
+    async def route_model_predict(
+        model_name: str, payload: dict[str, Any], request: Request
+    ) -> JSONResponse:
+        return await _handle(model_name, payload, request)
+
+    @app.get("/router/gateway")
+    def gateway_stats() -> dict[str, Any]:
+        """Live view of the gateway: per model, each version's weight, breaker,
+        readiness and a rolling 60-second window of traffic. What the
+        dashboard's flow view animates from."""
+        rate, burst = gateway.rate_limit
+        models = []
+        for config in store.all():
+            total_weight = sum(t.weight for t in config.targets) or 1.0
+            versions = []
+            for target in config.targets:
+                breaker = gateway.breaker(target.version)
+                versions.append(
+                    {
+                        "version": target.version,
+                        "weight": target.weight / total_weight,
+                        "breaker": breaker.state.value,
+                        "breaker_opened_total": breaker.opened_total,
+                        "ready": gateway.readiness.peek(target.version),
+                        **gateway.stats(config.model_name, target.version).snapshot(),
+                    }
+                )
+            models.append(
+                {
+                    "model_name": config.model_name,
+                    "deployment_id": config.deployment_id,
+                    "revision": config.revision,
+                    "rate_limited_total": gateway.rate_limited.get(config.model_name, 0),
+                    "sticky_requests_total": gateway.sticky_requests.get(config.model_name, 0),
+                    "versions": versions,
+                }
+            )
+        return {
+            "policy": {
+                "breaker_failure_threshold": settings.breaker_failure_threshold,
+                "breaker_cooldown_seconds": settings.breaker_cooldown_seconds,
+                "ready_cache_seconds": settings.ready_cache_seconds,
+                "rate_limit_rps": rate,
+                "rate_limit_burst": burst or rate,
+                "upstream_timeout_seconds": settings.upstream_timeout_seconds,
+            },
+            "models": models,
+        }
 
     return app
 

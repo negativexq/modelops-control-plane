@@ -81,6 +81,19 @@ class RouterSettings(BaseSettings):
     # router's to make on their behalf.
     upstream_timeout_seconds: float = 5.0
 
+    # Gateway behaviour - see app/router/gateway.py.
+    # Consecutive gateway failures (unreachable / timed out / not ready) that open
+    # a version's circuit breaker; 0 turns the breaker off.
+    breaker_failure_threshold: int = 5
+    # How long an open breaker fails fast before letting one trial request through.
+    breaker_cooldown_seconds: float = 5.0
+    # How long a version's /ready answer is reused; 0 probes on every request.
+    ready_cache_seconds: float = 1.0
+    # Requests per second each model may take; 0 (the default) means unlimited.
+    rate_limit_rps: float = 0.0
+    # Bucket size, i.e. how big a burst is let through at once; 0 = rate_limit_rps.
+    rate_limit_burst: float = 0.0
+
     def to_router_config(self) -> RouterConfig:
         return RouterConfig(model_name=self.model_name, targets=list(self.initial_targets))
 

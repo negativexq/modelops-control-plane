@@ -277,6 +277,26 @@ curl -X POST localhost:8080/router/predict -d '{...}' -H 'content-type: applicat
 - A target that's unhealthy or unreachable returns **503**, never a silent
   fallback to another target ([why](docs/DESIGN_NOTES.md#traffic-router)).
 
+### Gateway
+
+```bash
+curl -H 'X-Routing-Key: user-42' -H 'X-Request-ID: demo-1' -H 'content-type: application/json' \
+  -X POST localhost:8080/router/models/fraud-model/predict -d @payload.json
+curl localhost:8000/api/router/gateway   # live view, what the Gateway page draws
+```
+
+- Sticky routing by `X-Routing-Key` (weighted rendezvous hashing: ramping the
+  canary only moves users onto it), request IDs, a 1s readiness cache.
+- Circuit breaker per version for unreachable / not-ready upstreams: fail fast
+  with `Retry-After`, half-open trial, never fail over to another version.
+- Unanswered requests are reported to the control plane as 503s, so a canary
+  that's down is rolled back instead of looking idle.
+- Optional per-model rate limit (429 + `Retry-After`).
+- Dashboard **Gateway** page: clients → gateway → versions as animated beams
+  (width = share, speed = request rate, red = breaker open), and under each live
+  rollout the control loop: metrics → windows → policy engine with intervals →
+  worker → config push back to the gateway.
+
 ### Deployment lifecycle
 
 ```bash
@@ -580,7 +600,7 @@ curl localhost:8000/api/router-config/fraud-model   # now finds a PROMOTED/
 
 ```bash
 make dev             # bring up the whole stack via docker compose
-make test            # backend tests (pytest) - 340 tests
+make test            # backend tests (pytest) - 357 tests
 make coverage        # same, plus an HTML report at backend/htmlcov/index.html
 make lint            # backend (ruff, mypy) + frontend (eslint, tsc) lint/type-check
 make ci-smoke-test   # the same real-stack check CI runs - needs `make dev` running
@@ -603,7 +623,7 @@ every push/PR:
 
 | Job | What it checks | Runtime |
 |---|---|---|
-| `backend` | `ruff`, `mypy --strict`, `pytest` (340 tests, mocked collaborators) | seconds |
+| `backend` | `ruff`, `mypy --strict`, `pytest` (357 tests, mocked collaborators) | seconds |
 | `frontend` | `eslint`, `tsc --noEmit`, `next build` | seconds |
 | `api-contract` | Regenerates the OpenAPI schema and the dashboard's TypeScript types; fails if either differs from what's committed | seconds |
 | `integration` | Builds and boots the **real** stack (8 HTTP-exposed services + the worker, plus Prometheus, Grafana and Jaeger), then runs [`backend/scripts/ci_smoke_test.py`](backend/scripts/ci_smoke_test.py)'s six scenarios, [`check_observability.py`](backend/scripts/check_observability.py) (every target scraped, alerts and dashboards loaded, the smoke test's decisions counted, traces reaching a model service) and the Playwright suite in [`frontend/e2e`](frontend/e2e) - gated on the three jobs above passing first | a few minutes |

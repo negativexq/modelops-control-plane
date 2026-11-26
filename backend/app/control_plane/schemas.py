@@ -307,6 +307,62 @@ class ObservedRouterOut(BaseModel):
     configs: list[ObservedModelConfig]
 
 
+class GatewayOutcomes(BaseModel):
+    """Requests in the rolling window by how they ended. `gateway_error`: the
+    version couldn't be reached or wasn't ready; `rejected`: its circuit
+    breaker was open, so the router answered 503 without trying."""
+
+    ok: int
+    client_error: int
+    server_error: int
+    gateway_error: int
+    rejected: int
+
+
+class GatewayVersionOut(BaseModel):
+    version: str
+    weight: float
+    breaker: Literal["closed", "open", "half_open"]
+    breaker_opened_total: int
+    ready: bool | None
+    requests_per_second: float
+    in_flight: int
+    total: int
+    window_seconds: float
+    window_requests: int
+    outcomes: GatewayOutcomes
+    error_rate: float | None
+    p50_latency_ms: float | None
+    p95_latency_ms: float | None
+
+
+class GatewayModelOut(BaseModel):
+    model_name: str
+    deployment_id: str | None
+    revision: int
+    rate_limited_total: int
+    sticky_requests_total: int
+    versions: list[GatewayVersionOut]
+
+
+class GatewayPolicyOut(BaseModel):
+    breaker_failure_threshold: int
+    breaker_cooldown_seconds: float
+    ready_cache_seconds: float
+    rate_limit_rps: float
+    rate_limit_burst: float
+    upstream_timeout_seconds: float
+
+
+class GatewayOut(BaseModel):
+    """GET /router/gateway, passed through. `reachable` false means the router
+    didn't answer, and `policy`/`models` are empty."""
+
+    reachable: bool
+    policy: GatewayPolicyOut | None
+    models: list[GatewayModelOut]
+
+
 class ReconcileModelOut(BaseModel):
     model_name: str | None
     reconciled: bool

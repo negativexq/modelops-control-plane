@@ -57,6 +57,7 @@ serves the same format on `:9100`. All names start with `modelops_`.
 | `router_requests_total` | model, version, status | router |
 | `router_upstream_latency_seconds` | model, version | router |
 | `router_traffic_weight`, `router_config_revision` | model, version / model | router |
+| `router_breaker_state` (0 closed, 1 half-open, 2 open), `router_rate_limited_total` | version / model | router |
 | `serving_inference_seconds` | model, version | model serving |
 | `decisions_total` | outcome, trigger (automatic/manual) | backend |
 | `policy_evaluations_total`, `policy_checks_total` | result / policy, result | backend |

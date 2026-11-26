@@ -94,6 +94,21 @@ class RouterGateway:
             logger.warning("router config fetch failed during reconcile: %s", exc)
             return None
 
+    async def get_gateway_stats(self) -> dict[str, Any] | None:
+        """The router's live gateway view (GET /router/gateway): per model and
+        version, breaker state, readiness and a rolling window of traffic. None
+        if the router is unreachable."""
+        try:
+            response = await self._client.get(
+                f"{self._base_url}/router/gateway", timeout=self._timeout
+            )
+            response.raise_for_status()
+            result: dict[str, Any] = response.json()
+            return result
+        except httpx.HTTPError as exc:
+            logger.warning("router gateway stats fetch failed: %s", exc)
+            return None
+
 
 def get_router_gateway(request: Request) -> RouterGateway:
     return RouterGateway(

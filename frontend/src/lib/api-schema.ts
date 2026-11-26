@@ -584,6 +584,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/router/gateway": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Gateway Stats
+         * @description Read-only passthrough of the router's live gateway view - what the
+         *     dashboard's flow page animates from. Like /observed, `reachable` tells a
+         *     router that's down apart from one with no traffic.
+         */
+        get: operations["get_gateway_stats_api_router_gateway_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/router/observed": {
         parameters: {
             query?: never;
@@ -893,6 +915,99 @@ export interface components {
             outcomes: components["schemas"]["OutcomeCounts"];
             /** Total */
             total: number;
+        };
+        /** GatewayModelOut */
+        GatewayModelOut: {
+            /** Deployment Id */
+            deployment_id: string | null;
+            /** Model Name */
+            model_name: string;
+            /** Rate Limited Total */
+            rate_limited_total: number;
+            /** Revision */
+            revision: number;
+            /** Sticky Requests Total */
+            sticky_requests_total: number;
+            /** Versions */
+            versions: components["schemas"]["GatewayVersionOut"][];
+        };
+        /**
+         * GatewayOut
+         * @description GET /router/gateway, passed through. `reachable` false means the router
+         *     didn't answer, and `policy`/`models` are empty.
+         */
+        GatewayOut: {
+            /** Models */
+            models: components["schemas"]["GatewayModelOut"][];
+            policy: components["schemas"]["GatewayPolicyOut"] | null;
+            /** Reachable */
+            reachable: boolean;
+        };
+        /**
+         * GatewayOutcomes
+         * @description Requests in the rolling window by how they ended. `gateway_error`: the
+         *     version couldn't be reached or wasn't ready; `rejected`: its circuit
+         *     breaker was open, so the router answered 503 without trying.
+         */
+        GatewayOutcomes: {
+            /** Client Error */
+            client_error: number;
+            /** Gateway Error */
+            gateway_error: number;
+            /** Ok */
+            ok: number;
+            /** Rejected */
+            rejected: number;
+            /** Server Error */
+            server_error: number;
+        };
+        /** GatewayPolicyOut */
+        GatewayPolicyOut: {
+            /** Breaker Cooldown Seconds */
+            breaker_cooldown_seconds: number;
+            /** Breaker Failure Threshold */
+            breaker_failure_threshold: number;
+            /** Rate Limit Burst */
+            rate_limit_burst: number;
+            /** Rate Limit Rps */
+            rate_limit_rps: number;
+            /** Ready Cache Seconds */
+            ready_cache_seconds: number;
+            /** Upstream Timeout Seconds */
+            upstream_timeout_seconds: number;
+        };
+        /** GatewayVersionOut */
+        GatewayVersionOut: {
+            /**
+             * Breaker
+             * @enum {string}
+             */
+            breaker: "closed" | "open" | "half_open";
+            /** Breaker Opened Total */
+            breaker_opened_total: number;
+            /** Error Rate */
+            error_rate: number | null;
+            /** In Flight */
+            in_flight: number;
+            outcomes: components["schemas"]["GatewayOutcomes"];
+            /** P50 Latency Ms */
+            p50_latency_ms: number | null;
+            /** P95 Latency Ms */
+            p95_latency_ms: number | null;
+            /** Ready */
+            ready: boolean | null;
+            /** Requests Per Second */
+            requests_per_second: number;
+            /** Total */
+            total: number;
+            /** Version */
+            version: string;
+            /** Weight */
+            weight: number;
+            /** Window Requests */
+            window_requests: number;
+            /** Window Seconds */
+            window_seconds: number;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -2479,6 +2594,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_gateway_stats_api_router_gateway_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GatewayOut"];
                 };
             };
         };

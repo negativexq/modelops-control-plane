@@ -30,6 +30,18 @@ CONFIG_REVISION = Gauge(
     ["model"],
 )
 
+BREAKER_STATE = Gauge(
+    "modelops_router_breaker_state",
+    "Circuit breaker per model version: 0 closed, 1 half-open (one trial request "
+    "allowed), 2 open (failing fast).",
+    ["version"],
+)
+RATE_LIMITED = Counter(
+    "modelops_router_rate_limited_total",
+    "Prediction requests answered 429 because the model was over its rate limit.",
+    ["model"],
+)
+
 
 def record_split(config: RouterConfig, previous: RouterConfig | None) -> None:
     """Replace the model's weight series: versions that left the split are

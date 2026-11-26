@@ -31,6 +31,37 @@ Safety behavior:
   router returns **503 and logs a warning** — it does **not** silently fall back to
   another target. Silent failover would let a broken canary hide behind another
   target's success rate, defeating the point of a canary rollout.
+- **Unanswered requests are reported, not dropped.** A request the picked
+  version never answered (unreachable, not ready, breaker open) is pushed to the
+  control plane as a 503 against that version, with the time the client waited.
+  Before, those requests simply never reached the metrics table: a canary that
+  was down looked like a canary with no traffic, sat at `minimum_requests`
+  INCONCLUSIVE and was eventually frozen for a human. Now its error rate climbs
+  and the policy engine rolls it back.
+- **Circuit breaker per version, fail fast, still no failover.** After 5
+  consecutive gateway failures (`ROUTER_BREAKER_FAILURE_THRESHOLD`) a version's
+  breaker opens: requests routed to it get an immediate 503 with `Retry-After`
+  for 5s (`ROUTER_BREAKER_COOLDOWN_SECONDS`), then one trial request decides.
+  Clients stop waiting out a 5s timeout on a dead upstream, and the upstream
+  isn't hammered while it restarts. Model 500s never count toward it: whether a
+  model is bad is the canary analysis' call. And an open breaker still never
+  sends the request to another version, for the reason above.
+- **Readiness is cached for 1s** (`ROUTER_READY_CACHE_SECONDS`), not probed per
+  request. A per-request `/ready` was a second upstream round trip on every
+  prediction. An unreachable `/predict` marks the version not-ready at once.
+- **Sticky routing.** `X-Routing-Key` pins a caller to one version with weighted
+  rendezvous hashing (`score = -weight / ln(hash(key, version))`, highest wins):
+  each version still gets its share, and when the canary's weight goes up only
+  keys moving *to* the canary move. A user isn't bounced between versions
+  mid-rollout. The key is salted with the deployment id, so a new rollout
+  reshuffles.
+- **Rate limit** per model, a token bucket (`ROUTER_RATE_LIMIT_RPS`, off by
+  default): 429 with `Retry-After`, checked before a version is picked, so it
+  never counts against one.
+- Every response carries `X-Request-ID` (the caller's or a new one, also on the
+  trace span) and `X-Routed-To`. `GET /router/gateway` (passed through as
+  `GET /api/router/gateway`) serves a rolling 60-second view per version, which
+  the dashboard's Gateway page animates.
 - Upstream calls use a **5s timeout and no retries**
   (`ROUTER_UPSTREAM_TIMEOUT_SECONDS`). This is deliberate: retries would mask the
   transient failures a promotion decision needs to see, and could double-apply side

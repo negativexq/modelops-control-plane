@@ -558,6 +558,269 @@
         "title": "FleetSummary",
         "type": "object"
       },
+      "GatewayModelOut": {
+        "properties": {
+          "deployment_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployment Id"
+          },
+          "model_name": {
+            "title": "Model Name",
+            "type": "string"
+          },
+          "rate_limited_total": {
+            "title": "Rate Limited Total",
+            "type": "integer"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "sticky_requests_total": {
+            "title": "Sticky Requests Total",
+            "type": "integer"
+          },
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/GatewayVersionOut"
+            },
+            "title": "Versions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "model_name",
+          "deployment_id",
+          "revision",
+          "rate_limited_total",
+          "sticky_requests_total",
+          "versions"
+        ],
+        "title": "GatewayModelOut",
+        "type": "object"
+      },
+      "GatewayOut": {
+        "description": "GET /router/gateway, passed through. `reachable` false means the router\ndidn't answer, and `policy`/`models` are empty.",
+        "properties": {
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/GatewayModelOut"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GatewayPolicyOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reachable": {
+            "title": "Reachable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "reachable",
+          "policy",
+          "models"
+        ],
+        "title": "GatewayOut",
+        "type": "object"
+      },
+      "GatewayOutcomes": {
+        "description": "Requests in the rolling window by how they ended. `gateway_error`: the\nversion couldn't be reached or wasn't ready; `rejected`: its circuit\nbreaker was open, so the router answered 503 without trying.",
+        "properties": {
+          "client_error": {
+            "title": "Client Error",
+            "type": "integer"
+          },
+          "gateway_error": {
+            "title": "Gateway Error",
+            "type": "integer"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "integer"
+          },
+          "rejected": {
+            "title": "Rejected",
+            "type": "integer"
+          },
+          "server_error": {
+            "title": "Server Error",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ok",
+          "client_error",
+          "server_error",
+          "gateway_error",
+          "rejected"
+        ],
+        "title": "GatewayOutcomes",
+        "type": "object"
+      },
+      "GatewayPolicyOut": {
+        "properties": {
+          "breaker_cooldown_seconds": {
+            "title": "Breaker Cooldown Seconds",
+            "type": "number"
+          },
+          "breaker_failure_threshold": {
+            "title": "Breaker Failure Threshold",
+            "type": "integer"
+          },
+          "rate_limit_burst": {
+            "title": "Rate Limit Burst",
+            "type": "number"
+          },
+          "rate_limit_rps": {
+            "title": "Rate Limit Rps",
+            "type": "number"
+          },
+          "ready_cache_seconds": {
+            "title": "Ready Cache Seconds",
+            "type": "number"
+          },
+          "upstream_timeout_seconds": {
+            "title": "Upstream Timeout Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "breaker_failure_threshold",
+          "breaker_cooldown_seconds",
+          "ready_cache_seconds",
+          "rate_limit_rps",
+          "rate_limit_burst",
+          "upstream_timeout_seconds"
+        ],
+        "title": "GatewayPolicyOut",
+        "type": "object"
+      },
+      "GatewayVersionOut": {
+        "properties": {
+          "breaker": {
+            "enum": [
+              "closed",
+              "open",
+              "half_open"
+            ],
+            "title": "Breaker",
+            "type": "string"
+          },
+          "breaker_opened_total": {
+            "title": "Breaker Opened Total",
+            "type": "integer"
+          },
+          "error_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Rate"
+          },
+          "in_flight": {
+            "title": "In Flight",
+            "type": "integer"
+          },
+          "outcomes": {
+            "$ref": "#/components/schemas/GatewayOutcomes"
+          },
+          "p50_latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P50 Latency Ms"
+          },
+          "p95_latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "P95 Latency Ms"
+          },
+          "ready": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ready"
+          },
+          "requests_per_second": {
+            "title": "Requests Per Second",
+            "type": "number"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          },
+          "weight": {
+            "title": "Weight",
+            "type": "number"
+          },
+          "window_requests": {
+            "title": "Window Requests",
+            "type": "integer"
+          },
+          "window_seconds": {
+            "title": "Window Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "version",
+          "weight",
+          "breaker",
+          "breaker_opened_total",
+          "ready",
+          "requests_per_second",
+          "in_flight",
+          "total",
+          "window_seconds",
+          "window_requests",
+          "outcomes",
+          "error_rate",
+          "p50_latency_ms",
+          "p95_latency_ms"
+        ],
+        "title": "GatewayVersionOut",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -3652,6 +3915,28 @@
         "summary": "Get Router Config",
         "tags": [
           "router-config"
+        ]
+      }
+    },
+    "/api/router/gateway": {
+      "get": {
+        "description": "Read-only passthrough of the router's live gateway view - what the\ndashboard's flow page animates from. Like /observed, `reachable` tells a\nrouter that's down apart from one with no traffic.",
+        "operationId": "get_gateway_stats_api_router_gateway_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Gateway Stats",
+        "tags": [
+          "router"
         ]
       }
     },
