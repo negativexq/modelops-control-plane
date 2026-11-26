@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
  * One model's request path through the gateway, drawn from the router's live
  * stats (GET /api/router/gateway): clients -> gateway -> each version.
  *
- * Beams follow RoutingBeam's conventions: width is the configured share of
+ * Beams: width is the configured share of
  * traffic, speed is the measured request rate, colour is the version's role.
  * A version whose circuit breaker is open gets a red, stopped beam - the
  * gateway is failing those requests fast instead of sending them.

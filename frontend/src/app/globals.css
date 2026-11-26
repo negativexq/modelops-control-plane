@@ -190,7 +190,7 @@
   }
 }
 
-/* RoutingBeam: dashes travelling along the path from router to target. */
+/* Beam flow: dashes travelling along a path, e.g. gateway to version. */
 @keyframes beam-flow {
   to {
     stroke-dashoffset: -28;
