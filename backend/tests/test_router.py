@@ -488,6 +488,7 @@ def test_predict_emits_metric_with_deployment_id(artifacts_dir: Path) -> None:
     # artifact scored it (named by the serving container, not the router label).
     assert sent["features"] == _sample_payload(FULL_FEATURES)
     assert sent["artifact"] == f"{response.json()['model_name']}/v1"
+    assert sent["score"] == response.json()["fraud_probability"]
 
 
 def test_rejected_predictions_send_no_drift_inputs(artifacts_dir: Path) -> None:
@@ -505,6 +506,7 @@ def test_rejected_predictions_send_no_drift_inputs(artifacts_dir: Path) -> None:
     assert sent["status_code"] == 422
     assert sent["features"] is None
     assert sent["artifact"] is None
+    assert sent["score"] is None
 
 
 def test_predict_does_not_block_on_slow_metric_push(artifacts_dir: Path) -> None:

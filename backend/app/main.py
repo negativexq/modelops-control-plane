@@ -17,6 +17,8 @@ from app.control_plane.api import router as deployments_router
 from app.control_plane.labels_api import router as labels_router
 from app.control_plane.live_api import router as live_router
 from app.db import get_db
+from app.notifications import dispatcher as webhook_dispatcher
+from app.notifications.api import router as notifications_router
 from app.observability import tracing
 from app.observability.metrics import instrument_app
 from app.policy.api import defaults_router as policy_defaults_router
@@ -47,7 +49,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Router pushes (PUT /router/config) join the trace of the request or
     # reconcile tick that caused them.
     tracing.instrument_httpx(app.state.http_client, tracing.configured_provider("control-plane"))
+    # Decision webhooks (app/notifications/), only if any URL is configured.
+    dispatcher = webhook_dispatcher.start(app.dependency_overrides.get(get_db, get_db))
     yield
+    if dispatcher is not None:
+        dispatcher.stop()
     await app.state.http_client.aclose()
 
 
@@ -72,3 +78,4 @@ app.include_router(policy_router)
 app.include_router(policy_defaults_router)
 app.include_router(benchmarks_router)
 app.include_router(live_router)
+app.include_router(notifications_router)

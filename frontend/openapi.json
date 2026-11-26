@@ -479,6 +479,19 @@
             ],
             "default": 0.25,
             "title": "Max Feature Psi"
+          },
+          "max_prediction_psi": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": 0.1,
+            "title": "Max Prediction Psi"
           }
         },
         "title": "DriftPolicy",
@@ -498,10 +511,24 @@
             ],
             "default": 0.25,
             "title": "Max Feature Psi"
+          },
+          "max_prediction_psi": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": 0.1,
+            "title": "Max Prediction Psi"
           }
         },
         "required": [
-          "max_feature_psi"
+          "max_feature_psi",
+          "max_prediction_psi"
         ],
         "title": "DriftPolicy",
         "type": "object"
@@ -1083,6 +1110,19 @@
             ],
             "title": "Prediction Id"
           },
+          "score": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
           "status_code": {
             "title": "Status Code",
             "type": "integer"
@@ -1662,7 +1702,8 @@
           "drift": {
             "$ref": "#/components/schemas/DriftPolicy-Input",
             "default": {
-              "max_feature_psi": 0.25
+              "max_feature_psi": 0.25,
+              "max_prediction_psi": 0.1
             }
           },
           "evaluation_window_seconds": {
@@ -1748,7 +1789,8 @@
           "drift": {
             "$ref": "#/components/schemas/DriftPolicy-Output",
             "default": {
-              "max_feature_psi": 0.25
+              "max_feature_psi": 0.25,
+              "max_prediction_psi": 0.1
             }
           },
           "evaluation_window_seconds": {
@@ -2601,6 +2643,114 @@
         ],
         "title": "VersionSeries",
         "type": "object"
+      },
+      "WebhookDeliveryOut": {
+        "properties": {
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "delivered_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivered At"
+          },
+          "deployment_id": {
+            "title": "Deployment Id",
+            "type": "string"
+          },
+          "event": {
+            "title": "Event",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "last_status_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Status Code"
+          },
+          "next_attempt_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Attempt At"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WebhookDeliveryStatus"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "deployment_id",
+          "event",
+          "url",
+          "status",
+          "attempts",
+          "last_status_code",
+          "last_error",
+          "created_at",
+          "delivered_at",
+          "next_attempt_at",
+          "payload"
+        ],
+        "title": "WebhookDeliveryOut",
+        "type": "object"
+      },
+      "WebhookDeliveryStatus": {
+        "enum": [
+          "PENDING",
+          "DELIVERED",
+          "FAILED"
+        ],
+        "title": "WebhookDeliveryStatus",
+        "type": "string"
       }
     }
   },
@@ -3996,6 +4146,87 @@
         "summary": "Get Version Evaluation",
         "tags": [
           "models"
+        ]
+      }
+    },
+    "/api/notifications/deliveries": {
+      "get": {
+        "operationId": "list_deliveries_api_notifications_deliveries_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "deployment_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Deployment Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/WebhookDeliveryStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/WebhookDeliveryOut"
+                  },
+                  "title": "Response List Deliveries Api Notifications Deliveries Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Deliveries",
+        "tags": [
+          "notifications"
         ]
       }
     },

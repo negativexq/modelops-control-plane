@@ -27,6 +27,7 @@ from app.policy.engine import (
     Evidence,
     PolicyCheckResult,
     _evaluate_feature_drift,
+    _evaluate_prediction_drift,
 )
 
 ARTIFACT = "fraud-model/v2-good"
@@ -47,6 +48,18 @@ PROFILE = drift.build_reference_profile(
     numeric_features=["amount", "feature_0", "previous_declines"],
     categorical_features=["merchant_category"],
 )
+
+
+def _scores(n: int, seed: int, fraud_share: float = 0.02) -> list[float]:
+    """Fraud scores: mostly near zero, high for the fraud share."""
+    rng = np.random.default_rng(seed)
+    is_fraud = rng.random(n) < fraud_share
+    return np.where(is_fraud, rng.beta(8, 2, n), rng.beta(1, 60, n)).tolist()
+
+
+PROFILE["prediction"] = drift.build_reference_profile(
+    {drift.PREDICTION_SCORE: _scores(20_000, seed=0)}, [drift.PREDICTION_SCORE], []
+)["features"][drift.PREDICTION_SCORE]
 
 
 def _inputs(n: int, seed: int, amount_scale: float = 1.0) -> list[dict[str, Any]]:
@@ -116,6 +129,39 @@ def test_too_few_inputs_or_no_profile_is_inconclusive() -> None:
     assert missing.detail == f"{NO_REFERENCE_PROFILE}:{ARTIFACT}"
 
 
+def _prediction_check(
+    scores: list[float], profile: dict[str, Any] | None = PROFILE
+) -> PolicyCheckResult:
+    return _evaluate_prediction_drift(
+        DriftInputs(artifact=ARTIFACT, profile=profile, inputs=[], scores=scores),
+        DriftPolicy(),
+        Evidence(0.975, look=1),
+    )
+
+
+def test_scores_like_validation_pass() -> None:
+    results = [_prediction_check(_scores(150, seed=s)).result for s in range(1, 30)]
+    assert FAIL not in results
+    assert results.count(PASS) >= 27
+
+
+def test_a_fraud_wave_shifts_the_scores_and_fails() -> None:
+    # Ten times the fraud share: the model's output moves, whatever each input did.
+    check = _prediction_check(_scores(300, seed=7, fraud_share=0.25))
+    assert check.result == FAIL
+    assert check.observed_value is not None and check.observed_value > 0.1
+    assert check.detail == drift.PREDICTION_SCORE
+
+
+def test_prediction_drift_needs_scores_and_a_validation_profile() -> None:
+    few = _prediction_check(_scores(drift.MINIMUM_SAMPLES - 1, seed=8, fraud_share=0.5))
+    assert (few.result, few.detail) == (INCONCLUSIVE, TOO_FEW_INPUTS)
+    old_profile = {k: v for k, v in PROFILE.items() if k != "prediction"}
+    missing = _prediction_check(_scores(300, seed=8), profile=old_profile)
+    assert missing.result == INCONCLUSIVE
+    assert missing.detail == f"{NO_REFERENCE_PROFILE}:{ARTIFACT}"
+
+
 # --- end to end: metrics in through the API, drift check out of /evaluate ----------
 
 
@@ -162,22 +208,25 @@ def _post(
     version: str,
     inputs: list[dict[str, Any]] | None,
     count: int = 200,
+    scores: list[float] | None = None,
 ) -> None:
     for i in range(count):
         body: dict[str, Any] = {"model_version": version, "latency_ms": 20.0, "status_code": 200}
         if inputs is not None:
             body |= {"features": inputs[i], "artifact": ARTIFACT}
+        if scores is not None:
+            body["score"] = scores[i]
         response = client.post(f"/api/deployments/{deployment.id}/metrics", json=body)
         assert response.status_code in (200, 201, 202, 204)
 
 
 def _drift_check(
-    client: TestClient, deployment: Deployment, **config: Any
+    client: TestClient, deployment: Deployment, policy: str = "feature_drift", **config: Any
 ) -> dict[str, Any] | None:
     body = client.post(
         f"/api/deployments/{deployment.id}/evaluate", json={"minimum_requests": 50, **config}
     ).json()
-    return next((c for c in body["checks"] if c["policy_name"] == "feature_drift"), None)
+    return next((c for c in body["checks"] if c["policy_name"] == policy), None)
 
 
 def test_evaluate_fails_a_canary_fed_drifted_inputs(
@@ -213,3 +262,22 @@ def test_evaluate_passes_healthy_inputs_and_skips_without_inputs_or_limit(
 
     # Switched off by the policy.
     assert _drift_check(client, deployment, drift={"max_feature_psi": None}) is None
+
+
+def test_evaluate_fails_a_canary_whose_scores_shifted(
+    client: TestClient, deployment: Deployment, artifacts_dir: Path
+) -> None:
+    _post(client, deployment, "v1", None)
+    _post(
+        client,
+        deployment,
+        "v2-good-latency-fault",
+        _inputs(200, seed=9),
+        scores=_scores(200, seed=9, fraud_share=0.3),
+    )
+    # Inputs unchanged, scores moved: only prediction drift sees it.
+    assert (_drift_check(client, deployment) or {}).get("result") == "PASS"
+    check = _drift_check(client, deployment, "prediction_drift")
+    assert check is not None and check["result"] == "FAIL"
+    off = {"drift": {"max_prediction_psi": None}}
+    assert _drift_check(client, deployment, "prediction_drift", **off) is None

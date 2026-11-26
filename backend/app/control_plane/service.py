@@ -17,6 +17,7 @@ from app.control_plane.models import (
 )
 from app.control_plane.router_gateway import RouterGateway, RouterUpdateError, StaleRevisionError
 from app.control_plane.state_machine import validate_transition
+from app.notifications import outbox
 from app.policy.config import PolicyConfig, policy_settings
 from app.traffic_stages import TRAFFIC_STAGES
 
@@ -243,6 +244,8 @@ def _transition(
         f"{previous.value} -> {target.value}: {message}",
         actor,
     )
+    # Same transaction: the notification commits exactly when the decision does.
+    outbox.enqueue(db, deployment, previous, target, message, actor)
 
 
 def _next_routing_generation(db: Session, model_name: str) -> int:

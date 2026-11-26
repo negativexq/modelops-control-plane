@@ -45,23 +45,27 @@ class GatewayError(Exception):
 
 def _drift_inputs(
     payload: dict[str, Any], body: Any, status_code: int
-) -> tuple[dict[str, Any] | None, str | None]:
-    """What the drift check needs from one answered prediction: the inputs the
-    model scored, and which trained artifact scored them (the serving container
+) -> tuple[dict[str, Any] | None, str | None, float | None]:
+    """What the drift checks need from one answered prediction: the inputs the
+    model scored, which trained artifact scored them (the serving container
     names it in its response; a router version label like
-    "v2-good-latency-fault" doesn't). Only for predictions the model actually
-    made - a rejected request's body is a data-quality problem, not drift."""
+    "v2-good-latency-fault" doesn't), and the score it gave. Only for
+    predictions the model actually made - a rejected request's body is a
+    data-quality problem, not drift."""
     if status_code >= 400 or not isinstance(body, dict):
-        return None, None
+        return None, None, None
     model_name, model_version = body.get("model_name"), body.get("model_version")
     if not isinstance(model_name, str) or not isinstance(model_version, str):
-        return None, None
+        return None, None, None
+    score = body.get("fraud_probability")
     features = {
         key: value
         for key, value in payload.items()
         if isinstance(value, (int, float, str)) and not isinstance(value, bool)
     }
-    return features, f"{model_name}/{model_version}"
+    if not isinstance(score, (int, float)) or isinstance(score, bool):
+        score = None
+    return features, f"{model_name}/{model_version}", None if score is None else float(score)
 
 
 def choose_target(config: RouterConfig) -> TargetWeight:
@@ -150,6 +154,7 @@ def create_app(
         prediction_id: Any,
         features: dict[str, Any] | None = None,
         artifact: str | None = None,
+        score: float | None = None,
     ) -> None:
         if not settings.control_plane_url:
             return
@@ -166,6 +171,7 @@ def create_app(
                 settings.upstream_timeout_seconds,
                 features,
                 artifact,
+                score,
             )
         )
         pending_metric_tasks.add(task)

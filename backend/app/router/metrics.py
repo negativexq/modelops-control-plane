@@ -18,6 +18,7 @@ async def send_metric(
     timeout: float,
     features: dict[str, Any] | None = None,
     artifact: str | None = None,
+    score: float | None = None,
 ) -> None:
     """POST one metric row to the control plane. Always run as a background task
     (see app/router/main.py's route_predict) - never awaited inline, and any failure
@@ -32,6 +33,7 @@ async def send_metric(
         "prediction_id": prediction_id,
         "features": features,
         "artifact": artifact,
+        "score": score,
     }
     try:
         await client.post(url, json=payload, timeout=timeout)

@@ -27,6 +27,7 @@ const STAT_CHECKS: Record<string, { label: string; format: (v: number) => string
   latency_p95_increase: { label: "p95 Δ", format: (v) => `${v >= 0 ? "+" : ""}${v.toFixed(0)}%` },
   minimum_recall: { label: "recall", format: (v) => v.toFixed(2) },
   feature_drift: { label: "drift PSI", format: (v) => v.toFixed(2) },
+  prediction_drift: { label: "score PSI", format: (v) => v.toFixed(2) },
 };
 
 function Node({ icon: Icon, title, children, tone }: { icon: typeof Radio; title: string; children: ReactNode; tone?: string }) {

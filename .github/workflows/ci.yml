@@ -70,8 +70,8 @@ jobs:
             exit 1
           fi
 
-  # Brings up the real docker-compose stack (9 ModelOps containers: 8 HTTP-exposed
-  # services + the worker; plus Prometheus, Grafana and Jaeger) and exercises it over HTTP exactly like
+  # Brings up the real docker-compose stack (10 ModelOps containers: 9 HTTP-exposed
+  # services, including the webhook sink, + the worker; plus Prometheus, Grafana and Jaeger) and exercises it over HTTP exactly like
   # a human demoing the platform would - including waiting for the real automated
   # worker to actually act (not a manual call standing in for it): a real automatic
   # rollback triggered by an injected latency fault, and a real automatic promotion

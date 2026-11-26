@@ -41,6 +41,12 @@ ROUTER_PUSH_FAILURES = Counter(
     "repairs them on its next tick).",
     ["model"],
 )
+WEBHOOK_DELIVERIES = Counter(
+    "modelops_webhook_deliveries_total",
+    "Decision notification attempts, by event and result: delivered, retrying "
+    "(failed, will retry) or failed (gave up).",
+    ["event", "result"],
+)
 LAST_RECONCILE = Gauge(
     "modelops_reconcile_last_run_timestamp_seconds",
     "Unix time of the last reconcile tick, whatever its result.",

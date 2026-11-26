@@ -11,7 +11,7 @@ by running the actual stack, not by a unit test with mocked collaborators. Unit
 tests keep verifying logic in isolation; this catches the wiring between services -
 see README's "Troubleshooting" section.
 
-Seven scenarios, run in sequence (the router holds a single active traffic split -
+Eight scenarios, run in sequence (the router holds a single active traffic split -
 see docs/DESIGN_NOTES.md#benchmark-suite - so these can't run concurrently, and
 each fully completes before the next one starts). Scenarios 1-4 each use their
 own model_name (SCENARIO_MODEL_NAMES below), not a shared "fraud-model": the
@@ -21,7 +21,7 @@ exactly which scenario left something behind if one ever does, instead of every
 scenario racing a single ambiguous name. `_assert_no_orphaned_deployments`
 checks this explicitly before scenario 1 even starts. Scenarios 5 and 6 both
 deliberately use "fraud-model" instead - see scenario 5's own docstring for why.
-Scenario 7 runs last, on its own model_name again.
+Scenarios 7 and 8 run last, each on its own model_name again.
 
 1. `run_manual_smoke_scenario` - the fast path: create (already
    automation_paused=True - see docs/DESIGN_NOTES.md#manual-automation-hold for
@@ -70,6 +70,11 @@ Scenario 7 runs last, on its own model_name again.
    real inputs, just not the inputs it was trained on. The worker rolls it
    back on a feature_drift FAIL, which needs no labels at all - the one
    quality signal available from the first request (see app/policy/drift.py).
+8. `run_automatic_prediction_drift_rollback_scenario` - a fraud wave: the same
+   healthy canary, unmodified test-set rows, but a fifth of them fraud
+   instead of ~2%. Each feature on its own barely moves, so feature_drift
+   passes; the model's scores move a lot, and the worker rolls it back on a
+   prediction_drift FAIL - again with no labels.
 
 Scenarios 3 and 4 use a *stratified* request stream (QUALITY_SCENARIO_POSITIVE_
 RATIO, default 0.5 - see _BackgroundTraffic/locustfile.py's _sample_row), not
@@ -82,8 +87,8 @@ these two CI scenarios, not something the platform does with real traffic;
 the Locust demo load (scripts/benchmarks/locustfile.py's RouterUser) samples
 at the dataset's natural, unstratified rate. A stream that's half fraud is
 itself a large distribution shift, which the drift check would rightly flag,
-so these two scenarios switch it off (`"drift": {"max_feature_psi": None}`);
-scenario 7 is where drift is tested.
+so these two scenarios switch both drift checks off; scenarios 7 and 8 are
+where drift is tested.
 
 Scenarios 2-4 only finish in reasonable CI time because the worker's poll
 interval, and scenarios 3/4's label_maturity_seconds/evaluation_window_seconds,
@@ -112,6 +117,7 @@ BACKEND_URL = os.environ.get("CI_BACKEND_URL", "http://localhost:8000")
 ROUTER_URL = os.environ.get("CI_ROUTER_URL", "http://localhost:8080")
 FRONTEND_URL = os.environ.get("CI_FRONTEND_URL", "http://localhost:3000")
 LATENCY_FAULT_URL = os.environ.get("CI_LATENCY_FAULT_URL", "http://localhost:8004")
+WEBHOOK_SINK_URL = os.environ.get("CI_WEBHOOK_SINK_URL", "http://localhost:8090")
 # Kept short so scenarios 3/4's quality window matures within CI's time budget -
 # see PolicyConfig.label_maturity_seconds in app/policy/config.py.
 LABEL_DELAY_SECONDS = float(os.environ.get("CI_LABEL_DELAY_SECONDS", "2"))
@@ -141,6 +147,7 @@ HEALTH_ENDPOINTS = {
     "model-serving-v2-quality-bad": "http://localhost:8003/ready",
     "model-serving-v2-good-latency-fault": "http://localhost:8004/ready",
     "model-serving-v2-good-error-fault": "http://localhost:8005/ready",
+    "webhook-sink": f"{WEBHOOK_SINK_URL}/health",
 }
 
 
@@ -375,7 +382,7 @@ def run_manual_smoke_scenario() -> None:
     separate pause-automation call after - closes that race entirely rather than
     narrowing it.
     """
-    print("\n### scenario 1/7: manual create -> evaluate -> promote ###")
+    print("\n### scenario 1/8: manual create -> evaluate -> promote ###")
     deployment = _create_deployment(
         model_name="ci-smoke-manual",
         canary_version="v2-good",
@@ -456,7 +463,7 @@ def run_automatic_rollback_scenario() -> None:
     versions of this script called /evaluate then manually /promoted, which never
     exercised the worker's poll loop or its FAIL-detection at all.
     """
-    print("\n### scenario 2/7: automatic rollback (worker-driven, not manual) ###")
+    print("\n### scenario 2/8: automatic rollback (worker-driven, not manual) ###")
     try:
         _set_fault_injection(LATENCY_FAULT_URL, latency_ms=400, error_rate=0.0)
         print("[ok] injected +400ms latency into model-serving-v2-good-latency-fault")
@@ -512,6 +519,35 @@ def run_automatic_rollback_scenario() -> None:
             f"[FAIL] timeline doesn't show a FAIL check + an automatic rollback event: {timeline}"
         )
     print("[ok] timeline shows the FAIL check and an automatic (not manual) rollback event")
+    _assert_rollback_notified(deployment_id, "latency_p95_increase")
+
+
+def _assert_rollback_notified(deployment_id: str, failed_policy: str) -> None:
+    """The decision went out as a signed webhook (app/notifications/) that the
+    compose stack's webhook-sink received."""
+    deadline = time.monotonic() + 15
+    notice = None
+    while time.monotonic() < deadline and notice is None:
+        received = httpx.get(
+            f"{WEBHOOK_SINK_URL}/received",
+            params={"event": "deployment.rolled_back"},
+            timeout=5,
+        ).json()
+        notice = next(
+            (r for r in received if r["payload"]["deployment"]["id"] == deployment_id), None
+        )
+        if notice is None:
+            time.sleep(0.5)
+    if notice is None:
+        raise SmokeTestFailure(f"[FAIL] no deployment.rolled_back webhook for {deployment_id}")
+    payload = notice["payload"]
+    if not (
+        notice["signature_verified"] is True
+        and payload["transition"]["decided_by"] == "automatic"
+        and any(c["policy_name"] == failed_policy for c in payload["checks"])
+    ):
+        raise SmokeTestFailure(f"[FAIL] the rollback webhook isn't what was expected: {notice}")
+    print(f"[ok] signed deployment.rolled_back webhook delivered, naming {failed_policy}")
 
 
 def run_automatic_quality_promote_scenario() -> None:
@@ -531,7 +567,7 @@ def run_automatic_quality_promote_scenario() -> None:
     rather than a coin flip - see minimum_positive_labels below and
     app/policy/engine.py.
     """
-    print("\n### scenario 3/7: automatic quality-based promote (worker-driven) ###")
+    print("\n### scenario 3/8: automatic quality-based promote (worker-driven) ###")
     canary_version = "v2-good"
     deployment = _create_deployment(
         model_name="ci-smoke-quality-promote",
@@ -558,7 +594,7 @@ def run_automatic_quality_promote_scenario() -> None:
             "quality": {"minimum_recall": 0.6},
             # Half the stream is fraud on purpose (QUALITY_SCENARIO_POSITIVE_RATIO),
             # which is a real shift from the training data - see the module docstring.
-            "drift": {"max_feature_psi": None},
+            "drift": {"max_feature_psi": None, "max_prediction_psi": None},
         },
     )
     deployment_id = deployment["id"]
@@ -631,7 +667,7 @@ def run_automatic_quality_rollback_scenario() -> None:
     actually resolve to FAIL (not just stay perpetually INCONCLUSIVE) and drive a
     real automatic rollback.
     """
-    print("\n### scenario 4/7: automatic quality-based rollback (worker-driven) ###")
+    print("\n### scenario 4/8: automatic quality-based rollback (worker-driven) ###")
     canary_version = "v2-quality-bad"
     deployment = _create_deployment(
         model_name="ci-smoke-quality-rollback",
@@ -653,7 +689,7 @@ def run_automatic_quality_rollback_scenario() -> None:
             "quality": {"minimum_recall": 0.6},
             # Half the stream is fraud on purpose (QUALITY_SCENARIO_POSITIVE_RATIO),
             # which is a real shift from the training data - see the module docstring.
-            "drift": {"max_feature_psi": None},
+            "drift": {"max_feature_psi": None, "max_prediction_psi": None},
         },
     )
     deployment_id = deployment["id"]
@@ -740,7 +776,7 @@ def run_router_restart_reconcile_scenario() -> None:
     scenario is entirely about the router's *config* state, not routing
     decisions.
     """
-    print("\n### scenario 5/7: router restart -> automatic reconcile ###")
+    print("\n### scenario 5/8: router restart -> automatic reconcile ###")
     deployment = _create_deployment(
         model_name="fraud-model",
         canary_version="v2-good",
@@ -841,7 +877,7 @@ def run_promote_then_router_restart_scenario() -> None:
     point is proving that regression is closed, deterministically, not
     best-effort.
     """
-    print("\n### scenario 6/7: promote -> router restart -> final allocation restored ###")
+    print("\n### scenario 6/8: promote -> router restart -> final allocation restored ###")
     active = [
         d
         for d in httpx.get(f"{BACKEND_URL}/api/deployments", timeout=10).json()
@@ -893,14 +929,15 @@ def run_automatic_drift_rollback_scenario() -> None:
     profile written next to the model (reference_profile.json), so it can act
     long before any ground truth arrives - see app/policy/drift.py.
     """
-    print("\n### scenario 7/7: automatic drift-based rollback (worker-driven) ###")
+    print("\n### scenario 7/8: automatic drift-based rollback (worker-driven) ###")
     deployment = _create_deployment(
         model_name="ci-smoke-drift-rollback",
         canary_version="v2-good",
         canary_weight=0.3,
         policy_config={
             "minimum_requests": 5,
-            "evaluation_window_seconds": 15,
+            # Long enough for the canary to collect the drift checks' 100 inputs.
+            "evaluation_window_seconds": 20,
             "max_inconclusive_retries": 30,
             # A real (non-injected) model under CI-runner load: only drift should
             # be able to decide this rollout, not inference-latency variance.
@@ -959,6 +996,72 @@ def run_automatic_drift_rollback_scenario() -> None:
     )
 
 
+def run_automatic_prediction_drift_rollback_scenario() -> None:
+    """A fraud wave. Every request is an unmodified test-set row, but a fifth
+    of them are fraud instead of the ~2% the model was trained and validated
+    on. Each input feature shifts only a little - feature_drift has to PASS
+    here, which this scenario checks - while the model's fraud scores shift a
+    lot, and the worker rolls the canary back on prediction_drift alone. No
+    labels, no fault injection.
+    """
+    print("\n### scenario 8/8: automatic prediction-drift rollback (worker-driven) ###")
+    deployment = _create_deployment(
+        model_name="ci-smoke-prediction-drift",
+        canary_version="v2-good",
+        canary_weight=0.3,
+        policy_config={
+            "minimum_requests": 5,
+            "evaluation_window_seconds": 20,
+            "max_inconclusive_retries": 30,
+            "latency": {"p95_max_increase_percent": 2000.0},
+            "reliability": {"max_error_rate_percent": 20.0},
+        },
+    )
+    deployment_id = deployment["id"]
+    _record_deployment_id("scenario8-prediction-drift", deployment_id)
+    print(f"[ok] deployment {deployment_id} is {deployment['status']} (30% healthy canary)")
+
+    with _BackgroundTraffic(
+        "ci-smoke-prediction-drift", interval_seconds=0.02, positive_ratio=0.2
+    ):
+        final = _wait_for_deployment_status(
+            deployment_id,
+            target_statuses={"PROMOTED", "ROLLED_BACK", "INCONCLUSIVE", "FAILED"},
+            timeout_seconds=120,
+        )
+
+    if final["status"] != "ROLLED_BACK":
+        raise SmokeTestFailure(
+            f"[FAIL] expected the worker to roll this back on prediction drift, got: {final}"
+        )
+    print(f"[ok] deployment {deployment_id} is ROLLED_BACK - with no labels and no fault")
+
+    timeline = httpx.get(
+        f"{BACKEND_URL}/api/deployments/{deployment_id}/timeline", timeout=10
+    ).json()
+    checks = [item for item in timeline if item["type"] == "policy_evaluation"]
+    prediction_fail = next(
+        (
+            c
+            for c in checks
+            if c["policy_name"] == "prediction_drift" and c["result"] == "FAIL"
+        ),
+        None,
+    )
+    feature_failed = any(
+        c["policy_name"] == "feature_drift" and c["result"] == "FAIL" for c in checks
+    )
+    if prediction_fail is None or feature_failed:
+        raise SmokeTestFailure(
+            "[FAIL] expected a prediction_drift FAIL with no feature_drift FAIL "
+            f"(the point of this scenario): {timeline}"
+        )
+    print(
+        f"[ok] timeline shows a prediction_drift FAIL (PSI "
+        f"{prediction_fail['observed_value']:.2f}) while feature_drift never failed"
+    )
+
+
 SCENARIO_MODEL_NAMES = (
     "ci-smoke-manual",
     "ci-smoke-latency-rollback",
@@ -968,6 +1071,7 @@ SCENARIO_MODEL_NAMES = (
     # for why this one deliberately uses the router's own fixed model_name.
     "fraud-model",
     "ci-smoke-drift-rollback",
+    "ci-smoke-prediction-drift",
 )
 
 
@@ -985,6 +1089,7 @@ def main() -> None:
     run_router_restart_reconcile_scenario()
     run_promote_then_router_restart_scenario()
     run_automatic_drift_rollback_scenario()
+    run_automatic_prediction_drift_rollback_scenario()
 
     print("\nAll integration checks passed.")
 

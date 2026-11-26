@@ -206,8 +206,9 @@ SCENARIOS: dict[str, Scenario] = {
             "quality": {"minimum_recall": 0.7},
             # positive_ratio=0.5 below makes the stream half fraud, a real shift
             # from the ~2% the model was trained on; feature_drift would rightly
-            # flag it, so it's off for this scenario.
-            "drift": {"max_feature_psi": None},
+            # flag it (on the scores even more than the inputs), so both drift
+            # checks are off for this scenario.
+            "drift": {"max_feature_psi": None, "max_prediction_psi": None},
         },
         expected_outcome="promote",
         # Half fraud rows: a 15s quality window at 10% canary holds ~120 labeled

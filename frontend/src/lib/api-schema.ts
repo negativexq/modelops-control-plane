@@ -510,6 +510,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/notifications/deliveries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Deliveries */
+        get: operations["list_deliveries_api_notifications_deliveries_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/policy/defaults": {
         parameters: {
             query?: never;
@@ -892,6 +909,11 @@ export interface components {
              * @default 0.25
              */
             max_feature_psi?: number | null;
+            /**
+             * Max Prediction Psi
+             * @default 0.1
+             */
+            max_prediction_psi?: number | null;
         };
         /** DriftPolicy */
         "DriftPolicy-Output": {
@@ -900,6 +922,11 @@ export interface components {
              * @default 0.25
              */
             max_feature_psi: number | null;
+            /**
+             * Max Prediction Psi
+             * @default 0.1
+             */
+            max_prediction_psi: number | null;
         };
         /** EvaluateResponse */
         EvaluateResponse: {
@@ -1130,6 +1157,8 @@ export interface components {
             prediction?: number | null;
             /** Prediction Id */
             prediction_id?: string | null;
+            /** Score */
+            score?: number | null;
             /** Status Code */
             status_code: number;
         };
@@ -1312,7 +1341,8 @@ export interface components {
             confidence_level?: number;
             /**
              * @default {
-             *       "max_feature_psi": 0.25
+             *       "max_feature_psi": 0.25,
+             *       "max_prediction_psi": 0.1
              *     }
              */
             drift?: components["schemas"]["DriftPolicy-Input"];
@@ -1392,7 +1422,8 @@ export interface components {
             confidence_level: number;
             /**
              * @default {
-             *       "max_feature_psi": 0.25
+             *       "max_feature_psi": 0.25,
+             *       "max_prediction_psi": 0.1
              *     }
              */
             drift: components["schemas"]["DriftPolicy-Output"];
@@ -1711,6 +1742,42 @@ export interface components {
             /** Version */
             version: string;
         };
+        /** WebhookDeliveryOut */
+        WebhookDeliveryOut: {
+            /** Attempts */
+            attempts: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Delivered At */
+            delivered_at: string | null;
+            /** Deployment Id */
+            deployment_id: string;
+            /** Event */
+            event: string;
+            /** Id */
+            id: string;
+            /** Last Error */
+            last_error: string | null;
+            /** Last Status Code */
+            last_status_code: number | null;
+            /** Next Attempt At */
+            next_attempt_at: string | null;
+            /** Payload */
+            payload: {
+                [key: string]: unknown;
+            };
+            status: components["schemas"]["WebhookDeliveryStatus"];
+            /** Url */
+            url: string;
+        };
+        /**
+         * WebhookDeliveryStatus
+         * @enum {string}
+         */
+        WebhookDeliveryStatus: "PENDING" | "DELIVERED" | "FAILED";
     };
     responses: never;
     parameters: never;
@@ -2570,6 +2637,39 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_deliveries_api_notifications_deliveries_get: {
+        parameters: {
+            query?: {
+                deployment_id?: string | null;
+                status?: components["schemas"]["WebhookDeliveryStatus"] | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookDeliveryOut"][];
                 };
             };
             /** @description Validation Error */

@@ -64,11 +64,13 @@ def _drift_inputs(
     )
     if not rows:
         return None
-    artifact = Counter(a for a, _ in rows).most_common(1)[0][0]
+    artifact = Counter(a for a, _, _ in rows).most_common(1)[0][0]
+    served = [(features, score) for a, features, score in rows if a == artifact]
     return DriftInputs(
         artifact=artifact,
         profile=_reference_profile(control_plane_settings.artifacts_dir, artifact),
-        inputs=[features for a, features in rows if a == artifact],
+        inputs=[features for features, _ in served],
+        scores=[score for _, score in served if score is not None],
     )
 
 

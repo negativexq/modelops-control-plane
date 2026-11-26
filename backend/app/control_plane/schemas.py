@@ -181,6 +181,8 @@ class MetricIn(BaseModel):
     # prediction; callers that don't simply leave that check without data.
     features: dict[str, float | str] | None = Field(default=None, max_length=200)
     artifact: str | None = Field(default=None, max_length=200, pattern=r"^[\w.-]+/[\w.-]+$")
+    # The model's fraud_probability for this request, for the prediction drift check.
+    score: float | None = Field(default=None, ge=0, le=1)
 
 
 class MetricsSummary(BaseModel):

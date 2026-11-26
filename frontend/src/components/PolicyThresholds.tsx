@@ -73,7 +73,18 @@ export const GATE_FIELDS: ThresholdField[] = [
     optional: true,
     // Rollouts created before the drift check have no "drift" in their snapshot.
     get: (c) => (c.drift as PolicyConfig["drift"] | undefined)?.max_feature_psi ?? null,
-    set: (c, v) => ({ ...c, drift: { max_feature_psi: v } }),
+    set: (c, v) => ({ ...c, drift: { ...c.drift, max_feature_psi: v } }),
+  },
+  {
+    key: "prediction_drift",
+    label: "Max prediction drift (PSI)",
+    hint: "Canary fraud scores vs its validation scores. Empty switches it off.",
+    unit: "",
+    min: 0,
+    step: 0.05,
+    optional: true,
+    get: (c) => (c.drift as PolicyConfig["drift"] | undefined)?.max_prediction_psi ?? null,
+    set: (c, v) => ({ ...c, drift: { ...c.drift, max_prediction_psi: v } }),
   },
 ];
 

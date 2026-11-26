@@ -10,7 +10,7 @@ function fmt(policy: string, v: number | null) {
   if (policy === "minimum_label_coverage") return `${(v * 100).toFixed(0)}%`;
   if (policy.startsWith("minimum_") && policy !== "minimum_recall") return v.toFixed(0);
   if (policy === "minimum_recall") return v.toFixed(2);
-  if (policy === "feature_drift") return `PSI ${v.toFixed(2)}`;
+  if (policy === "feature_drift" || policy === "prediction_drift") return `PSI ${v.toFixed(2)}`;
   return `${v.toFixed(2)}%`;
 }
 

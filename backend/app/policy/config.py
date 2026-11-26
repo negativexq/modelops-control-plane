@@ -32,6 +32,12 @@ class DriftPolicy(BaseModel):
     # shift" line. None switches the check off - for traffic that's skewed on
     # purpose, like a harness oversampling fraud to get enough positive labels.
     max_feature_psi: float | None = Field(default=0.25, ge=0)
+    # Largest corrected PSI of the canary's live fraud_probability against its
+    # own scores on the validation split. Lower than the feature limit: one
+    # output summarises every input, and a fraud wave that moves each feature
+    # only a little (2% -> 20% fraud: worst feature PSI ~0.08) moves the scores
+    # by ~0.17. None switches it off.
+    max_prediction_psi: float | None = Field(default=0.1, ge=0)
 
 
 class PolicyConfig(BaseModel):
@@ -106,6 +112,7 @@ class PolicySettings(BaseSettings):
     reliability_max_error_rate_percent: float = 5.0
     quality_minimum_recall: float = 0.8
     drift_max_feature_psi: float | None = 0.25
+    drift_max_prediction_psi: float | None = 0.1
 
     def to_policy_config(self) -> PolicyConfig:
         return PolicyConfig(
@@ -123,7 +130,10 @@ class PolicySettings(BaseSettings):
                 max_error_rate_percent=self.reliability_max_error_rate_percent
             ),
             quality=QualityPolicy(minimum_recall=self.quality_minimum_recall),
-            drift=DriftPolicy(max_feature_psi=self.drift_max_feature_psi),
+            drift=DriftPolicy(
+                max_feature_psi=self.drift_max_feature_psi,
+                max_prediction_psi=self.drift_max_prediction_psi,
+            ),
         )
 
 

@@ -36,7 +36,7 @@ from sklearn.metrics import (
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from app.policy.drift import build_reference_profile
+from app.policy.drift import PREDICTION_SCORE, build_reference_profile
 from scripts.generate_dataset import DATA_DIR
 
 ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts" / "fraud-model"
@@ -160,6 +160,7 @@ def _write_artifact(
     evaluation: dict[str, Any],
     artifacts_dir: Path,
     x_train: pd.DataFrame,
+    x_val: pd.DataFrame,
 ) -> Path:
     version_dir = artifacts_dir / version
     version_dir.mkdir(parents=True, exist_ok=True)
@@ -175,6 +176,12 @@ def _write_artifact(
         [f for f in features if f not in CATEGORICAL_FEATURES],
         [f for f in features if f in CATEGORICAL_FEATURES],
     )
+    # And what its scores looked like on held-out data it wasn't fit on: the
+    # prediction drift check compares live fraud_probability with this.
+    validation_scores = pipeline.predict_proba(x_val[features])[:, 1]
+    profile["prediction"] = build_reference_profile(
+        {PREDICTION_SCORE: validation_scores}, [PREDICTION_SCORE], []
+    )["features"][PREDICTION_SCORE]
     (version_dir / "reference_profile.json").write_text(json.dumps(profile, indent=2))
 
     return version_dir
@@ -219,7 +226,7 @@ def train_all(
         },
         "features": ALL_FEATURES,
     }
-    _write_artifact("v1", v1_pipeline, v1_meta, v1_eval, artifacts_dir, x_train)
+    _write_artifact("v1", v1_pipeline, v1_meta, v1_eval, artifacts_dir, x_train, val)
     results["v1"] = {"metadata": v1_meta, "evaluation": v1_eval}
 
     # v2-good: successful canary, should beat v1 on recall
@@ -240,7 +247,7 @@ def train_all(
         "features": ALL_FEATURES,
     }
     _write_artifact(
-        "v2-good", v2_good_pipeline, v2_good_meta, v2_good_eval, artifacts_dir, x_train
+        "v2-good", v2_good_pipeline, v2_good_meta, v2_good_eval, artifacts_dir, x_train, val
     )
     results["v2-good"] = {"metadata": v2_good_meta, "evaluation": v2_good_eval}
 
@@ -267,7 +274,13 @@ def train_all(
         },
     }
     _write_artifact(
-        "v2-quality-bad", v2_bad_pipeline, v2_bad_meta, v2_bad_eval, artifacts_dir, x_train_weak
+        "v2-quality-bad",
+        v2_bad_pipeline,
+        v2_bad_meta,
+        v2_bad_eval,
+        artifacts_dir,
+        x_train_weak,
+        val,
     )
     results["v2-quality-bad"] = {"metadata": v2_bad_meta, "evaluation": v2_bad_eval}
 

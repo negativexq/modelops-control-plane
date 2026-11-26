@@ -482,7 +482,7 @@ requests in the reliability window:
 | every feature's corrected PSI within `drift.max_feature_psi` (0.25) | PASS |
 | a feature past it, and its shift significant at the look's level | FAIL |
 | a feature past it, shift not significant | INCONCLUSIVE |
-| fewer than 50 inputs, or no profile for the artifact | INCONCLUSIVE |
+| fewer than 100 inputs, or no profile for the artifact | INCONCLUSIVE |
 
 On draws from the training data itself, 100 requests pass about 99% of the time and
 never FAIL in the tests. Half-fraud traffic or `amount` doubled is caught at 100
@@ -501,10 +501,36 @@ the timeline says which one drifted.
   and that's a question for a human, not the canary gate.
 - Traffic skewed on purpose is real drift. The CI quality scenarios and the
   `success` benchmark oversample fraud to 50% to get enough positive labels, so they
-  set `"drift": {"max_feature_psi": null}`.
-- No prediction drift (the canary's score distribution vs. its validation scores)
-  yet. It's label-free too, and canary-specific, but needs validation scores stored
-  with the artifact.
+  switch both drift checks off (`"drift": {"max_feature_psi": null,
+  "max_prediction_psi": null}`).
+
+### Prediction drift
+
+`prediction_drift` watches the model's output instead of its inputs: the canary's
+live `fraud_probability` against the scores it gave the validation split at
+training time (`profile["prediction"]` in `reference_profile.json`, same deciles,
+same corrected PSI and chi-square test). Like feature drift it needs no labels and
+no comparison version.
+
+It exists because some shifts only show up in the output. A fraud wave (2% of
+traffic to 20%) moves each input only a little: the worst of 28 features reaches a
+PSI of about 0.08, well under feature drift's 0.25. The scores move a lot (PSI
+around 0.17 in the same windows), because the model concentrates exactly the
+inputs that matter into one number. The limit is tighter for the same reason,
+`drift.max_prediction_psi` = 0.1: one distribution, no Bonferroni across features,
+and a shift in the output is closer to "the decisions changed" than a shift in any
+one input.
+
+The router sends the score with each answered prediction (the `score` field of
+the metric). Artifacts trained before this check have no `prediction` section, and
+the check comes back INCONCLUSIVE (`no_reference_profile:<artifact>`) rather than
+guessing. CI scenario 8 runs a healthy canary on 20% fraud traffic and asserts a
+prediction drift FAIL with no feature drift FAIL: the case only this check catches.
+
+A shifted output isn't necessarily a broken model; a real fraud wave would move a
+good model's scores too. Rolling back is still the safe answer during a rollout:
+the canary is being ramped into conditions nobody validated it on, and stable has
+been serving them already.
 
 ## Automated promotion & rollback
 
@@ -558,6 +584,45 @@ the loser gets a clean 409 instead of silently overwriting - or racing to
 corrupt - what the winner just wrote. The worker treats any 409 (stale-status or
 concurrent-update) as "someone else already handled this," logs it, and moves on
 to the next deployment.
+
+### Decision notifications
+
+Every rollout that ends or stops for a human sends a webhook: `deployment.promoted`,
+`deployment.rolled_back`, `deployment.failed` and `deployment.frozen`
+(INCONCLUSIVE, the worker asking for someone). Point
+`CONTROL_PLANE_WEBHOOK_URLS` (a JSON list) at a Slack, Mattermost or Teams incoming
+webhook and the payload's `text` field shows up in a channel; everything else in it
+(the deployment, the transition, who decided, the checks that didn't pass) is for
+programs.
+
+**Transactional outbox.** `_transition` adds a `webhook_deliveries` row in the
+same transaction as the status change (`app/notifications/outbox.py`). A rolled-back
+transaction leaves no notification behind, and a committed decision always has
+one, even if the backend dies before sending it. Sending in the request itself
+would get one of those two wrong: notify first and the commit can fail, commit first
+and the process can die in between.
+
+**Delivery** (`app/notifications/dispatcher.py`), a thread in the backend started
+only when a URL is configured:
+
+- POST with `X-ModelOps-Event`, `X-ModelOps-Delivery` (stable across retries, so a
+  receiver can drop duplicates) and `X-ModelOps-Signature: sha256=<HMAC>` when
+  `CONTROL_PLANE_WEBHOOK_SECRET` is set.
+- Any 2xx delivers it. Errors, timeouts and refused connections back off 2, 4, 8 ...
+  seconds (capped at 60) up to `webhook_max_attempts` (6), then the row is marked
+  `FAILED` and stays visible at `GET /api/notifications/deliveries`.
+- `modelops_webhook_deliveries_total{event, result}` counts delivered, retrying and
+  failed attempts.
+
+Delivery is at-least-once, not exactly-once: a receiver that took the request but
+answered too slowly gets it again, with the same delivery id. With several backend
+replicas each would send the same pending rows; claiming a row before sending
+(`UPDATE ... WHERE status = 'PENDING'`) is the change that would need.
+
+The compose stack runs `webhook-sink` (`app/notifications/sink.py`, port 8090), a
+receiver that verifies signatures and lists what it got at `/received`. CI scenario
+2 asserts the worker's rollback arrived there signed, marked automatic, and naming
+`latency_p95_increase` as the failed check.
 
 ## Manual automation hold
 
@@ -968,8 +1033,7 @@ reasoning survives even if nobody's actively looking at this file.
   ten segments don't mean ten chances at a false FAIL. That is the problem
   [sequential testing](#policy-engine) already solves across time, here across
   slices instead.
-- **Notifications on decisions.** An automatic rollback or a frozen rollout
-  shows up on the timeline and in Grafana, but nobody is told. Alertmanager for
-  the existing alert rules, plus a webhook on worker decisions (rollback, freeze,
-  promote), would close that gap. A freeze in particular is a request for a human,
-  and today that request waits for someone to look.
+- **Alert routing.** Decisions now go out as webhooks ([Decision
+  notifications](#decision-notifications)), but the Grafana alert rules
+  (router down, reconcile errors) still only show on the dashboard. Alertmanager,
+  or Grafana's own contact points, would send those to the same channel.

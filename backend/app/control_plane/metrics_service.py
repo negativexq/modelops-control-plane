@@ -32,6 +32,7 @@ def record_metric(db: Session, deployment_id: str, payload: MetricIn) -> None:
         prediction_id=payload.prediction_id,
         features=payload.features,
         artifact=payload.artifact,
+        score=payload.score,
     )
     db.add(metric)
     db.commit()
@@ -195,11 +196,13 @@ def window_latencies(
 
 def window_inputs(
     db: Session, deployment_id: str, version: str, window_seconds: int, *, now: datetime
-) -> list[tuple[str, dict[str, Any]]]:
-    """(artifact, features) of every answered prediction for one version in
-    [now - window, now] that recorded its inputs - what the drift check
-    compares to the artifact's training profile (app/policy/drift.py)."""
-    stmt = select(PredictionMetric.artifact, PredictionMetric.features).where(
+) -> list[tuple[str, dict[str, Any], float | None]]:
+    """(artifact, features, score) of every answered prediction for one version
+    in [now - window, now] that recorded its inputs - what the drift checks
+    compare to the artifact's training profile (app/policy/drift.py)."""
+    stmt = select(
+        PredictionMetric.artifact, PredictionMetric.features, PredictionMetric.score
+    ).where(
         PredictionMetric.deployment_id == deployment_id,
         PredictionMetric.model_version == version,
         PredictionMetric.created_at >= now - timedelta(seconds=window_seconds),
@@ -208,7 +211,10 @@ def window_inputs(
         PredictionMetric.features.is_not(None),
         PredictionMetric.artifact.is_not(None),
     )
-    return [(artifact, features) for artifact, features in db.execute(stmt).tuples().all()]
+    return [
+        (artifact, features, score)
+        for artifact, features, score in db.execute(stmt).tuples().all()
+    ]
 
 
 def compute_deltas(stable: MetricsSummary, canary: MetricsSummary) -> MetricsDeltas:

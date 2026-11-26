@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.control_plane.models import PolicyEvaluationResult
@@ -216,6 +216,8 @@ class DriftInputs:
     artifact: str
     profile: dict[str, Any] | None
     inputs: list[dict[str, Any]]
+    # The fraud_probability the canary gave each of those requests.
+    scores: list[float] = field(default_factory=list)
 
 
 # Values of PolicyCheckResult.detail when feature_drift had nothing to compare.
@@ -273,6 +275,55 @@ def _evaluate_feature_drift(
         confidence_level=evidence.confidence_level,
         look=evidence.look,
         detail=shown.feature,
+    )
+
+
+def _evaluate_prediction_drift(
+    data: DriftInputs, policy: DriftPolicy, evidence: Evidence
+) -> PolicyCheckResult:
+    """Is the canary scoring live traffic the way it scored its validation
+    data? Same statistics as feature_drift (app/policy/drift.py) on a single
+    distribution, the model's fraud_probability, so no Bonferroni. Catches a
+    shift spread thinly across many features - each within feature_drift's
+    limit - that adds up to a real change in what the model outputs."""
+    limit = policy.max_prediction_psi
+    assert limit is not None
+
+    def inconclusive(detail: str) -> PolicyCheckResult:
+        return PolicyCheckResult(
+            policy_name="prediction_drift",
+            metric_name="prediction_psi",
+            observed_value=None,
+            threshold=limit,
+            result=INCONCLUSIVE,
+            detail=detail,
+        )
+
+    spec = data.profile.get("prediction") if data.profile is not None else None
+    if spec is None:
+        return inconclusive(f"{NO_REFERENCE_PROFILE}:{data.artifact}")
+    if len(data.scores) < drift.MINIMUM_SAMPLES:
+        return inconclusive(TOO_FEW_INPUTS)
+    shift = drift.feature_drift(drift.PREDICTION_SCORE, spec, list(data.scores))
+    if shift is None:
+        return inconclusive(TOO_FEW_INPUTS)
+    if shift.psi_corrected <= limit:
+        result = PASS
+    elif shift.p_value <= evidence.one_sided_alpha:
+        result = FAIL
+    else:
+        result = INCONCLUSIVE
+    return PolicyCheckResult(
+        policy_name="prediction_drift",
+        metric_name="prediction_psi",
+        observed_value=shift.psi_corrected,
+        threshold=limit,
+        result=result,
+        p_value=shift.p_value,
+        method="psi+chi_square",
+        confidence_level=evidence.confidence_level,
+        look=evidence.look,
+        detail=drift.PREDICTION_SCORE,
     )
 
 
@@ -447,6 +498,8 @@ def evaluate_policies(
     ]
     if drift_inputs is not None and config.drift.max_feature_psi is not None:
         checks.append(_evaluate_feature_drift(drift_inputs, config.drift, evidence))
+    if drift_inputs is not None and config.drift.max_prediction_psi is not None:
+        checks.append(_evaluate_prediction_drift(drift_inputs, config.drift, evidence))
     return [*checks, *evaluate_quality_policies(canary_quality, config, look)]
 
 

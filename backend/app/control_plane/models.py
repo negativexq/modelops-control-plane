@@ -393,6 +393,8 @@ class PredictionMetric(Base):
     # rows from callers that don't send them.
     features: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     artifact: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # The model's fraud_probability, for the prediction drift check.
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=_utcnow, index=True
     )
@@ -434,3 +436,44 @@ class GroundTruthLabel(Base):
     ingested_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=_utcnow
     )
+
+
+class WebhookDeliveryStatus(enum.StrEnum):
+    PENDING = "PENDING"
+    DELIVERED = "DELIVERED"
+    FAILED = "FAILED"
+
+
+class WebhookDelivery(Base):
+    """One decision notification to one webhook URL - an outbox row, written in
+    the same transaction as the status change it reports (see
+    app/notifications/outbox.py), so a decision is never committed without its
+    notification or the other way round. app/notifications/dispatcher.py sends
+    pending rows and retries failures with backoff; nothing on the request path
+    waits for the receiver."""
+
+    __tablename__ = "webhook_deliveries"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
+    deployment_id: Mapped[str] = mapped_column(
+        ForeignKey("deployments.id"), nullable=False, index=True
+    )
+    event: Mapped[str] = mapped_column(String(64), nullable=False)
+    url: Mapped[str] = mapped_column(String(500), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[WebhookDeliveryStatus] = mapped_column(
+        Enum(WebhookDeliveryStatus, native_enum=False, length=16),
+        nullable=False,
+        default=WebhookDeliveryStatus.PENDING,
+        index=True,
+    )
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    last_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_utcnow
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

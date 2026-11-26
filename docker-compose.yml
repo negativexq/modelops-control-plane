@@ -40,6 +40,10 @@ services:
       # the worker's calls) follow their parent's decision.
       OTEL_TRACES_SAMPLER: parentbased_traceidratio
       OTEL_TRACES_SAMPLER_ARG: "0.1"
+      # Decision notifications (app/notifications/) go to the local sink below;
+      # point this at a Slack/Teams incoming webhook to get them in a channel.
+      CONTROL_PLANE_WEBHOOK_URLS: '["http://webhook-sink:8000/hooks"]'
+      CONTROL_PLANE_WEBHOOK_SECRET: dev-webhook-secret
     # One indent level throughout: in a folded (>) block, deeper-indented lines
     # keep their newlines, and sh -c would run each line as its own command.
     command: >
@@ -49,6 +53,21 @@ services:
     depends_on:
       - model-serving-v2-good-latency-fault
       - model-serving-v2-good-error-fault
+      - webhook-sink
+
+  # Receives the backend's decision webhooks and lists them at
+  # http://localhost:8090/received (app/notifications/sink.py).
+  webhook-sink:
+    image: modelops-backend:dev
+    build:
+      context: ./backend
+    ports:
+      - "8090:8000"
+    volumes:
+      - ./backend/app:/app/app
+    environment:
+      WEBHOOK_SECRET: dev-webhook-secret
+    command: uvicorn app.notifications.sink:app --host 0.0.0.0 --port 8000
 
   frontend:
     build:

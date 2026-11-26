@@ -67,6 +67,8 @@ def explain_policy_check(
         return _explain_error_rate(observed_value, threshold, result, ci)
     if policy_name == "feature_drift":
         return _explain_feature_drift(observed_value, threshold, result, detail)
+    if policy_name == "prediction_drift":
+        return _explain_prediction_drift(observed_value, threshold, result, detail)
     if policy_name == "minimum_labeled_samples":
         return _explain_minimum_labeled_samples(observed_value, threshold, result)
     if policy_name == "minimum_label_coverage":
@@ -227,6 +229,43 @@ def _explain_feature_drift(
     return (
         f"canary inputs match its training data: the most-shifted feature, {feature}, has "
         f"a PSI of {observed:.2f}, within the {limit} limit."
+    )
+
+
+def _explain_prediction_drift(
+    observed: float | None,
+    threshold: float | None,
+    result: PolicyEvaluationResult,
+    detail: str | None,
+) -> str:
+    limit = f"{threshold:.2f}" if threshold is not None else "?"
+    if observed is None:
+        if detail and detail.startswith("no_reference_profile:"):
+            artifact = detail.partition(":")[2]
+            return (
+                f"no validation-score profile for {artifact}, so its live scores can't be "
+                "compared to how it scored held-out data - retrain to write one."
+            )
+        return (
+            "insufficient data: too few scored canary predictions in the window to tell "
+            "a shift in the model's scores from sampling noise."
+        )
+    if result == FAIL:
+        return (
+            f"the canary's fraud scores on live traffic have shifted from its validation "
+            f"scores (PSI {observed:.2f}, above the {limit} limit), and the shift is "
+            "significant - the model is behaving differently in production than it did "
+            "when it was validated."
+        )
+    if result == INCONCLUSIVE:
+        return (
+            f"the canary's fraud scores show a PSI of {observed:.2f} against its validation "
+            f"scores, above the {limit} limit, but on this many requests the shift could "
+            "still be noise - waiting for more traffic before deciding."
+        )
+    return (
+        f"the canary scores live traffic like its validation data (PSI {observed:.2f}, "
+        f"within the {limit} limit)."
     )
 
 

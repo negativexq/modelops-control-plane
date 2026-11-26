@@ -184,6 +184,7 @@ crash or restart loses nothing.
 | `latency_p95_increase` | Canary p95 vs stable p95, over successful responses | Bootstrap interval of the p95 ratio, one-sided Mann-Whitney U |
 | `minimum_recall` | Recall over matured labels | Wilson score interval, exact binomial test |
 | `feature_drift` | Canary inputs vs its training data, per feature, no labels needed | PSI corrected for sample size, chi-square test with Bonferroni across features |
+| `prediction_drift` | Canary fraud scores vs its validation scores, no labels needed | PSI corrected for sample size, chi-square test |
 | `minimum_requests` | Traffic on both sides | gate |
 | `minimum_labeled_samples` · `minimum_label_coverage` · `minimum_positive_labels` | Is there enough ground truth to judge quality? | gates |
 
@@ -263,6 +264,7 @@ The database lives on the `backend-db` volume and survives rebuilds;
 | `model-serving-v2-good-latency-fault` | 8004 | v2-good with switchable latency injection |
 | `model-serving-v2-good-error-fault` | 8005 | v2-good with switchable error injection |
 | `worker` | `:9100/metrics` | Promotion, rollback and reconcile loop; no API |
+| `webhook-sink` | 8090 | Receives the decision webhooks; lists them at `/received` |
 | `grafana` | 3001 | Dashboards and alerts |
 | `prometheus` | 9090 | Scrapes every `/metrics`, evaluates alert rules |
 | `jaeger` | 16686 | Traces (OTLP on 4318) |
@@ -356,7 +358,7 @@ so a frozen previous run never blocks the next one.
 </details>
 
 <details>
-<summary><b>Policy engine</b>: eight checks, two windows, confidence intervals</summary>
+<summary><b>Policy engine</b>: nine checks, two windows, confidence intervals</summary>
 
 - Reliability checks read the most recent window; quality checks read an older,
   *matured* window, because labels arrive late.
@@ -367,6 +369,9 @@ so a frozen previous run never blocks the next one.
   written next to the model (`reference_profile.json`): per-feature PSI, corrected
   for sample size, plus a chi-square test. It needs no labels, so it can act from
   the first window.
+- `prediction_drift` does the same for the model's output: live `fraud_probability`
+  against the validation scores in the same profile. It catches a fraud wave that
+  moves every input a little and the scores a lot.
 - The confidence level covers the whole rollout: later evaluations need more
   evidence, so re-checking every cycle can't add up to a likely false rollback.
 - Every result is a `PolicyEvaluation` row with the observed value, the limit, the
@@ -390,7 +395,14 @@ Design notes: [Policy engine](docs/DESIGN_NOTES.md#policy-engine).
 - Manual actions carry an `X-Operator` header (set from the dashboard's header);
   the name lands on the audit trail. It's an audit hint, not authentication.
 
+- **Notifications.** Promote, rollback, failure and freeze each send a webhook to
+  every URL in `CONTROL_PLANE_WEBHOOK_URLS`, signed with HMAC-SHA256 when
+  `CONTROL_PLANE_WEBHOOK_SECRET` is set, retried with backoff. The payload's `text`
+  renders in a Slack or Teams channel. Locally they go to `webhook-sink`: open
+  http://localhost:8090/received after a rollback.
+
 Design notes: [Automated promotion & rollback](docs/DESIGN_NOTES.md#automated-promotion--rollback),
+[Decision notifications](docs/DESIGN_NOTES.md#decision-notifications),
 [Manual automation hold](docs/DESIGN_NOTES.md#manual-automation-hold).
 
 </details>
@@ -461,6 +473,7 @@ Details: [observability/README.md](observability/README.md).
 | `POST /api/router/reconcile` · `GET /api/router/observed` | Desired vs observed |
 | `GET /api/router/gateway` | Live gateway stats |
 | `GET /api/stream` | Server-Sent Events |
+| `GET /api/notifications/deliveries` | Decision webhooks: sent, retrying, failed |
 | `POST /api/benchmarks/run` · `GET /api/benchmarks/current` | Dashboard benchmarks |
 
 Full schema: http://localhost:8000/docs.
@@ -483,20 +496,21 @@ CI runs four jobs on every push:
 
 | Job | What it checks |
 |---|---|
-| `backend` | ruff, `mypy --strict`, 384 pytest tests |
+| `backend` | ruff, `mypy --strict`, 395 pytest tests |
 | `frontend` | eslint, `tsc --noEmit`, `next build` |
 | `api-contract` | Regenerates the OpenAPI schema and TypeScript types and fails on any diff (FastAPI and pydantic pinned in `backend/constraints-api-contract.txt`) |
-| `integration` | Boots the **real** stack and runs seven scenarios against it, the observability check and the Playwright suite |
+| `integration` | Boots the **real** stack and runs eight scenarios against it, the observability check and the Playwright suite |
 
 The integration scenarios use the real worker, not a stand-in:
 
 1. manual create → evaluate → promote;
-2. injected latency, detected and rolled back by the worker;
+2. injected latency, detected and rolled back by the worker, with the signed rollback webhook checked at the sink;
 3. a healthy canary walked through every traffic step and promoted on a real recall PASS;
 4. a weak canary rolled back on a real recall FAIL;
 5. `docker compose restart router` mid-rollout, repaired by the worker's reconcile tick;
 6. a router restart after promotion, restored by the router's own startup sync;
-7. a healthy canary fed inputs with `amount` scaled 4×, rolled back on feature drift with no labels at all.
+7. a healthy canary fed inputs with `amount` scaled 4×, rolled back on feature drift with no labels at all;
+8. a healthy canary on 20% fraud traffic, rolled back on prediction drift while every input stays within feature drift's limit.
 
 Every real bug in this project was found by running the actual stack, which is why
 that job exists.

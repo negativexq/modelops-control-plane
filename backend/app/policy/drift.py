@@ -43,10 +43,14 @@ NUMERIC_BINS = 10
 # A bin no training row fell in still gets this share, so log(live / reference)
 # stays finite when live traffic lands somewhere training never did.
 _FLOOR = 1e-4
-# Below this many live rows the chi-square approximation and the PSI correction
-# are both too rough to act on (with decile bins, 50 rows is 5 expected per bin).
-MINIMUM_SAMPLES = 50
+# Below this many live rows the PSI correction is too rough to act on: on draws
+# from the training data itself, the worst of 28 features reaches a corrected
+# PSI of ~0.3 at 50 rows (95th percentile) but ~0.18 at 100.
+MINIMUM_SAMPLES = 100
 OTHER_CATEGORY = "__other__"
+# The model output the prediction drift check follows: the serving response's
+# fraud_probability, profiled on the validation split under profile["prediction"].
+PREDICTION_SCORE = "fraud_probability"
 
 
 def build_reference_profile(
