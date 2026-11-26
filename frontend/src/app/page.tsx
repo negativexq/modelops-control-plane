@@ -2,9 +2,8 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ArrowRight, ArrowUpRight, CircleHelp, GitBranch, Rocket, Undo2 } from "lucide-react";
-import { isLive, observedFor, useDeployments, useFleetSummary, useRouterObserved } from "@/lib/queries";
+import { isLive, useDeployments, useFleetSummary, useRouterObserved } from "@/lib/queries";
 import { decisionOf, formatDuration, relativeTime } from "@/lib/derive";
 import { STATUS_META, TONE_DOT } from "@/lib/status";
 import type { DeploymentOut } from "@/lib/types";
@@ -20,7 +19,7 @@ import { ActorBadge } from "@/components/viz/ActorBadge";
 import { DecisionPanel } from "@/components/viz/DecisionPanel";
 import { KpiCard } from "@/components/viz/KpiCard";
 import { RolloutLanes } from "@/components/viz/RolloutLanes";
-import { RoutingBeam } from "@/components/viz/RoutingBeam";
+import { FleetModels, fleetModels } from "@/components/viz/FleetModels";
 import { SparkBars } from "@/components/viz/SparkBars";
 
 function percent(value: number | null) {
@@ -80,59 +79,83 @@ function Kpis() {
   );
 }
 
-/** Which model to show first: one with a live rollout, else the most recently
- * started one the router holds a split for. */
-function defaultModel(deployments: DeploymentOut[], routed: string[]): string | undefined {
-  const live = deployments.find((d) => isLive(d.status) && routed.includes(d.model_name));
-  if (live) return live.model_name;
-  const latest = [...deployments]
-    .filter((d) => routed.includes(d.model_name))
-    .sort((a, b) => (b.created_at > a.created_at ? 1 : -1))[0];
-  return latest?.model_name ?? routed[0];
-}
-
-function LiveRouting({ deployments }: { deployments: DeploymentOut[] }) {
+/** Every model at once, read from the router itself. */
+function Models({
+  deployments,
+  focusId,
+  onFocus,
+}: {
+  deployments: DeploymentOut[];
+  focusId: string | undefined;
+  onFocus: (deployment: DeploymentOut) => void;
+}) {
   const { data: router } = useRouterObserved();
-  const routed = router?.configs.map((c) => c.model_name) ?? [];
-  const [picked, setPicked] = useState<string | null>(null);
-  const model = picked && routed.includes(picked) ? picked : defaultModel(deployments, routed);
-  const observed = router ? observedFor(router, model) : undefined;
-  const served = deployments.find((d) => d.id === observed?.deployment_id);
-
+  const models = fleetModels(deployments, router);
+  const live = models.filter((m) => isLive(m.latest?.status)).length;
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Live routing</CardTitle>
+        <CardTitle>Models</CardTitle>
         <CardDescription>
-          What the router is serving right now, read from the router itself
-          {routed.length > 1 ? ` · ${routed.length} models` : ""}.
+          What the router is serving right now, for every model
+          {models.length ? ` · ${models.length} model${models.length === 1 ? "" : "s"}` : ""}
+          {live ? `, ${live} rolling out` : ""}.
         </CardDescription>
-        <CardAction className="flex items-center gap-1">
-          {routed.length > 1 && model ? (
-            <Select value={model} onValueChange={setPicked}>
-              <SelectTrigger size="sm" className="h-7 w-44 font-mono text-xs" aria-label="Model">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent align="end">
-                {routed.map((name) => (
-                  <SelectItem key={name} value={name} className="font-mono text-xs">
-                    {name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          ) : null}
-          {served ? (
-            <Button asChild variant="ghost" size="xs" aria-label={`Open ${served.model_name} rollout`}>
-              <Link href={`/deployments/${served.id}`}>
-                {routed.length > 1 ? null : <span className="font-mono">{served.model_name}</span>} <ArrowRight />
-              </Link>
-            </Button>
-          ) : null}
+        <CardAction>
+          <Button asChild variant="ghost" size="xs">
+            <Link href="/gateway">
+              Gateway <ArrowRight />
+            </Link>
+          </Button>
         </CardAction>
       </CardHeader>
       <CardContent>
-        <RoutingBeam observed={observed} stableVersion={served?.stable_version} />
+        <FleetModels models={models} reachable={router?.reachable} focusId={focusId} onFocus={onFocus} />
+      </CardContent>
+    </Card>
+  );
+}
+
+/** The rollout in focus, with a switcher when several are in flight. */
+function Inspector({
+  focus,
+  live,
+  picked,
+  onFocus,
+}: {
+  focus: DeploymentOut;
+  live: DeploymentOut[];
+  picked: boolean;
+  onFocus: (deployment: DeploymentOut) => void;
+}) {
+  return (
+    <Card className="xl:sticky xl:top-16 xl:self-start">
+      <CardHeader>
+        <CardDescription>
+          {isLive(focus.status) ? (live.length > 1 ? `In flight · ${live.length} rollouts` : "In flight") : picked ? "Decision" : "Latest decision"}
+        </CardDescription>
+        {live.length > 1 ? (
+          <div className="flex flex-wrap gap-1 pt-1" role="tablist" aria-label="Rollouts in flight">
+            {live.map((d) => (
+              <button
+                key={d.id}
+                type="button"
+                role="tab"
+                aria-selected={d.id === focus.id}
+                onClick={() => onFocus(d)}
+                className={cn(
+                  "max-w-full truncate rounded-md border px-2 py-0.5 font-mono text-[11px] transition-colors",
+                  d.id === focus.id ? "border-canary/50 bg-canary/10 text-foreground" : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {d.model_name}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </CardHeader>
+      <CardContent>
+        <DecisionPanel deployment={focus} />
       </CardContent>
     </Card>
   );
@@ -190,6 +213,7 @@ function DecisionFeed({ deployments }: { deployments: DeploymentOut[] }) {
 }
 
 function OverviewContent({ deployments }: { deployments: DeploymentOut[] }) {
+  const [focusId, setFocusId] = useState<string | null>(null);
   if (deployments.length === 0) {
     return (
       <Empty className="border">
@@ -211,17 +235,20 @@ function OverviewContent({ deployments }: { deployments: DeploymentOut[] }) {
     );
   }
 
-  // Inspector focus: the live rollout if there is one, else the latest decision.
+  // Inspector focus: what was clicked, else the first live rollout, else the latest decision.
+  const live = deployments.filter((d) => isLive(d.status));
   const focus =
-    deployments.find((d) => isLive(d.status)) ??
+    deployments.find((d) => d.id === focusId) ??
+    live[0] ??
     [...deployments].sort((a, b) => (decisionOf(b)?.at?.getTime() ?? 0) - (decisionOf(a)?.at?.getTime() ?? 0))[0];
+  const onFocus = (d: DeploymentOut) => setFocusId(d.id);
 
   return (
     <div className="space-y-6">
       <Kpis />
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_22rem]">
         <div className="min-w-0 space-y-6">
-          <LiveRouting deployments={deployments} />
+          <Models deployments={deployments} focusId={focus?.id} onFocus={onFocus} />
           <Card>
             <CardHeader>
               <CardTitle>Rollout history</CardTitle>
@@ -233,14 +260,7 @@ function OverviewContent({ deployments }: { deployments: DeploymentOut[] }) {
           </Card>
           <DecisionFeed deployments={deployments} />
         </div>
-        <Card className="xl:sticky xl:top-16 xl:self-start">
-          <CardHeader>
-            <CardDescription>{isLive(focus.status) ? "In flight" : "Latest decision"}</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <DecisionPanel deployment={focus} />
-          </CardContent>
-        </Card>
+        <Inspector focus={focus} live={live} picked={focus.id === focusId} onFocus={onFocus} />
       </div>
     </div>
   );

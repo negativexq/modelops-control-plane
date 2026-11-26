@@ -60,7 +60,12 @@ plus Prometheus, Grafana and Jaeger.
 What the control loop is doing right now, what it decided recently, and how much
 of that was automatic.
 
-![Overview: live rollouts, promotions, rollbacks and frozen rollouts, the live routing split read from the router, and the rollout history](docs/screenshots/overview.png)
+Every model the router serves is listed at once, each with the split it's
+serving right now (read from the router, not the database), its rollout and when
+it last changed; live rollouts come first. With several rollouts in flight the
+inspector on the right switches between them.
+
+![Overview: decision KPIs, every routed model with its live split, and three rollouts in flight in the inspector](docs/screenshots/overview.png)
 
 ### Gateway
 

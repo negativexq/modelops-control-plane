@@ -6,7 +6,11 @@ test("overview renders fleet KPIs and the live stream connects", async ({ page }
   for (const label of ["Live rollouts", "Promoted", "Rolled back", "Inconclusive"]) {
     await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
   }
-  await expect(page.getByText("Live routing")).toBeVisible();
+  // Every model the router serves, each with its split, at once.
+  await expect(page.getByText(/What the router is serving right now, for every model/)).toBeVisible();
+  const models = page.getByTestId("fleet-models").locator("li[data-model]");
+  await expect(models.first()).toBeVisible();
+  await expect(models.first()).toContainText("%");
   // The header indicator switches from "Polling" to "Live" once /api/stream is open.
   await expect(page.locator("header [data-stream]")).toHaveAttribute("data-stream", "open");
 });
