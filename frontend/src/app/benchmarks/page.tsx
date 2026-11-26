@@ -108,10 +108,11 @@ export default function BenchmarksPage() {
 
       <QueryState query={scenarios}>
         {(list) => (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {list.map((scenario) => (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-6">
+            {list.map((scenario, i) => (
               <ScenarioCard
                 key={scenario.key}
+                className={gridSpan(i, list.length)}
                 scenario={scenario}
                 disabled={isRunning || start.isPending}
                 submitting={start.isPending && start.variables?.scenario === scenario.key}
@@ -179,19 +180,31 @@ function expectation(outcome: string): { tone: Tone; icon: LucideIcon } {
   return { tone: "neutral", icon: Gauge };
 }
 
+/** Spans that leave no hole in the last row: three cards a row on wide screens
+ * (each two of six columns), with a short last row's cards widened to fill it,
+ * and a lone last card spanning both columns on medium screens. */
+function gridSpan(index: number, count: number): string {
+  const lastRow = count % 3;
+  const wide = lastRow !== 0 && index >= count - lastRow ? (lastRow === 1 ? "xl:col-span-6" : "xl:col-span-3") : "xl:col-span-2";
+  const medium = count % 2 === 1 && index === count - 1 ? "md:col-span-2" : "";
+  return cn(wide, medium);
+}
+
 function ScenarioCard({
   scenario,
+  className,
   disabled,
   submitting,
   onRun,
 }: {
   scenario: ScenarioInfo;
+  className?: string;
   disabled: boolean;
   submitting: boolean;
   onRun: () => void;
 }) {
   return (
-    <Card size="sm" className="group justify-between transition-colors hover:border-foreground/20">
+    <Card size="sm" className={cn("group justify-between transition-colors hover:border-foreground/20", className)}>
       <CardHeader>
         <div className="mb-1 flex size-8 items-center justify-center rounded-lg border bg-muted/40 text-muted-foreground transition-colors group-hover:text-foreground">
           {(() => {

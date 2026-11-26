@@ -163,8 +163,10 @@ function Panel({
               tickLine={false}
               axisLine={false}
               fontSize={10}
-              width={44}
-              unit={unit}
+              // Wide enough for "12.5%" / "250ms"; rounded so a 6.25% tick doesn't
+              // overflow and get clipped to "0.25%".
+              width={52}
+              tickFormatter={(v: number) => `${Number(v.toFixed(v < 10 ? 1 : 0))}${unit}`}
               // Keep the policy limit on screen even when every value sits far below it.
               domain={limit ? [0, (dataMax: number) => Math.max(dataMax, limit.y * 1.25)] : [0, "auto"]}
               stroke="var(--muted-foreground)"
@@ -194,19 +196,24 @@ function Panel({
                 label={{ value: limit.label, position: "insideTopRight", fontSize: 10, fill: "var(--danger)" }}
               />
             ) : null}
-            {lines.map((line) => (
-              <Line
-                key={line.key}
-                dataKey={line.key}
-                name={line.name}
-                stroke={line.color}
-                strokeWidth={line.dashed ? 1 : 1.75}
-                strokeDasharray={line.dashed ? "4 4" : undefined}
-                dot={false}
-                isAnimationActive={false}
-                connectNulls={false}
-              />
-            ))}
+            {lines.map((line) => {
+              // A line needs two points; a rollout short enough to fit in one or two
+              // buckets would otherwise draw nothing at all.
+              const points = rows.filter((r) => r[line.key] != null).length;
+              return (
+                <Line
+                  key={line.key}
+                  dataKey={line.key}
+                  name={line.name}
+                  stroke={line.color}
+                  strokeWidth={line.dashed ? 1 : 1.75}
+                  strokeDasharray={line.dashed ? "4 4" : undefined}
+                  dot={points <= 2 ? { r: 2.5, fill: line.color, strokeWidth: 0 } : false}
+                  isAnimationActive={false}
+                  connectNulls={false}
+                />
+              );
+            })}
           </LineChart>
         </ResponsiveContainer>
       </div>
