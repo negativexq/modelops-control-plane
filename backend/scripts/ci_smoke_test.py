@@ -200,8 +200,17 @@ def _wait_for_deployment_status(
     )
 
 
+def _predict_url(model_name: str) -> str:
+    """The router routes per model (one traffic split each), so traffic for a
+    scenario's own model_name has to go to that model's predict path. Plain
+    /router/predict serves the router's default model ("fraud-model"): requests
+    sent there never touch a ci-smoke-* deployment's split, and no metrics land
+    for it."""
+    return f"{ROUTER_URL}/router/models/{model_name}/predict"
+
+
 class _BackgroundTraffic:
-    """Keeps POSTing real, labeled rows to /router/predict on a background thread
+    """Keeps POSTing real, labeled rows to `model_name`'s predict path on a background thread
     until stopped, optionally queueing each one's true label with `label_feeder`
     (see scripts/benchmarks/locustfile.py's _LabelFeeder - same class, same
     delayed/partial-coverage semantics, reused here rather than duplicated).
@@ -223,10 +232,12 @@ class _BackgroundTraffic:
 
     def __init__(
         self,
+        model_name: str,
         label_feeder: "_LabelFeeder | None" = None,
         interval_seconds: float = 0.2,
         positive_ratio: float | None = None,
     ) -> None:
+        self._url = _predict_url(model_name)
         self._label_feeder = label_feeder
         self._interval_seconds = interval_seconds
         self._positive_ratio = positive_ratio
@@ -237,9 +248,7 @@ class _BackgroundTraffic:
         while not self._stop.is_set():
             try:
                 payload, true_label = _sample_row(self._positive_ratio)
-                response = httpx.post(
-                    f"{ROUTER_URL}/router/predict", json=payload, timeout=10
-                )
+                response = httpx.post(self._url, json=payload, timeout=10)
                 if self._label_feeder is not None and response.status_code == 200:
                     prediction_id = response.json().get("prediction_id")
                     if isinstance(prediction_id, str):
@@ -376,10 +385,11 @@ def run_manual_smoke_scenario() -> None:
 
     for _ in range(40):
         payload, _true_label = _sample_row()
-        response = httpx.post(f"{ROUTER_URL}/router/predict", json=payload, timeout=10)
+        response = httpx.post(_predict_url("ci-smoke-manual"), json=payload, timeout=10)
         if response.status_code != 200:
             raise SmokeTestFailure(
-                f"[FAIL] /router/predict returned {response.status_code}: {response.text}"
+                f"[FAIL] {response.request.url} returned {response.status_code}: "
+                f"{response.text}"
             )
     print("[ok] sent 40 predictions")
 
@@ -452,7 +462,7 @@ def run_automatic_rollback_scenario() -> None:
         _record_deployment_id("scenario2-latency-rollback", deployment_id)
         print(f"[ok] deployment {deployment_id} is {deployment['status']} (canary has the fault)")
 
-        with _BackgroundTraffic():
+        with _BackgroundTraffic("ci-smoke-latency-rollback"):
             final = _wait_for_deployment_status(
                 deployment_id, target_statuses={"ROLLED_BACK", "PROMOTED", "FAILED"},
                 timeout_seconds=90,
@@ -545,6 +555,7 @@ def run_automatic_quality_promote_scenario() -> None:
     try:
         with (
             _BackgroundTraffic(
+                "ci-smoke-quality-promote",
                 label_feeder,
                 interval_seconds=0.03,
                 positive_ratio=QUALITY_SCENARIO_POSITIVE_RATIO,
@@ -636,6 +647,7 @@ def run_automatic_quality_rollback_scenario() -> None:
     try:
         with (
             _BackgroundTraffic(
+                "ci-smoke-quality-rollback",
                 label_feeder,
                 interval_seconds=0.03,
                 positive_ratio=QUALITY_SCENARIO_POSITIVE_RATIO,
