@@ -45,7 +45,7 @@ human on its own, and every decision is explained in plain English.
 |---|---|
 | 🚦 **Ramps traffic gradually** | A canary climbs `10% → 25% → 50%`, one tested step at a time, and a pass at 50% promotes it, through a real gateway with sticky routing, a circuit breaker per version and rate limits. |
 | 📐 **Decides with statistics** | Error rate, p95 latency and recall each come with a confidence interval and a p-value. A check fails only when the whole interval is past the limit, so two unlucky requests can't roll back a good model. The error budget is spent across a rollout's repeated evaluations, so re-checking every cycle can't add up to a likely false rollback either. |
-| 🏷️ **Judges quality, not just uptime** | Ground-truth labels arrive late and incomplete, through a real ingestion API. Quality checks wait for a matured window and enough positive examples before they speak. |
+| 🏷️ **Judges quality, not just uptime** | Ground-truth labels arrive late and incomplete, through a real ingestion API. Quality checks wait for a matured window and enough positive examples before they speak. Before any label arrives, a drift check compares the canary's live inputs with the data it was trained on. |
 | 🤖 **Acts on its own, explains itself** | A worker promotes, rolls back or freezes the rollout for a human. Every check writes a sentence saying why, and the timeline tells the whole story. |
 | 🔁 **Heals drift** | The database holds the desired traffic split, the router holds the observed one. A reconciler repairs any difference, even after the router restarts and forgets everything. |
 | 🔭 **Observable end to end** | Prometheus metrics on every service, Grafana dashboards with alerts, and an OpenTelemetry trace for every prediction from the gateway down to the model's inference. |
@@ -352,13 +352,19 @@ so a frozen previous run never blocks the next one.
 </details>
 
 <details>
-<summary><b>Policy engine</b>: seven checks, two windows, confidence intervals</summary>
+<summary><b>Policy engine</b>: eight checks, two windows, confidence intervals</summary>
 
 - Reliability checks read the most recent window; quality checks read an older,
   *matured* window, because labels arrive late.
 - `minimum_positive_labels` exists because recall's denominator is positive
   examples: at a 2% fraud rate a window can hold hundreds of labels and only two
   frauds.
+- `feature_drift` compares the canary's recorded inputs with the training profile
+  written next to the model (`reference_profile.json`): per-feature PSI, corrected
+  for sample size, plus a chi-square test. It needs no labels, so it can act from
+  the first window.
+- The confidence level covers the whole rollout: later evaluations need more
+  evidence, so re-checking every cycle can't add up to a likely false rollback.
 - Every result is a `PolicyEvaluation` row with the observed value, the limit, the
   interval, the p-value, the method and an explanation.
 - `POST /api/deployments/{id}/evaluate`, `GET .../policy-evaluations`,
@@ -473,10 +479,10 @@ CI runs four jobs on every push:
 
 | Job | What it checks |
 |---|---|
-| `backend` | ruff, `mypy --strict`, 359 pytest tests |
+| `backend` | ruff, `mypy --strict`, 384 pytest tests |
 | `frontend` | eslint, `tsc --noEmit`, `next build` |
 | `api-contract` | Regenerates the OpenAPI schema and TypeScript types and fails on any diff (FastAPI and pydantic pinned in `backend/constraints-api-contract.txt`) |
-| `integration` | Boots the **real** stack and runs six scenarios against it, the observability check and the Playwright suite |
+| `integration` | Boots the **real** stack and runs seven scenarios against it, the observability check and the Playwright suite |
 
 The integration scenarios use the real worker, not a stand-in:
 
@@ -485,7 +491,8 @@ The integration scenarios use the real worker, not a stand-in:
 3. a healthy canary walked through every traffic step and promoted on a real recall PASS;
 4. a weak canary rolled back on a real recall FAIL;
 5. `docker compose restart router` mid-rollout, repaired by the worker's reconcile tick;
-6. a router restart after promotion, restored by the router's own startup sync.
+6. a router restart after promotion, restored by the router's own startup sync;
+7. a healthy canary fed inputs with `amount` scaled 4×, rolled back on feature drift with no labels at all.
 
 Every real bug in this project was found by running the actual stack, which is why
 that job exists.

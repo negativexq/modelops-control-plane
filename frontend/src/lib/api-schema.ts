@@ -885,6 +885,22 @@ export interface components {
          * @enum {string}
          */
         DeploymentStatus: "PENDING" | "DEPLOYING" | "CANARY_RUNNING" | "EVALUATING" | "PROMOTING" | "PROMOTED" | "ROLLING_BACK" | "ROLLED_BACK" | "FAILED" | "INCONCLUSIVE";
+        /** DriftPolicy */
+        "DriftPolicy-Input": {
+            /**
+             * Max Feature Psi
+             * @default 0.25
+             */
+            max_feature_psi?: number | null;
+        };
+        /** DriftPolicy */
+        "DriftPolicy-Output": {
+            /**
+             * Max Feature Psi
+             * @default 0.25
+             */
+            max_feature_psi: number | null;
+        };
         /** EvaluateResponse */
         EvaluateResponse: {
             /** Checks */
@@ -1100,6 +1116,12 @@ export interface components {
          *     docs/DESIGN_NOTES.md.
          */
         MetricIn: {
+            /** Artifact */
+            artifact?: string | null;
+            /** Features */
+            features?: {
+                [key: string]: number | string;
+            } | null;
             /** Latency Ms */
             latency_ms: number;
             /** Model Version */
@@ -1255,6 +1277,8 @@ export interface components {
             ci_low: number | null;
             /** Confidence Level */
             confidence_level: number | null;
+            /** Detail */
+            detail: string | null;
             /** Metric Name */
             metric_name: string;
             /** Observed Value */
@@ -1286,6 +1310,12 @@ export interface components {
              * @default 0.95
              */
             confidence_level?: number;
+            /**
+             * @default {
+             *       "max_feature_psi": 0.25
+             *     }
+             */
+            drift?: components["schemas"]["DriftPolicy-Input"];
             /**
              * Evaluation Window Seconds
              * @default 300
@@ -1361,6 +1391,12 @@ export interface components {
              */
             confidence_level: number;
             /**
+             * @default {
+             *       "max_feature_psi": 0.25
+             *     }
+             */
+            drift: components["schemas"]["DriftPolicy-Output"];
+            /**
              * Evaluation Window Seconds
              * @default 300
              */
@@ -1427,6 +1463,8 @@ export interface components {
             ci_low: number | null;
             /** Confidence Level */
             confidence_level: number | null;
+            /** Detail */
+            detail: string | null;
             /**
              * Evaluated At
              * Format: date-time
@@ -1604,6 +1642,8 @@ export interface components {
             ci_low: number | null;
             /** Confidence Level */
             confidence_level: number | null;
+            /** Detail */
+            detail: string | null;
             /** Explanation */
             explanation: string;
             /** Id */

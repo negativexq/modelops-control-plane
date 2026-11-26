@@ -1,6 +1,6 @@
 import math
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -30,6 +30,8 @@ def record_metric(db: Session, deployment_id: str, payload: MetricIn) -> None:
         status_code=payload.status_code,
         prediction=payload.prediction,
         prediction_id=payload.prediction_id,
+        features=payload.features,
+        artifact=payload.artifact,
     )
     db.add(metric)
     db.commit()
@@ -189,6 +191,24 @@ def window_latencies(
         PredictionMetric.status_code < 400,
     )
     return [float(v) for v in db.execute(stmt).scalars().all()]
+
+
+def window_inputs(
+    db: Session, deployment_id: str, version: str, window_seconds: int, *, now: datetime
+) -> list[tuple[str, dict[str, Any]]]:
+    """(artifact, features) of every answered prediction for one version in
+    [now - window, now] that recorded its inputs - what the drift check
+    compares to the artifact's training profile (app/policy/drift.py)."""
+    stmt = select(PredictionMetric.artifact, PredictionMetric.features).where(
+        PredictionMetric.deployment_id == deployment_id,
+        PredictionMetric.model_version == version,
+        PredictionMetric.created_at >= now - timedelta(seconds=window_seconds),
+        PredictionMetric.created_at <= now,
+        PredictionMetric.status_code < 400,
+        PredictionMetric.features.is_not(None),
+        PredictionMetric.artifact.is_not(None),
+    )
+    return [(artifact, features) for artifact, features in db.execute(stmt).tuples().all()]
 
 
 def compute_deltas(stable: MetricsSummary, canary: MetricsSummary) -> MetricsDeltas:

@@ -21,6 +21,9 @@ class StatisticalEvidence(BaseModel):
     # Which evaluation of the rollout this check came from (1 = first) when
     # sequential testing raised confidence_level above the policy's own.
     sequential_look: int | None = None
+    # What the check was about when the policy name doesn't say: for
+    # feature_drift, the feature that drifted most, or why nothing was compared.
+    detail: str | None = None
 
 
 class PolicyCheckOut(StatisticalEvidence):

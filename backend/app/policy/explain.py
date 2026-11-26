@@ -37,6 +37,7 @@ def explain_policy_check(
     ci_high: float | None = None,
     confidence_level: float | None = None,
     sequential_look: int | None = None,
+    detail: str | None = None,
 ) -> str:
     """Human-readable explanation of one policy check. `canary_weight` is context
     used only to make a minimum_requests INCONCLUSIVE concrete when the canary is
@@ -64,6 +65,8 @@ def explain_policy_check(
         return _explain_latency(observed_value, threshold, result, ci)
     if policy_name == "max_error_rate":
         return _explain_error_rate(observed_value, threshold, result, ci)
+    if policy_name == "feature_drift":
+        return _explain_feature_drift(observed_value, threshold, result, detail)
     if policy_name == "minimum_labeled_samples":
         return _explain_minimum_labeled_samples(observed_value, threshold, result)
     if policy_name == "minimum_label_coverage":
@@ -186,6 +189,44 @@ def _explain_error_rate(
     return (
         f"canary error rate ({observed:.2f}%){interval} is within the "
         f"{threshold:.2f}% threshold."
+    )
+
+
+def _explain_feature_drift(
+    observed: float | None,
+    threshold: float | None,
+    result: PolicyEvaluationResult,
+    detail: str | None,
+) -> str:
+    limit = f"{threshold:.2f}" if threshold is not None else "?"
+    if observed is None:
+        if detail and detail.startswith("no_reference_profile:"):
+            artifact = detail.partition(":")[2]
+            return (
+                f"no training profile for {artifact}, so its live inputs can't be "
+                "compared to what it was trained on - retrain to write "
+                "reference_profile.json next to the model."
+            )
+        return (
+            "insufficient data: too few canary predictions with recorded inputs in the "
+            "window to tell drift from sampling noise."
+        )
+    feature = f"'{detail}'" if detail else "the most-shifted feature"
+    if result == FAIL:
+        return (
+            f"canary traffic has drifted from its training data: {feature} shows a PSI of "
+            f"{observed:.2f}, above the {limit} limit, and the shift is significant - the "
+            "canary is scoring inputs unlike anything it was trained on."
+        )
+    if result == INCONCLUSIVE:
+        return (
+            f"{feature} shows a PSI of {observed:.2f}, above the {limit} limit, but on this "
+            "many requests the shift could still be sampling noise - waiting for more "
+            "traffic before deciding."
+        )
+    return (
+        f"canary inputs match its training data: the most-shifted feature, {feature}, has "
+        f"a PSI of {observed:.2f}, within the {limit} limit."
     )
 
 

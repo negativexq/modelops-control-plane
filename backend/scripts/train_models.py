@@ -36,6 +36,7 @@ from sklearn.metrics import (
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+from app.policy.drift import build_reference_profile
 from scripts.generate_dataset import DATA_DIR
 
 ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts" / "fraud-model"
@@ -158,6 +159,7 @@ def _write_artifact(
     metadata: dict[str, Any],
     evaluation: dict[str, Any],
     artifacts_dir: Path,
+    x_train: pd.DataFrame,
 ) -> Path:
     version_dir = artifacts_dir / version
     version_dir.mkdir(parents=True, exist_ok=True)
@@ -165,6 +167,15 @@ def _write_artifact(
     joblib.dump(pipeline, version_dir / "model.joblib")
     (version_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
     (version_dir / "evaluation.json").write_text(json.dumps(evaluation, indent=2))
+    # What the drift check compares live traffic to (app/policy/drift.py): the
+    # distribution of exactly the features this version was trained on.
+    features = list(x_train.columns)
+    profile = build_reference_profile(
+        x_train,
+        [f for f in features if f not in CATEGORICAL_FEATURES],
+        [f for f in features if f in CATEGORICAL_FEATURES],
+    )
+    (version_dir / "reference_profile.json").write_text(json.dumps(profile, indent=2))
 
     return version_dir
 
@@ -208,7 +219,7 @@ def train_all(
         },
         "features": ALL_FEATURES,
     }
-    _write_artifact("v1", v1_pipeline, v1_meta, v1_eval, artifacts_dir)
+    _write_artifact("v1", v1_pipeline, v1_meta, v1_eval, artifacts_dir, x_train)
     results["v1"] = {"metadata": v1_meta, "evaluation": v1_eval}
 
     # v2-good: successful canary, should beat v1 on recall
@@ -228,7 +239,9 @@ def train_all(
         },
         "features": ALL_FEATURES,
     }
-    _write_artifact("v2-good", v2_good_pipeline, v2_good_meta, v2_good_eval, artifacts_dir)
+    _write_artifact(
+        "v2-good", v2_good_pipeline, v2_good_meta, v2_good_eval, artifacts_dir, x_train
+    )
     results["v2-good"] = {"metadata": v2_good_meta, "evaluation": v2_good_eval}
 
     # v2-quality-bad: deliberately weakened canary (weak feature subset + label noise)
@@ -253,7 +266,9 @@ def train_all(
             "noise to simulate a quality-regressed canary for promotion-gate testing.",
         },
     }
-    _write_artifact("v2-quality-bad", v2_bad_pipeline, v2_bad_meta, v2_bad_eval, artifacts_dir)
+    _write_artifact(
+        "v2-quality-bad", v2_bad_pipeline, v2_bad_meta, v2_bad_eval, artifacts_dir, x_train_weak
+    )
     results["v2-quality-bad"] = {"metadata": v2_bad_meta, "evaluation": v2_bad_eval}
 
     return results

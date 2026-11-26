@@ -98,8 +98,10 @@ def test_a_clearly_broken_canary_still_fails_on_a_late_look() -> None:
 def test_without_a_look_or_with_sequential_testing_off_the_level_is_unchanged() -> None:
     stable = _summary("v1", 200, 0.0)
     canary = _summary("v2", 200, 0.01)
-    for config, look in ((PolicyConfig(minimum_requests=1), None),
-                         (PolicyConfig(minimum_requests=1, sequential_testing=False), 9)):
+    for config, look in (
+        (PolicyConfig(minimum_requests=1), None),
+        (PolicyConfig(minimum_requests=1, sequential_testing=False), 9),
+    ):
         checks = evaluate_policies(stable, canary, canary, config, None, look=look)
         error_check = next(c for c in checks if c.policy_name == "max_error_rate")
         assert error_check.confidence_level == pytest.approx(0.95)
@@ -160,8 +162,6 @@ def test_looks_count_only_evaluations_that_ran_a_test(
 
     timeline = client.get(f"/api/deployments/{deployment.id}/timeline").json()
     explanations = [
-        item["explanation"]
-        for item in timeline
-        if item.get("policy_name") == "max_error_rate"
+        item["explanation"] for item in timeline if item.get("policy_name") == "max_error_rate"
     ]
     assert any("look 2" in text and "99.2%" in text for text in explanations)

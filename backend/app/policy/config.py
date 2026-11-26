@@ -23,6 +23,17 @@ class QualityPolicy(BaseModel):
     minimum_recall: float = Field(default=0.8, ge=0, le=1)
 
 
+class DriftPolicy(BaseModel):
+    # Always present in responses, so the API schema marks it required there.
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+    # Largest sample-size-corrected PSI any one feature may show against the
+    # canary's training data (app/policy/drift.py); 0.25 is the usual "major
+    # shift" line. None switches the check off - for traffic that's skewed on
+    # purpose, like a harness oversampling fraud to get enough positive labels.
+    max_feature_psi: float | None = Field(default=0.25, ge=0)
+
+
 class PolicyConfig(BaseModel):
     """A named set of promotion-gate thresholds for one evaluation run.
 
@@ -73,6 +84,7 @@ class PolicyConfig(BaseModel):
     latency: LatencyPolicy = LatencyPolicy()
     reliability: ReliabilityPolicy = ReliabilityPolicy()
     quality: QualityPolicy = QualityPolicy()
+    drift: DriftPolicy = DriftPolicy()
 
 
 class PolicySettings(BaseSettings):
@@ -93,6 +105,7 @@ class PolicySettings(BaseSettings):
     latency_p95_max_increase_percent: float = 20.0
     reliability_max_error_rate_percent: float = 5.0
     quality_minimum_recall: float = 0.8
+    drift_max_feature_psi: float | None = 0.25
 
     def to_policy_config(self) -> PolicyConfig:
         return PolicyConfig(
@@ -110,6 +123,7 @@ class PolicySettings(BaseSettings):
                 max_error_rate_percent=self.reliability_max_error_rate_percent
             ),
             quality=QualityPolicy(minimum_recall=self.quality_minimum_recall),
+            drift=DriftPolicy(max_feature_psi=self.drift_max_feature_psi),
         )
 
 

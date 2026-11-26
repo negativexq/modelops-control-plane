@@ -484,6 +484,27 @@ def test_predict_emits_metric_with_deployment_id(artifacts_dir: Path) -> None:
     # payload unmodified - it's the only join key a later label ingestion has back
     # to this specific prediction (see docs/DESIGN_NOTES.md).
     assert sent["prediction_id"] == response.json()["prediction_id"]
+    # The drift check's inputs: what the model scored, and which trained
+    # artifact scored it (named by the serving container, not the router label).
+    assert sent["features"] == _sample_payload(FULL_FEATURES)
+    assert sent["artifact"] == f"{response.json()['model_name']}/v1"
+
+
+def test_rejected_predictions_send_no_drift_inputs(artifacts_dir: Path) -> None:
+    transport = RecordingTransport()
+    client = _router_client_with_control_plane(artifacts_dir, transport)
+
+    response = client.post("/router/predict", json={"amount": "not-a-number"})
+    assert response.status_code == 422
+
+    for _ in range(20):
+        if transport.calls:
+            break
+        time.sleep(0.02)
+    sent = json.loads(transport.calls[0].content)
+    assert sent["status_code"] == 422
+    assert sent["features"] is None
+    assert sent["artifact"] is None
 
 
 def test_predict_does_not_block_on_slow_metric_push(artifacts_dir: Path) -> None:

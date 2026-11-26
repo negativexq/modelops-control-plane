@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 import httpx
 
@@ -15,6 +16,8 @@ async def send_metric(
     prediction: int | None,
     prediction_id: str | None,
     timeout: float,
+    features: dict[str, Any] | None = None,
+    artifact: str | None = None,
 ) -> None:
     """POST one metric row to the control plane. Always run as a background task
     (see app/router/main.py's route_predict) - never awaited inline, and any failure
@@ -27,6 +30,8 @@ async def send_metric(
         "status_code": status_code,
         "prediction": prediction,
         "prediction_id": prediction_id,
+        "features": features,
+        "artifact": artifact,
     }
     try:
         await client.post(url, json=payload, timeout=timeout)

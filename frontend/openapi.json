@@ -465,6 +465,47 @@
         "title": "DeploymentStatus",
         "type": "string"
       },
+      "DriftPolicy-Input": {
+        "properties": {
+          "max_feature_psi": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": 0.25,
+            "title": "Max Feature Psi"
+          }
+        },
+        "title": "DriftPolicy",
+        "type": "object"
+      },
+      "DriftPolicy-Output": {
+        "properties": {
+          "max_feature_psi": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": 0.25,
+            "title": "Max Feature Psi"
+          }
+        },
+        "required": [
+          "max_feature_psi"
+        ],
+        "title": "DriftPolicy",
+        "type": "object"
+      },
       "EvaluateResponse": {
         "properties": {
           "checks": {
@@ -976,6 +1017,41 @@
       "MetricIn": {
         "description": "What the router POSTs after each forward. Kept small on purpose - this is the\nhot path.\n\nDeliberately has no `actual_label` field: ground truth is never known at\nprediction time, so this endpoint must never accept it directly from a\ncaller - it's only ever written to GroundTruthLabel, via POST /api/labels\n(see label_service.ingest_label) and joined against PredictionMetric at\nread time (see metrics_service.compute_version_summary). See\ndocs/DESIGN_NOTES.md.",
         "properties": {
+          "artifact": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "pattern": "^[\\w.-]+/[\\w.-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact"
+          },
+          "features": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ]
+                },
+                "maxProperties": 200,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Features"
+          },
           "latency_ms": {
             "minimum": 0.0,
             "title": "Latency Ms",
@@ -1478,6 +1554,17 @@
             ],
             "title": "Confidence Level"
           },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
           "metric_name": {
             "title": "Metric Name",
             "type": "string"
@@ -1552,6 +1639,7 @@
           "confidence_level",
           "stat_method",
           "sequential_look",
+          "detail",
           "policy_name",
           "metric_name",
           "observed_value",
@@ -1570,6 +1658,12 @@
             "minimum": 0.5,
             "title": "Confidence Level",
             "type": "number"
+          },
+          "drift": {
+            "$ref": "#/components/schemas/DriftPolicy-Input",
+            "default": {
+              "max_feature_psi": 0.25
+            }
           },
           "evaluation_window_seconds": {
             "default": 300,
@@ -1651,6 +1745,12 @@
             "title": "Confidence Level",
             "type": "number"
           },
+          "drift": {
+            "$ref": "#/components/schemas/DriftPolicy-Output",
+            "default": {
+              "max_feature_psi": 0.25
+            }
+          },
           "evaluation_window_seconds": {
             "default": 300,
             "minimum": 1.0,
@@ -1730,7 +1830,8 @@
           "sequential_testing",
           "latency",
           "reliability",
-          "quality"
+          "quality",
+          "drift"
         ],
         "title": "PolicyConfig",
         "type": "object"
@@ -1769,6 +1870,17 @@
               }
             ],
             "title": "Confidence Level"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
           },
           "evaluated_at": {
             "format": "date-time",
@@ -1853,6 +1965,7 @@
           "confidence_level",
           "stat_method",
           "sequential_look",
+          "detail",
           "id",
           "policy_name",
           "metric_name",
@@ -2281,6 +2394,17 @@
             ],
             "title": "Confidence Level"
           },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
           "explanation": {
             "title": "Explanation",
             "type": "string"
@@ -2374,6 +2498,7 @@
           "p_value",
           "confidence_level",
           "sequential_look",
+          "detail",
           "explanation",
           "is_estimated"
         ],

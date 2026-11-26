@@ -68,6 +68,7 @@ def build_timeline(db: Session, deployment: Deployment) -> list[TimelineItem]:
                 p_value=evaluation.p_value,
                 confidence_level=evaluation.confidence_level,
                 sequential_look=evaluation.sequential_look,
+                detail=evaluation.detail,
                 explanation=explain_policy_check(
                     policy_name=evaluation.policy_name,
                     observed_value=evaluation.observed_value,
@@ -77,6 +78,7 @@ def build_timeline(db: Session, deployment: Deployment) -> list[TimelineItem]:
                     ci_high=evaluation.ci_high,
                     confidence_level=evaluation.confidence_level,
                     sequential_look=evaluation.sequential_look,
+                    detail=evaluation.detail,
                     canary_weight=weight_for_explanation,
                     is_estimated=not has_snapshot,
                     labeled_sample_count=evaluation.labeled_sample_count,

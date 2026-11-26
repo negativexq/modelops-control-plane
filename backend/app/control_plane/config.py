@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,6 +13,10 @@ class ControlPlaneSettings(BaseSettings):
     router_timeout_seconds: float = 5.0
 
     default_canary_weight: float = 0.1
+
+    # The model registry's artifact tree, read for each version's training
+    # profile (reference_profile.json) by the drift check. Read-only.
+    artifacts_dir: Path = Path("artifacts")
 
 
 control_plane_settings = ControlPlaneSettings()

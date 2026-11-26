@@ -140,6 +140,7 @@ class TimelinePolicyItem(BaseModel):
     p_value: float | None = None
     confidence_level: float | None = None
     sequential_look: int | None = None
+    detail: str | None = None
     explanation: str
     # True when this check predates the traffic-context snapshot columns on
     # PolicyEvaluation (added in a later migration) and `explanation` therefore had
@@ -174,6 +175,12 @@ class MetricIn(BaseModel):
     # attach a delayed ground-truth label to this specific prediction - see
     # metrics_service.record_metric and docs/DESIGN_NOTES.md.
     prediction_id: str | None = None
+    # The inputs the model scored and which trained artifact
+    # ("<model>/<version>") scored them, for the drift check
+    # (app/policy/drift.py). The router sends both for every answered
+    # prediction; callers that don't simply leave that check without data.
+    features: dict[str, float | str] | None = Field(default=None, max_length=200)
+    artifact: str | None = Field(default=None, max_length=200, pattern=r"^[\w.-]+/[\w.-]+$")
 
 
 class MetricsSummary(BaseModel):

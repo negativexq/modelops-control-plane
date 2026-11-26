@@ -32,6 +32,14 @@ class LocalModelRegistry(ModelRegistry):
     def get_evaluation(self, model_name: str, version: str) -> dict[str, Any]:
         return self._read_json(model_name, version, "evaluation.json")
 
+    def get_reference_profile(self, model_name: str, version: str) -> dict[str, Any] | None:
+        """The training-data profile the drift check compares live inputs to
+        (app/policy/drift.py). Optional: artifacts trained before it existed
+        have none, and the check then says so instead of guessing."""
+        if not (self._version_dir(model_name, version) / "reference_profile.json").is_file():
+            return None
+        return self._read_json(model_name, version, "reference_profile.json")
+
     def get_model_path(self, model_name: str, version: str) -> Path:
         version_dir = self._version_dir(model_name, version)
         model_path = version_dir / "model.joblib"

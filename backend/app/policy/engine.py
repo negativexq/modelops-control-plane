@@ -1,9 +1,16 @@
 from dataclasses import dataclass
+from typing import Any
 
 from app.control_plane.models import PolicyEvaluationResult
 from app.control_plane.schemas import MetricsSummary
-from app.policy import stats
-from app.policy.config import LatencyPolicy, PolicyConfig, QualityPolicy, ReliabilityPolicy
+from app.policy import drift, stats
+from app.policy.config import (
+    DriftPolicy,
+    LatencyPolicy,
+    PolicyConfig,
+    QualityPolicy,
+    ReliabilityPolicy,
+)
 
 PASS = PolicyEvaluationResult.PASS
 FAIL = PolicyEvaluationResult.FAIL
@@ -31,6 +38,9 @@ class PolicyCheckResult:
     # Which evaluation of this rollout produced the check (1 = first), when
     # sequential testing set the level above.
     look: int | None = None
+    # What the check was about, when the policy name doesn't say: for
+    # feature_drift, the feature that drifted most, or why nothing was compared.
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -197,6 +207,75 @@ def _evaluate_reliability(
     )
 
 
+@dataclass(frozen=True)
+class DriftInputs:
+    """The canary's live inputs from the reliability window, and the training
+    profile of the artifact that scored them. `profile` is None when that
+    artifact has no profile (trained before profiles existed)."""
+
+    artifact: str
+    profile: dict[str, Any] | None
+    inputs: list[dict[str, Any]]
+
+
+# Values of PolicyCheckResult.detail when feature_drift had nothing to compare.
+NO_REFERENCE_PROFILE = "no_reference_profile"
+TOO_FEW_INPUTS = "too_few_inputs"
+
+
+def _evaluate_feature_drift(
+    data: DriftInputs, policy: DriftPolicy, evidence: Evidence
+) -> PolicyCheckResult:
+    """Is the canary being asked to score traffic unlike its training data?
+    See app/policy/drift.py. PASS when no feature's corrected PSI is past the
+    limit. FAIL when one is past it *and* its shift is significant at this
+    evaluation's level (chi-square, Bonferroni across features) - the same
+    "big enough and not noise" rule as the interval checks. Otherwise
+    INCONCLUSIVE."""
+    limit = policy.max_feature_psi
+    assert limit is not None
+
+    def inconclusive(detail: str) -> PolicyCheckResult:
+        return PolicyCheckResult(
+            policy_name="feature_drift",
+            metric_name="max_feature_psi",
+            observed_value=None,
+            threshold=limit,
+            result=INCONCLUSIVE,
+            detail=detail,
+        )
+
+    if data.profile is None:
+        return inconclusive(f"{NO_REFERENCE_PROFILE}:{data.artifact}")
+    if len(data.inputs) < drift.MINIMUM_SAMPLES:
+        return inconclusive(TOO_FEW_INPUTS)
+    report = drift.drift_report(data.profile, data.inputs)
+    largest = report.largest
+    if largest is None:
+        return inconclusive(TOO_FEW_INPUTS)
+
+    breaching = [f for f in report.features if f.psi_corrected > limit]
+    significant = [f for f in breaching if report.adjusted_p_value(f) <= evidence.one_sided_alpha]
+    if significant:
+        result, shown = FAIL, max(significant, key=lambda f: f.psi_corrected)
+    elif breaching:
+        result, shown = INCONCLUSIVE, largest
+    else:
+        result, shown = PASS, largest
+    return PolicyCheckResult(
+        policy_name="feature_drift",
+        metric_name="max_feature_psi",
+        observed_value=shown.psi_corrected,
+        threshold=limit,
+        result=result,
+        p_value=report.adjusted_p_value(shown),
+        method="psi+chi_square_bonferroni",
+        confidence_level=evidence.confidence_level,
+        look=evidence.look,
+        detail=shown.feature,
+    )
+
+
 def _evaluate_minimum_labeled_samples(
     canary_quality: MetricsSummary, minimum_labeled_samples: int
 ) -> PolicyCheckResult:
@@ -334,12 +413,18 @@ def evaluate_policies(
     config: PolicyConfig,
     latency_samples: LatencySamples | None = None,
     look: int | None = None,
+    drift_inputs: DriftInputs | None = None,
 ) -> list[PolicyCheckResult]:
     """Run every policy check for one evaluation.
 
     `look` is which evaluation of this rollout this is, counting only the ones
     that got past minimum_requests (1 = first). With sequential testing on, it
     sets how much evidence a FAIL needs - see stats.look_confidence.
+
+    `drift_inputs` are the canary's recorded inputs. feature_drift runs when
+    there are any and the policy has a limit; a window whose metrics carry no
+    inputs at all (a caller posting metrics without them) skips it rather than
+    holding the rollout on data nobody sends.
 
     `stable`/`canary` are the *reliability* window (now-window, now) -
     minimum_requests, latency, error rate. `canary_quality` is the *quality*
@@ -355,12 +440,14 @@ def evaluate_policies(
         return [minimum_requests_check]
 
     evidence = evidence_for(config, look)
-    return [
+    checks = [
         minimum_requests_check,
         _evaluate_latency(stable, canary, config.latency, evidence, latency_samples),
         _evaluate_reliability(canary, config.reliability, evidence),
-        *evaluate_quality_policies(canary_quality, config, look),
     ]
+    if drift_inputs is not None and config.drift.max_feature_psi is not None:
+        checks.append(_evaluate_feature_drift(drift_inputs, config.drift, evidence))
+    return [*checks, *evaluate_quality_policies(canary_quality, config, look)]
 
 
 def overall_result(checks: list[PolicyCheckResult]) -> PolicyEvaluationResult:

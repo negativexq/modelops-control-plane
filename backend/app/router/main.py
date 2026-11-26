@@ -43,6 +43,27 @@ class GatewayError(Exception):
         self.retry_after = retry_after
 
 
+def _drift_inputs(
+    payload: dict[str, Any], body: Any, status_code: int
+) -> tuple[dict[str, Any] | None, str | None]:
+    """What the drift check needs from one answered prediction: the inputs the
+    model scored, and which trained artifact scored them (the serving container
+    names it in its response; a router version label like
+    "v2-good-latency-fault" doesn't). Only for predictions the model actually
+    made - a rejected request's body is a data-quality problem, not drift."""
+    if status_code >= 400 or not isinstance(body, dict):
+        return None, None
+    model_name, model_version = body.get("model_name"), body.get("model_version")
+    if not isinstance(model_name, str) or not isinstance(model_version, str):
+        return None, None
+    features = {
+        key: value
+        for key, value in payload.items()
+        if isinstance(value, (int, float, str)) and not isinstance(value, bool)
+    }
+    return features, f"{model_name}/{model_version}"
+
+
 def choose_target(config: RouterConfig) -> TargetWeight:
     """Weighted random pick across all configured targets."""
     return random.choices(
@@ -127,6 +148,8 @@ def create_app(
         status_code: int,
         prediction: Any,
         prediction_id: Any,
+        features: dict[str, Any] | None = None,
+        artifact: str | None = None,
     ) -> None:
         if not settings.control_plane_url:
             return
@@ -141,6 +164,8 @@ def create_app(
                 prediction if isinstance(prediction, int) else None,
                 prediction_id if isinstance(prediction_id, str) else None,
                 settings.upstream_timeout_seconds,
+                features,
+                artifact,
             )
         )
         pending_metric_tasks.add(task)
@@ -384,6 +409,7 @@ def create_app(
                 response.status_code,
                 prediction,
                 prediction_id,
+                *_drift_inputs(payload, body, response.status_code),
             )
 
         return JSONResponse(status_code=response.status_code, content=body), version

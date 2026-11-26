@@ -72,6 +72,7 @@ def evaluate_deployment(
                 confidence_level=check.confidence_level,
                 stat_method=check.method,
                 sequential_look=check.look,
+                detail=check.detail,
             )
             for check in checks
         ],

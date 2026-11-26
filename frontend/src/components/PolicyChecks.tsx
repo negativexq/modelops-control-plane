@@ -10,6 +10,7 @@ function fmt(policy: string, v: number | null) {
   if (policy === "minimum_label_coverage") return `${(v * 100).toFixed(0)}%`;
   if (policy.startsWith("minimum_") && policy !== "minimum_recall") return v.toFixed(0);
   if (policy === "minimum_recall") return v.toFixed(2);
+  if (policy === "feature_drift") return `PSI ${v.toFixed(2)}`;
   return `${v.toFixed(2)}%`;
 }
 
@@ -47,7 +48,13 @@ export function PolicyChecks({ items }: { items: TimelineItem[] }) {
               <TableCell>
                 <PolicyResultBadge result={p.result} />
               </TableCell>
-              <TableCell className="text-right font-mono text-xs tabular">{fmt(p.policy_name, p.observed_value)}</TableCell>
+              <TableCell className="text-right font-mono text-xs tabular">
+                {fmt(p.policy_name, p.observed_value)}
+                {/* feature_drift names the feature it's about (or why it couldn't compare). */}
+                {p.policy_name === "feature_drift" && p.observed_value != null && p.detail ? (
+                  <span className="block text-[10px] text-muted-foreground">{p.detail}</span>
+                ) : null}
+              </TableCell>
               <TableCell className="text-right font-mono text-xs text-muted-foreground tabular">
                 {fmt(p.policy_name, p.threshold)}
               </TableCell>

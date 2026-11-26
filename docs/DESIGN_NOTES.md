@@ -446,6 +446,66 @@ the check fired. Rows with no snapshot (pre-migration) fall back to current stat
 and say so explicitly (`is_estimated: true` in the API response, plus a note in
 the prose) rather than presenting a guess as recorded fact.
 
+### Feature drift
+
+`feature_drift` asks whether the canary is scoring traffic like the data it was
+trained on. Latency and errors need traffic; recall needs labels that arrive late.
+Drift needs only the inputs and a picture of the training data, so it's the one
+quality signal available from the first window.
+
+**Where the data comes from.**
+
+- `scripts/train_models.py` writes `reference_profile.json` next to every
+  artifact: for each feature the model uses, its training distribution over deciles
+  (numeric) or its categories (categorical, plus a slot for categories never seen).
+- The router sends each answered prediction's inputs and the artifact that scored
+  them (`"fraud-model/v2-good"`, from the serving container's response) with the
+  metric it already posts. The artifact matters because router labels aren't
+  artifacts: `v2-good-latency-fault` is the `v2-good` model.
+- Rejected requests (4xx/5xx) carry no inputs: a malformed body is a data-quality
+  problem, not drift.
+
+**The statistics** (`app/policy/drift.py`). Per feature, over the canary's answered
+requests in the reliability window:
+
+- PSI, the usual drift size (below 0.1 stable, above 0.25 a major shift), minus the
+  `(bins - 1) / n` that sampling noise alone adds. Uncorrected, a healthy canary
+  seen through 100 requests shows a PSI near 0.2 on its worst feature out of 28,
+  by chance. Live counts get half a request of smoothing per bin, so an empty bin
+  doesn't blow up the log.
+- A chi-square goodness-of-fit test against the training proportions, with bins
+  expecting fewer than 5 requests pooled, and a Bonferroni correction across
+  features.
+
+| | Verdict |
+|---|---|
+| every feature's corrected PSI within `drift.max_feature_psi` (0.25) | PASS |
+| a feature past it, and its shift significant at the look's level | FAIL |
+| a feature past it, shift not significant | INCONCLUSIVE |
+| fewer than 50 inputs, or no profile for the artifact | INCONCLUSIVE |
+
+On draws from the training data itself, 100 requests pass about 99% of the time and
+never FAIL in the tests. Half-fraud traffic or `amount` doubled is caught at 100
+requests nearly every time. The check names the feature (`detail` on the row), and
+the timeline says which one drifted.
+
+**What it deliberately doesn't do.**
+
+- When no metric in the window carries inputs (a caller posting metrics without
+  them), the check is skipped rather than holding the rollout on data nobody sends.
+  The router always sends them, and CI scenario 7 asserts the check fires.
+- It compares the canary with its own training data, not with stable. Both see the
+  same traffic, so canary-vs-stable input drift would always be zero. A FAIL means
+  "this model would be ramped into traffic it was never trained on", and rolling
+  back is the conservative answer. Stable may be just as far out of distribution,
+  and that's a question for a human, not the canary gate.
+- Traffic skewed on purpose is real drift. The CI quality scenarios and the
+  `success` benchmark oversample fraud to 50% to get enough positive labels, so they
+  set `"drift": {"max_feature_psi": null}`.
+- No prediction drift (the canary's score distribution vs. its validation scores)
+  yet. It's label-free too, and canary-specific, but needs validation scores stored
+  with the artifact.
+
 ## Automated promotion & rollback
 
 The worker has **no direct DB access and keeps no in-memory rollout state**; every
@@ -864,16 +924,15 @@ reasoning survives even if nobody's actively looking at this file.
   change what the canary analysis measures: a cached answer has no model latency,
   and a batched one shares its latency with its neighbours. They need the metrics
   to say which kind of response each one was before they can land.
-- **Cost, drift, data-quality, and availability policies.** The policy engine's
-  four checks (Sprint 7) only ever asked "is this canary statistically safe right
-  now, from the traffic it's already seeing?" Cost ($/inference), drift (feature
-  distribution shift vs. training data), data quality (schema violations, null
-  rates, out-of-range values arriving at `/predict`), and availability (uptime
-  SLO tracking over time, not just point-in-time error rate) are each a real
-  input to a real promotion decision - but each needs its own data source this
-  project doesn't have (a billing feed, a reference training distribution stored
-  per model version, a schema registry, a longer-horizon metrics store), not just
-  another `PolicyCheckResult` case. Adding the case without the data source behind
+- **Cost, data-quality, and availability policies.** Cost ($/inference), data
+  quality (schema violations, null rates, out-of-range values arriving at
+  `/predict`), and availability (uptime SLO tracking over time, not just
+  point-in-time error rate) are each a real input to a real promotion decision -
+  but each needs its own data source this project doesn't have (a billing feed, a
+  schema registry, a longer-horizon metrics store), not just another
+  `PolicyCheckResult` case. Drift used to be on this list; it came off once the
+  data source existed - a training profile written next to every artifact (see
+  [Feature drift](#feature-drift)). Adding the case without the data source behind
   it would be exactly the kind of "looks done, isn't" the rest of this project
   tries hard to avoid (see `minimum_recall`'s honest `INCONCLUSIVE` instead of a
   fake `PASS`, for the same reason).

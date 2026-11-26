@@ -277,6 +277,10 @@ class PolicyEvaluation(Base):
     # raised confidence_level above the policy's own - see
     # app/policy/stats.py's look_confidence. NULL when it didn't.
     sequential_look: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # What a check was about when the policy name alone doesn't say: for
+    # feature_drift, the feature that drifted most, or why there was nothing to
+    # compare (see app/policy/engine.py's _evaluate_feature_drift).
+    detail: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Snapshot of the deployment's own context AT THE MOMENT this check ran - not
     # derivable after the fact from the deployment's *current* state, which can
     # (and does) change later. Without this, a human reading an old PolicyEvaluation
@@ -383,6 +387,12 @@ class PredictionMetric(Base):
     prediction_id: Mapped[str | None] = mapped_column(
         String(36), nullable=True, unique=True, index=True
     )
+    # The inputs the model scored, and which trained artifact ("<model>/<version>")
+    # scored them - what the drift check compares to that artifact's training
+    # profile (app/policy/drift.py). Only for answered predictions, and NULL for
+    # rows from callers that don't send them.
+    features: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    artifact: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), default=_utcnow, index=True
     )

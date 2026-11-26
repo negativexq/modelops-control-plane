@@ -1,17 +1,25 @@
+from collections import Counter
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.control_plane import metrics_service, telemetry
+from app.control_plane.config import control_plane_settings
 from app.control_plane.models import Deployment, PolicyEvaluation, PolicyEvaluationResult
 from app.policy.config import PolicyConfig
 from app.policy.engine import (
+    DriftInputs,
     LatencySamples,
     PolicyCheckResult,
     evaluate_policies,
     overall_result,
 )
+from app.registry.exceptions import RegistryError
+from app.registry.local import LocalModelRegistry
 
 _QUALITY_POLICY_NAMES = frozenset(
     {
@@ -30,6 +38,38 @@ def _weight_for(deployment: Deployment, version: str) -> float | None:
         if target["version"] == version:
             return float(target["weight"])
     return None
+
+
+@lru_cache(maxsize=64)
+def _reference_profile(artifacts_dir: Path, artifact: str) -> dict[str, Any] | None:
+    """A trained artifact's profile never changes once written, so it's read
+    once per process."""
+    model_name, _, version = artifact.partition("/")
+    try:
+        return LocalModelRegistry(artifacts_dir).get_reference_profile(model_name, version)
+    except RegistryError:
+        return None
+
+
+def _drift_inputs(
+    db: Session, deployment: Deployment, window_seconds: int, now: datetime
+) -> DriftInputs | None:
+    """The canary's recorded inputs in the reliability window, with the
+    training profile of the artifact that scored them. None when no metric in
+    the window carried inputs. If more than one artifact served the canary
+    version in the window (a container swapped mid-rollout), the one that
+    served most of it is compared, on its own requests only."""
+    rows = metrics_service.window_inputs(
+        db, deployment.id, deployment.canary_version, window_seconds, now=now
+    )
+    if not rows:
+        return None
+    artifact = Counter(a for a, _ in rows).most_common(1)[0][0]
+    return DriftInputs(
+        artifact=artifact,
+        profile=_reference_profile(control_plane_settings.artifacts_dir, artifact),
+        inputs=[features for a, features in rows if a == artifact],
+    )
 
 
 def _next_look(db: Session, deployment_id: str) -> int:
@@ -85,7 +125,13 @@ def run_evaluation(
     )
 
     checks = evaluate_policies(
-        stable, canary, canary_quality, config, samples, look=_next_look(db, deployment.id)
+        stable,
+        canary,
+        canary_quality,
+        config,
+        samples,
+        look=_next_look(db, deployment.id),
+        drift_inputs=_drift_inputs(db, deployment, window, now),
     )
     # Snapshot the deployment's own context right now, once, for every check in this
     # evaluation - not derivable later from the deployment's *current* state, which
@@ -113,6 +159,7 @@ def run_evaluation(
                 confidence_level=check.confidence_level,
                 stat_method=check.method,
                 sequential_look=check.look,
+                detail=check.detail,
                 evaluation_window_seconds=config.evaluation_window_seconds,
                 stable_weight=stable_weight,
                 canary_weight=canary_weight,

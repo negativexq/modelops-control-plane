@@ -30,6 +30,7 @@ const POLICY_LABELS: Record<string, string> = {
   minimum_label_coverage: "Label coverage",
   minimum_positive_labels: "Minimum positive labels",
   minimum_recall: "Recall",
+  feature_drift: "Feature drift",
 };
 
 function formatMetricValue(policyName: string, value: number | null): string {
@@ -42,6 +43,7 @@ function formatMetricValue(policyName: string, value: number | null): string {
   // unlike latency/error-rate checks whose values are already percentages.
   if (policyName === "minimum_label_coverage") return `${(value * 100).toFixed(0)}%`;
   if (policyName === "minimum_recall") return value.toFixed(2);
+  if (policyName === "feature_drift") return `PSI ${value.toFixed(2)}`;
   return `${value.toFixed(2)}%`;
 }
 
