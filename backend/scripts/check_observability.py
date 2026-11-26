@@ -7,16 +7,21 @@ are what make the "decisions recorded" and "traces exported" checks meaningful.
 Exits non-zero listing every check that failed, not just the first.
 """
 
+import csv
+import json
 import os
 import sys
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 import httpx
 
 PROMETHEUS = os.getenv("CHECK_PROMETHEUS_URL", "http://localhost:9090")
 GRAFANA = os.getenv("CHECK_GRAFANA_URL", "http://localhost:3001")
 JAEGER = os.getenv("CHECK_JAEGER_URL", "http://localhost:16686")
+ROUTER = os.getenv("CHECK_ROUTER_URL", "http://localhost:8080")
+DATASET = Path(__file__).resolve().parents[1] / "data" / "test.csv"
 
 EXPECTED_JOBS = {"backend", "router", "worker", "serving"}
 EXPECTED_DASHBOARDS = {"modelops-overview", "modelops-services"}
@@ -75,9 +80,16 @@ def check_traces(client: httpx.Client) -> str | None:
     if missing := EXPECTED_TRACE_SERVICES - services:
         return f"no traces from {sorted(missing)} (have {sorted(services)})"
     # A prediction's trace must reach a model service, i.e. context propagated.
+    # Filtered to prediction spans (only those carry modelops.model): the most
+    # recent router traces are otherwise worker sweeps and dashboard reads.
     traces = client.get(
         f"{JAEGER}/api/traces",
-        params={"service": "model-router", "limit": 20, "lookback": "1h"},
+        params={
+            "service": "model-router",
+            "tags": json.dumps({"modelops.model": "fraud-model"}),
+            "limit": 20,
+            "lookback": "1h",
+        },
     ).json()["data"]
     for trace in traces:
         names = {p["serviceName"] for p in trace["processes"].values()}
@@ -96,7 +108,25 @@ CHECKS: list[tuple[str, Callable[[httpx.Client], str | None]]] = [
 ]
 
 
+def send_fresh_predictions(count: int = 20) -> None:
+    """A few predictions through the router right before checking. The smoke
+    test ends by restarting the router, so it starts these checks with no
+    request counters (a labelled counter has no series until its first
+    increment) and no prediction traces since the restart."""
+    with DATASET.open(newline="") as f:
+        row = next(csv.DictReader(f))
+    payload = {
+        k: v if k == "merchant_category" else float(v)
+        for k, v in row.items()
+        if k not in {"transaction_id", "customer_id", "label"}
+    }
+    with httpx.Client(timeout=10) as client:
+        for _ in range(count):
+            client.post(f"{ROUTER}/router/models/fraud-model/predict", json=payload)
+
+
 def main() -> int:
+    send_fresh_predictions()
     # Prometheus scrapes every 5s and spans export in batches; give both a moment
     # to catch up with the smoke test that just finished.
     deadline = time.monotonic() + 60
