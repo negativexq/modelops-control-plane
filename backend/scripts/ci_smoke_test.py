@@ -34,7 +34,7 @@ deliberately use "fraud-model" instead - see scenario 5's own docstring for why.
    see scripts/benchmarks/locustfile.py's _LabelFeeder) flowing through the
    platform's actual label ingestion path - no direct-DB actual_label write
    anywhere. Waits for the worker to walk it through every traffic stage
-   (10% -> 25% -> 50% -> 100%) and promote it on a genuine minimum_recall PASS.
+   (10% -> 25% -> 50%) and promote it on a genuine minimum_recall PASS.
 4. `run_automatic_quality_rollback_scenario` - a deliberately weak canary
    (v2-quality-bad), same real delayed label flow as scenario 3, but recall
    genuinely fails the threshold - the worker automatically rolls it back for a
@@ -249,62 +249,6 @@ class _BackgroundTraffic:
             self._stop.wait(self._interval_seconds)
 
     def __enter__(self) -> "_BackgroundTraffic":
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self._stop.set()
-        self._thread.join(timeout=5)
-
-
-def _post_metric(deployment_id: str, model_version: str, *, latency_ms: float) -> None:
-    """Posts a plain, unlabeled metric row - used only to keep the stable side of
-    a benchmark deployment satisfying minimum_requests once the canary has
-    claimed all real traffic (see run_automatic_promote_scenario). The metrics
-    endpoint has no `actual_label` field at all - see MetricIn's docstring;
-    real ground truth only ever arrives through POST /api/labels(/batch)."""
-    response = httpx.post(
-        f"{BACKEND_URL}/api/deployments/{deployment_id}/metrics",
-        json={"model_version": model_version, "latency_ms": latency_ms, "status_code": 200},
-        timeout=10,
-    )
-    response.raise_for_status()
-
-
-class _StableSideHealthChecks:
-    """Runs until stopped, periodically posting a batch of plain (unlabeled)
-    health-check metrics for the stable version - once the canary approaches
-    100% traffic, the router sends stable ~0 real requests, so minimum_requests
-    (which needs BOTH sides, over a short evaluation_window_seconds in this CI
-    job) would otherwise never be satisfied again and PROMOTE would never fire.
-    Mirrors scripts/benchmarks/run_benchmark.py's
-    _feed_stable_side_health_checks, including its batch size - one post per
-    interval isn't enough to clear minimum_requests within a 10s window."""
-
-    def __init__(
-        self,
-        deployment_id: str,
-        stable_version: str,
-        interval_seconds: float = 3.0,
-        batch_size: int = 15,
-    ) -> None:
-        self._deployment_id = deployment_id
-        self._stable_version = stable_version
-        self._interval_seconds = interval_seconds
-        self._batch_size = batch_size
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            for _ in range(self._batch_size):
-                try:
-                    _post_metric(self._deployment_id, self._stable_version, latency_ms=12.0)
-                except httpx.HTTPError:
-                    pass  # a single dropped request shouldn't kill the health checks
-            self._stop.wait(self._interval_seconds)
-
-    def __enter__(self) -> "_StableSideHealthChecks":
         self._thread.start()
         return self
 
@@ -548,7 +492,7 @@ def run_automatic_rollback_scenario() -> None:
 
 def run_automatic_quality_promote_scenario() -> None:
     """A healthy canary (v2-good), waiting for the worker to really walk it
-    through every traffic stage (10% -> 25% -> 50% -> 100%) and promote it on a
+    through every traffic stage (10% -> 25% -> 50%) and promote it on a
     genuine minimum_recall PASS - no manual /advance-traffic or /promote call,
     and no direct-DB actual_label write, anywhere in this scenario.
 
@@ -564,7 +508,6 @@ def run_automatic_quality_promote_scenario() -> None:
     app/policy/engine.py.
     """
     print("\n### scenario 3/6: automatic quality-based promote (worker-driven) ###")
-    stable_version = "v1"
     canary_version = "v2-good"
     deployment = _create_deployment(
         model_name="ci-smoke-quality-promote",
@@ -606,7 +549,6 @@ def run_automatic_quality_promote_scenario() -> None:
                 interval_seconds=0.03,
                 positive_ratio=QUALITY_SCENARIO_POSITIVE_RATIO,
             ),
-            _StableSideHealthChecks(deployment_id, stable_version),
         ):
             final = _wait_for_deployment_status(
                 deployment_id,
@@ -640,9 +582,9 @@ def run_automatic_quality_promote_scenario() -> None:
         and item["result"] == "PASS"
         for item in timeline
     )
-    if len(advance_events) < 3 or not has_automatic_promote_event or not has_recall_pass:
+    if len(advance_events) < 2 or not has_automatic_promote_event or not has_recall_pass:
         raise SmokeTestFailure(
-            f"[FAIL] expected 3 traffic_advanced events (10->25->50->100), an "
+            f"[FAIL] expected 2 traffic_advanced events (10->25->50), an "
             f"automatic promote event, and a real minimum_recall PASS; got "
             f"{len(advance_events)} advances, promote event="
             f"{has_automatic_promote_event}, recall PASS={has_recall_pass}: {timeline}"
@@ -662,7 +604,6 @@ def run_automatic_quality_rollback_scenario() -> None:
     real automatic rollback.
     """
     print("\n### scenario 4/6: automatic quality-based rollback (worker-driven) ###")
-    stable_version = "v1"
     canary_version = "v2-quality-bad"
     deployment = _create_deployment(
         model_name="ci-smoke-quality-rollback",
@@ -699,7 +640,6 @@ def run_automatic_quality_rollback_scenario() -> None:
                 interval_seconds=0.03,
                 positive_ratio=QUALITY_SCENARIO_POSITIVE_RATIO,
             ),
-            _StableSideHealthChecks(deployment_id, stable_version),
         ):
             final = _wait_for_deployment_status(
                 deployment_id,

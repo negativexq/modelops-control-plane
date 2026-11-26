@@ -112,6 +112,21 @@ def test_pass_below_full_traffic_advances() -> None:
     assert ("rollback", "dep-1") not in client.calls
 
 
+def test_pass_at_the_last_ramp_stage_promotes() -> None:
+    """50% is the last stage evaluated with real traffic on both sides; a PASS
+    there promotes instead of moving to a 100% split judged against an idle
+    stable (see app/traffic_stages.py)."""
+    client = FakeWorkerClient()
+    client.deployments["dep-1"] = _deployment(canary_weight=0.5)
+    client.evaluate_result["dep-1"] = "PASS"
+
+    action = run(process_deployment(client, "dep-1", default_window_seconds=300))
+
+    assert action == WorkerAction.PROMOTE
+    assert ("promote", "dep-1") in client.calls
+    assert ("advance_traffic", "dep-1") not in client.calls
+
+
 def test_pass_at_full_traffic_promotes() -> None:
     client = FakeWorkerClient()
     client.deployments["dep-1"] = _deployment(canary_weight=1.0)

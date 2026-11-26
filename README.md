@@ -43,7 +43,7 @@ human on its own, and every decision is explained in plain English.
 
 | | |
 |---|---|
-| 🚦 **Ramps traffic gradually** | A canary climbs `10% → 25% → 50% → 100%`, one tested step at a time, through a real gateway with sticky routing, a circuit breaker per version and rate limits. |
+| 🚦 **Ramps traffic gradually** | A canary climbs `10% → 25% → 50%`, one tested step at a time, and a pass at 50% promotes it, through a real gateway with sticky routing, a circuit breaker per version and rate limits. |
 | 📐 **Decides with statistics** | Error rate, p95 latency and recall each come with a confidence interval and a p-value. A check fails only when the whole interval is past the limit, so two unlucky requests can't roll back a good model. |
 | 🏷️ **Judges quality, not just uptime** | Ground-truth labels arrive late and incomplete, through a real ingestion API. Quality checks wait for a matured window and enough positive examples before they speak. |
 | 🤖 **Acts on its own, explains itself** | A worker promotes, rolls back or freezes the rollout for a human. Every check writes a sentence saying why, and the timeline tells the whole story. |
@@ -199,7 +199,7 @@ stateDiagram-v2
     DEPLOYING --> CANARY_RUNNING
     CANARY_RUNNING --> EVALUATING
     EVALUATING --> CANARY_RUNNING: PASS · next traffic step
-    EVALUATING --> PROMOTING: PASS at 100%
+    EVALUATING --> PROMOTING: PASS at 50%
     EVALUATING --> ROLLING_BACK: FAIL
     EVALUATING --> INCONCLUSIVE: retries used up
     INCONCLUSIVE --> PROMOTING: operator
@@ -287,7 +287,7 @@ make benchmark-success
 
 Labels arrive 10 s late for 80% of predictions. The quality checks stay
 INCONCLUSIVE until enough have matured, then recall passes, and the worker walks the
-canary through every traffic step to 100%.
+canary through every traffic step and promotes it.
 
 **3. Run a rollout yourself.**
 
@@ -321,7 +321,7 @@ writes `backend/benchmark-results/<scenario>.{json,md}`.
 | `latency-failure` | +400 ms on canary | rollback | ✅ **ROLLED_BACK** | 30.9 s | 95.6 req/s |
 | `error-failure` | 50% 5xx on canary | rollback | ✅ **ROLLED_BACK** | 30.7 s | 99.9 req/s |
 | `quality-failure` | weak model (`v2-quality-bad`) | freeze | ✅ **INCONCLUSIVE** (frozen for a human) | 46.3 s | 99.8 req/s |
-| `success` | none | promote | ✅ **PROMOTED** (p95 140 ms) | 82.2 s | 99.9 req/s |
+| `success` | none | promote | ✅ **PROMOTED** (at 50%, then 100%) | 55.9 s | 99.9 req/s |
 
 Time to action is from the rollout starting to the worker's final decision, with
 the worker's production 15 s poll interval. The fault containers are switched at
@@ -372,7 +372,7 @@ Design notes: [Policy engine](docs/DESIGN_NOTES.md#policy-engine).
 <details>
 <summary><b>Automation</b>: the worker, manual holds, operator actions</summary>
 
-- **PASS** → next traffic step, or promote at 100%. **FAIL** → roll back.
+- **PASS** → next traffic step, or promote once the canary is at 50%. **FAIL** → roll back.
   **INCONCLUSIVE** → retry up to `max_inconclusive_retries`, then freeze.
 - `POST /api/deployments/{id}/pause-automation` and `/resume-automation` take one
   rollout out of the worker's hands without stopping the worker for everyone else;
@@ -552,10 +552,9 @@ reload.
 - **`--reload` in development.** Saving a file under `backend/app` or
   `backend/scripts` during a dashboard benchmark restarts the control plane and ends
   the run; it's marked FAILED ("interrupted") on the next start.
-- **At 100% canary**, `minimum_requests` can't be met for the stable side; the
-  timeline says so explicitly, and the benchmark feeds the idle side health-check
-  traffic: real predictions sent straight to stable's container, timed, so its
-  latency stays comparable with the canary's.
+- **A deployment created at 100% canary** leaves stable with no traffic, so
+  `minimum_requests` can't be met; the timeline says so explicitly. The automated
+  ramp avoids this by promoting at 50%, while both sides still serve real traffic.
 
 More on what was deliberately left out: [Future vision](docs/DESIGN_NOTES.md#future-vision).
 

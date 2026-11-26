@@ -176,7 +176,7 @@ def test_advance_traffic_moves_to_next_stage(
 def test_advance_traffic_walks_through_all_stages(client: TestClient) -> None:
     deployment_id = _create_deployment(client, canary_weight=0.1).json()["id"]
 
-    expected_stages = [0.25, 0.5, 1.0]
+    expected_stages = [0.25, 0.5]
     for expected_canary_weight in expected_stages:
         body = client.post(f"/api/deployments/{deployment_id}/advance-traffic").json()
         weights = {t["version"]: t["weight"] for t in body["traffic_allocation"]["targets"]}
@@ -184,8 +184,10 @@ def test_advance_traffic_walks_through_all_stages(client: TestClient) -> None:
 
 
 def test_advance_traffic_at_final_stage_returns_409(client: TestClient) -> None:
+    """The ramp ends at 50%: the next step after it is /promote, never a 100%
+    split still judged against an idle stable (see app/traffic_stages.py)."""
     deployment_id = _create_deployment(client, canary_weight=0.1).json()["id"]
-    for _ in range(3):  # 0.1 -> 0.25 -> 0.5 -> 1.0
+    for _ in range(2):  # 0.1 -> 0.25 -> 0.5
         client.post(f"/api/deployments/{deployment_id}/advance-traffic")
 
     response = client.post(f"/api/deployments/{deployment_id}/advance-traffic")

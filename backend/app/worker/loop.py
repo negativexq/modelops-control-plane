@@ -6,6 +6,7 @@ from typing import Any
 
 from opentelemetry import trace
 
+from app.traffic_stages import at_final_stage
 from app.worker import telemetry
 from app.worker.client import ActionConflictError, WorkerClient
 from app.worker.decide import WorkerAction, decide_action
@@ -17,14 +18,14 @@ tracer = trace.get_tracer(__name__)
 ACTIVE_STATUSES = {"CANARY_RUNNING", "EVALUATING"}
 
 
-def _canary_at_full_traffic(deployment: dict[str, Any]) -> bool:
+def _canary_at_final_stage(deployment: dict[str, Any]) -> bool:
     allocation = deployment.get("traffic_allocation")
     if not allocation:
         return False
     canary_version = deployment["canary_version"]
     for target in allocation["targets"]:
         if target["version"] == canary_version:
-            return bool(target["weight"] >= 1.0 - 1e-9)
+            return at_final_stage(float(target["weight"]))
     return False
 
 
@@ -77,7 +78,7 @@ async def process_deployment(
     except ActionConflictError:
         return None
 
-    action = decide_action(evaluation["overall_result"], _canary_at_full_traffic(deployment))
+    action = decide_action(evaluation["overall_result"], _canary_at_final_stage(deployment))
 
     try:
         if action == WorkerAction.ADVANCE_TRAFFIC:

@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.control_plane import service
 from app.control_plane.models import (
     Deployment,
     DeploymentEvent,
@@ -48,6 +49,18 @@ def client(db_session: Session, fake_gateway: FakeRouterGateway) -> Iterator[Tes
         yield test_client
     app.dependency_overrides.pop(get_db, None)
     app.dependency_overrides.pop(get_router_gateway, None)
+
+
+def _put_canary_at_full_traffic(db_session: Session, deployment: Deployment) -> None:
+    """The automated ramp stops at 50% now (app/traffic_stages.py), but a canary
+    can still sit at 100% while active - created with canary_weight=1.0 - and the
+    timeline still has to explain what that does to the stable side."""
+    service._set_traffic_allocation(
+        db_session,
+        deployment,
+        [{"version": "v1", "weight": 0.0}, {"version": "v2-good", "weight": 1.0}],
+    )
+    db_session.commit()
 
 
 @pytest.fixture
@@ -152,12 +165,11 @@ def test_timeline_explains_stable_starvation_when_canary_is_fully_promoted(
     requests, so minimum_requests can never pass - the timeline should say so plainly
     rather than leaving a bare INCONCLUSIVE for a human to puzzle over.
 
-    Reaches 100% via advance-traffic (stays CANARY_RUNNING) rather than /promote
-    (terminal PROMOTED) - /evaluate now 409s on a terminal deployment, so this has
-    to stay active to exercise the check at all.
+    Stays CANARY_RUNNING at 100% rather than /promote (terminal PROMOTED) -
+    /evaluate 409s on a terminal deployment, so this has to stay active to
+    exercise the check at all.
     """
-    for _ in range(4):  # 0% (no allocation yet) -> 10% -> 25% -> 50% -> 100%
-        client.post(f"/api/deployments/{deployment.id}/advance-traffic")
+    _put_canary_at_full_traffic(db_session, deployment)
 
     _add_metrics(db_session, deployment.id, "v2-good", count=5)  # canary only, stable starved
 
@@ -184,8 +196,7 @@ def test_timeline_explanation_reflects_traffic_at_evaluation_time_not_current(
     client.post(f"/api/deployments/{deployment.id}/evaluate", json={"minimum_requests": 100})
 
     # Traffic moves on well past the moment of that evaluation.
-    for _ in range(3):  # 10% -> 25% -> 50% -> 100%
-        client.post(f"/api/deployments/{deployment.id}/advance-traffic")
+    _put_canary_at_full_traffic(db_session, deployment)
 
     body = client.get(f"/api/deployments/{deployment.id}/timeline").json()
     policy_items = [item for item in body if item["type"] == "policy_evaluation"]
@@ -205,8 +216,7 @@ def test_timeline_falls_back_to_current_state_when_no_snapshot_and_flags_estimat
     recorded context - build_timeline must fall back to the deployment's current
     traffic split for these, and must say so explicitly rather than presenting a
     guess as recorded fact."""
-    for _ in range(4):  # -> 100% canary (the *current* state, read as a fallback)
-        client.post(f"/api/deployments/{deployment.id}/advance-traffic")
+    _put_canary_at_full_traffic(db_session, deployment)  # the *current* state, read as a fallback
 
     db_session.add(
         PolicyEvaluation(

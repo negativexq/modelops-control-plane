@@ -79,31 +79,6 @@ class ControlPlaneClient:
         result: list[dict[str, Any]] = response.json()
         return result
 
-    def post_metric(
-        self,
-        deployment_id: str,
-        model_version: str,
-        latency_ms: float,
-        status_code: int = 200,
-        prediction: int | None = None,
-        prediction_id: str | None = None,
-    ) -> None:
-        """Writes one PredictionMetric row directly - used to synthesize background
-        "health-check" traffic for the standby side of a benchmark once the canary
-        has claimed all real traffic (see scenarios.py). Has no `actual_label`
-        parameter: the metrics endpoint doesn't accept one - see MetricIn's
-        docstring. Ground truth for real, labeled predictions flows through
-        `post_labels_batch` instead."""
-        payload = {
-            "model_version": model_version,
-            "latency_ms": latency_ms,
-            "status_code": status_code,
-            "prediction": prediction,
-            "prediction_id": prediction_id,
-        }
-        response = self._client.post(f"/api/deployments/{deployment_id}/metrics", json=payload)
-        response.raise_for_status()
-
     def post_labels_batch(self, labels: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """POSTs a batch of {prediction_id, actual_label, occurred_at} dicts to
         POST /api/labels/batch - the platform's one real ground-truth ingestion

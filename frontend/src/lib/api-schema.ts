@@ -145,7 +145,7 @@ export interface paths {
          * @description Used exclusively by the automated worker (app/worker/) to move the canary to
          *     the next traffic stage after a PASS evaluation. Rejects (409) if the deployment
          *     isn't CANARY_RUNNING/EVALUATING (e.g. a human already acted on it) or if the
-         *     canary is already at 100% (use /promote instead).
+         *     canary is already at the last traffic stage (use /promote instead).
          */
         post: operations["advance_traffic_api_deployments__deployment_id__advance_traffic_post"];
         delete?: never;

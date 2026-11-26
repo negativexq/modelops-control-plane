@@ -250,7 +250,7 @@ async def advance_traffic(
     """Used exclusively by the automated worker (app/worker/) to move the canary to
     the next traffic stage after a PASS evaluation. Rejects (409) if the deployment
     isn't CANARY_RUNNING/EVALUATING (e.g. a human already acted on it) or if the
-    canary is already at 100% (use /promote instead)."""
+    canary is already at the last traffic stage (use /promote instead)."""
     try:
         deployment = service.get_deployment(db, deployment_id)
     except DeploymentNotFoundError as exc:

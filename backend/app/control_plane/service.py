@@ -18,6 +18,7 @@ from app.control_plane.models import (
 from app.control_plane.router_gateway import RouterGateway, RouterUpdateError, StaleRevisionError
 from app.control_plane.state_machine import validate_transition
 from app.policy.config import PolicyConfig, policy_settings
+from app.traffic_stages import TRAFFIC_STAGES
 
 logger = logging.getLogger("control_plane")
 
@@ -27,12 +28,11 @@ logger = logging.getLogger("control_plane")
 # exists - it's history at that point, not the live split.
 ACTIVE_STATUSES = (DeploymentStatus.CANARY_RUNNING, DeploymentStatus.EVALUATING)
 
-# The canary traffic ramp an automated rollout climbs through: 10% -> 25% -> 50% ->
-# 100%. Deliberately not a column on Deployment - "what's the next stage" is always
+# The canary traffic ramp (see app/traffic_stages.py for why it ends at 50%, not
+# 100%). Deliberately not a column on Deployment - "what's the next stage" is always
 # derived from the deployment's current TrafficAllocation (the smallest stage weight
 # strictly greater than the canary's current weight), so it's correct after a worker
 # restart and unaffected by whatever custom canary_weight a deployment started at.
-TRAFFIC_STAGES: tuple[float, ...] = (0.10, 0.25, 0.50, 1.0)
 
 
 class DeploymentNotFoundError(Exception):
@@ -52,8 +52,8 @@ class DeploymentNotActiveError(Exception):
 
 
 class AlreadyAtFinalStageError(Exception):
-    """Raised by advance_traffic when the canary is already at 100% - the caller
-    should promote instead of advancing further."""
+    """Raised by advance_traffic when the canary is already at the last stage of
+    TRAFFIC_STAGES - the caller should promote instead of advancing further."""
 
     def __init__(self, deployment_id: str) -> None:
         self.deployment_id = deployment_id
@@ -662,7 +662,7 @@ async def advance_traffic(
 ) -> Deployment:
     """Move the canary to the next step of TRAFFIC_STAGES. Used exclusively by the
     automated worker (app/worker/) when a policy evaluation comes back PASS and the
-    canary isn't at 100% yet - stays in whatever status the deployment is already in
+    canary isn't at the last stage yet - stays in whatever status the deployment is already in
     (CANARY_RUNNING or EVALUATING); ramping up traffic isn't itself a state-machine
     transition.
     """

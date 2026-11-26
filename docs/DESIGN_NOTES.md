@@ -418,9 +418,22 @@ decision is re-derived from what `GET /api/deployments/{id}` and `GET
 
 The next traffic stage is always "the smallest stage weight above the canary's
 *current* weight" read from its live `TrafficAllocation`
-(`control_plane/service.py::TRAFFIC_STAGES`) — not a stored index — so it's correct
+(`app/traffic_stages.py::TRAFFIC_STAGES`) — not a stored index — so it's correct
 regardless of what custom `canary_weight` the deployment started at, and survives a
 worker restart with zero extra bookkeeping.
+
+**The ramp is 10% → 25% → 50%, and a PASS at 50% promotes.** It used to have a
+100% stage that was evaluated before promoting. At 100% the stable version gets no
+real traffic, so every check that compares the two sides was comparing a canary
+carrying the whole load with an idle stable: `minimum_requests` couldn't be met
+without synthetic traffic, and the latency check measured queueing, not the
+model. The `success` benchmark rolled a healthy v2-good back this way, its p95
+~370 ms under 100 req/s on one container against ~12 ms of probes on stable
+(+2800%, past even that scenario's 2000% limit). A PASS at 50%, with real traffic
+on both sides, is the last evidence that means anything; promoting is what moves
+the canary to 100%. Flagger and Argo Rollouts end their analysis the same way,
+at a max weight below 100%. A deployment created with a larger `canary_weight`
+is already past the last stage, so its first PASS promotes.
 
 **Dedup**: the worker doesn't just sleep-and-poll `evaluation_window_seconds` - it
 checks the deployment's *own* most recent `PolicyEvaluation.evaluated_at` and skips
