@@ -1,4 +1,4 @@
-import { Activity, Boxes, FlaskConical, GitBranch, type LucideIcon } from "lucide-react";
+import { Activity, Boxes, FlaskConical, GitBranch, Waypoints, type LucideIcon } from "lucide-react";
 
 export interface NavItem {
   href: string;
@@ -10,6 +10,7 @@ export interface NavItem {
 export const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Overview", icon: Activity, description: "Fleet status and recent decisions" },
   { href: "/deployments", label: "Deployments", icon: GitBranch, description: "Every canary rollout" },
+  { href: "/gateway", label: "Gateway", icon: Waypoints, description: "Live request flow and the control loop" },
   { href: "/models", label: "Models", icon: Boxes, description: "Registry and new rollouts" },
   { href: "/benchmarks", label: "Benchmarks", icon: FlaskConical, description: "Scripted failure scenarios" },
 ];

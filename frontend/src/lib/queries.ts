@@ -129,6 +129,15 @@ export function useRouterObserved(enabled = true) {
   });
 }
 
+/** Not streamed, and the beams animate from it: poll fast. */
+export function useGatewayView() {
+  return useQuery({
+    queryKey: keys.gateway,
+    queryFn: api.getGatewayView,
+    refetchInterval: 1_500,
+  });
+}
+
 // --- Models ---------------------------------------------------------------------
 
 export function useModels() {

@@ -10,6 +10,7 @@ import type {
   MetricsOut,
   ModelVersionEvaluation,
   ModelVersionMetadata,
+  GatewayView,
   ObservedRouter,
   RunBenchmarkRequest,
   ScenarioInfo,
@@ -143,6 +144,11 @@ export function resumeAutomation(id: string): Promise<DeploymentOut> {
     `/api/deployments/${encodeURIComponent(id)}/resume-automation`,
     { method: "POST" },
   );
+}
+
+/** The router's live gateway view: breakers, readiness, rolling traffic. */
+export function getGatewayView(): Promise<GatewayView> {
+  return request<GatewayView>("/api/router/gateway");
 }
 
 // Read-only - never triggers a push. See ObservedRouter.

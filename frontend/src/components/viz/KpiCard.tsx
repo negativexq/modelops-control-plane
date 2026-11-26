@@ -11,6 +11,7 @@ export function KpiCard({
   hint,
   chart,
   emphasis = false,
+  decimals = 0,
 }: {
   label: string;
   value: number;
@@ -19,6 +20,7 @@ export function KpiCard({
   hint?: ReactNode;
   chart?: ReactNode;
   emphasis?: boolean;
+  decimals?: number;
 }) {
   return (
     <div
@@ -38,7 +40,7 @@ export function KpiCard({
           and sparklines line up across a row of cards whatever the hint length. */}
       <div className="flex h-9 items-end justify-between gap-4">
         <p className="text-3xl leading-none font-semibold tracking-tight tabular">
-          <NumberTicker value={value} />
+          <NumberTicker value={value} decimals={decimals} />
         </p>
         {chart ? <div className="w-24 shrink-0">{chart}</div> : null}
       </div>

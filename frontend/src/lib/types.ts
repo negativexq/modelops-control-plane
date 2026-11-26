@@ -44,6 +44,10 @@ export type MetricsTimeseries = Schemas["MetricsTimeseriesOut"];
 
 export type ObservedModelConfig = Schemas["ObservedModelConfig"];
 export type ObservedRouter = Schemas["ObservedRouterOut"];
+export type GatewayView = Schemas["GatewayOut"];
+export type GatewayModel = Schemas["GatewayModelOut"];
+export type GatewayVersion = Schemas["GatewayVersionOut"];
+export type GatewayPolicy = Schemas["GatewayPolicyOut"];
 
 /** One model's slice of the router, in the shape the UI compares against a
  * deployment's desired state (built by observedFor in queries.ts). */

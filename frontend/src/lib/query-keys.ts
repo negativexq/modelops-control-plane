@@ -8,6 +8,7 @@ export const keys = {
   comparison: (id: string, windowSeconds: number) =>
     ["deployments", id, "comparison", windowSeconds] as const,
   routerObserved: ["router", "observed"] as const,
+  gateway: ["router", "gateway"] as const,
   fleetSummary: ["fleet", "summary"] as const,
   models: ["models"] as const,
   modelVersions: (model: string) => ["models", model, "versions"] as const,
